@@ -164,6 +164,7 @@ const createBlog = async (req, res) => {
   try {
     const {
       title,
+      slug: providedSlug,
       excerpt,
       content,
       structured_content,
@@ -179,8 +180,8 @@ const createBlog = async (req, res) => {
       return res.status(400).json(errorResponse('Title and content (or structured_content) are required'));
     }
 
-    // Generate slug from title
-    let slug = generateSlug(title);
+    // Use provided slug or generate from title
+    let slug = providedSlug ? generateSlug(providedSlug) : generateSlug(title);
     
     // Check if slug already exists
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
@@ -206,10 +207,10 @@ const createBlog = async (req, res) => {
 
     let computedReadTime = incomingReadTime;
 
-    // Process structured content if provided
+    // Process structured content if provided (only when non-empty; empty array is valid when content is HTML)
     let processedStructuredContent = null;
-    if (structured_content && Array.isArray(structured_content)) {
-      // Validate structured content
+    if (structured_content && Array.isArray(structured_content) && structured_content.length > 0) {
+      // Validate structured content only when we have blocks
       const validation = validateStructuredContent(structured_content);
       if (!validation.isValid) {
         return res.status(400).json(errorResponse('Invalid structured content', validation.errors));
@@ -271,6 +272,7 @@ const updateBlog = async (req, res) => {
     const { id } = req.params;
     const {
       title,
+      slug,
       excerpt,
       content,
       structured_content,
@@ -310,12 +312,54 @@ const updateBlog = async (req, res) => {
       updated_at: new Date().toISOString()
     };
 
-    if (title) updateData.title = title;
+    if (title) {
+      updateData.title = title;
+      // If title changed and no slug provided, regenerate slug
+      if (!slug && title !== existingBlog.title) {
+        let newSlug = generateSlug(title);
+        // Check if slug already exists (excluding current blog)
+        const { data: slugExists } = await supabaseAdmin
+          .from('blogs')
+          .select('id')
+          .eq('slug', newSlug)
+          .neq('id', id)
+          .maybeSingle();
+        
+        if (slugExists) {
+          let counter = 1;
+          let finalSlug = `${newSlug}-${counter}`;
+          let checkResult = await supabaseAdmin.from('blogs').select('id').eq('slug', finalSlug).neq('id', id).maybeSingle();
+          while (checkResult.data) {
+            counter++;
+            finalSlug = `${newSlug}-${counter}`;
+            checkResult = await supabaseAdmin.from('blogs').select('id').eq('slug', finalSlug).neq('id', id).maybeSingle();
+          }
+          newSlug = finalSlug;
+        }
+        updateData.slug = newSlug;
+      }
+    }
+    // Allow manual slug updates
+    if (slug !== undefined && slug !== null && slug !== '') {
+      const normalizedSlug = generateSlug(slug);
+      // Check if slug already exists (excluding current blog)
+      const { data: slugExists } = await supabaseAdmin
+        .from('blogs')
+        .select('id')
+        .eq('slug', normalizedSlug)
+        .neq('id', id)
+        .maybeSingle();
+      
+      if (slugExists) {
+        return res.status(400).json(errorResponse('Slug already exists. Please choose a different one.'));
+      }
+      updateData.slug = normalizedSlug;
+    }
     if (excerpt !== undefined) updateData.excerpt = excerpt;
     if (content) updateData.content = content;
     if (structured_content !== undefined) {
-      if (structured_content && Array.isArray(structured_content)) {
-        // Validate structured content
+      if (structured_content && Array.isArray(structured_content) && structured_content.length > 0) {
+        // Validate structured content only when we have blocks
         const validation = validateStructuredContent(structured_content);
         if (!validation.isValid) {
           return res.status(400).json(errorResponse('Invalid structured content', validation.errors));
@@ -328,6 +372,7 @@ const updateBlog = async (req, res) => {
           updateData.read_time_minutes = calculateReadingTime(updateData.structured_content);
         }
       } else {
+        // Empty array or null: allow (e.g. when using HTML content only)
         updateData.structured_content = null;
       }
     }

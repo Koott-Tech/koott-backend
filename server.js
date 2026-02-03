@@ -8,7 +8,9 @@ const {
   requestValidator 
 } = require('./middleware/security');
 const securityMonitor = require('./utils/securityMonitor');
-require('dotenv').config();
+// Load .env from backend directory so it works regardless of where you run the server from
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const authRoutes = require('./routes/auth');
 const clientRoutes = require('./routes/clients');
@@ -854,7 +856,18 @@ app.listen(PORT, () => {
 console.log(`🚀 Little Care Backend running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🔐 Environment: ${process.env.NODE_ENV}`);
-  
+
+  // Auth env check (development): ensure backend uses same Supabase project as frontend
+  if (process.env.NODE_ENV === 'development') {
+    const supabaseUrl = process.env.SUPABASE_URL || '';
+    const supabaseAnon = process.env.SUPABASE_ANON_KEY || '';
+    if (supabaseUrl && supabaseAnon) {
+      console.log('🔑 Auth Supabase URL (must match frontend NEXT_PUBLIC_SUPABASE_URL):', supabaseUrl);
+    } else {
+      console.warn('⚠️  Auth: Set SUPABASE_URL and SUPABASE_ANON_KEY in backend/.env to match frontend NEXT_PUBLIC_* (same Supabase project).');
+    }
+  }
+
   // Start Google Calendar sync service
   calendarSyncService.start();
   

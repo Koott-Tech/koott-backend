@@ -71,9 +71,13 @@ const authenticateToken = async (req, res, next) => {
           if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
             console.error('Supabase token verification failed:', supabaseError);
           }
-          return res.status(401).json({ 
-            error: 'Invalid token', 
-            message: 'Token verification failed' 
+          // Log in production so Render logs show why (no token content)
+          if (process.env.NODE_ENV === 'production') {
+            console.warn('Auth: Supabase token verification failed. Ensure backend SUPABASE_URL and SUPABASE_ANON_KEY match the frontend Supabase project.', supabaseError?.message || 'No user');
+          }
+          return res.status(401).json({
+            error: 'Invalid token',
+            message: 'Token verification failed. If you signed in with Google, ensure this server\'s SUPABASE_URL and SUPABASE_ANON_KEY match your frontend Supabase project. Otherwise ensure JWT_SECRET is set correctly.'
           });
         }
         
@@ -221,9 +225,12 @@ const authenticateToken = async (req, res, next) => {
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.error('Supabase JWT verification failed:', supabaseJwtError);
         }
-        return res.status(401).json({ 
-          error: 'Invalid token', 
-          message: 'Token verification failed' 
+        if (process.env.NODE_ENV === 'production') {
+          console.warn('Auth: Supabase JWT verification threw.', supabaseJwtError?.message || supabaseJwtError);
+        }
+        return res.status(401).json({
+          error: 'Invalid token',
+          message: 'Token verification failed. If you signed in with Google, ensure this server\'s SUPABASE_URL and SUPABASE_ANON_KEY match your frontend Supabase project.'
         });
       }
     }

@@ -2,13 +2,9 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 
-// Generate JWT token with shorter expiry for admin users
+// Generate JWT token - all roles get 30 days (admin, finance, psychologist, superadmin, client, etc.)
 const generateToken = (userId, role) => {
-  // Admin and superadmin tokens expire in 1 hour for security
-  // Regular users get 30 days (or JWT_EXPIRES_IN setting)
-  const expiresIn = (role === 'admin' || role === 'superadmin')
-    ? '1h'  // 1 hour for admins
-    : (process.env.JWT_EXPIRES_IN || '30d'); // Default 30 days for others
+  const expiresIn = process.env.JWT_EXPIRES_IN || '30d';
 
   return jwt.sign(
     { userId, role },
