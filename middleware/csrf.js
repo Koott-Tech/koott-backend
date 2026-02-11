@@ -11,21 +11,28 @@ const validateCSRF = (req, res, next) => {
     return next();
   }
 
-  // Skip for public endpoints (webhooks, public APIs)
-  const publicPaths = ['/payment/webhook', '/auth/login', '/auth/register'];
-  if (publicPaths.some(path => req.path.startsWith(path))) {
+  // Safe boundary-aware public path check (avoids partial matches like /auth/login-admin)
+  const isPublicPath = (path) => {
+    const p = req.path || '';
+    return p === path || p.startsWith(path + '/');
+  };
+  const publicPaths = ['/payment/webhook'];
+  if (publicPaths.some(path => isPublicPath(path))) {
     return next();
   }
 
   // Get allowed origins from environment
-  const allowedOrigins = process.env.ALLOWED_ORIGINS 
-    ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
+  const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim()).filter(Boolean)
     : [];
 
-  // If no origins configured, skip validation (development mode)
   if (allowedOrigins.length === 0) {
     if (process.env.NODE_ENV === 'production') {
-      console.warn('⚠️ CSRF protection disabled: ALLOWED_ORIGINS not configured');
+      console.warn('⚠️ CSRF: ALLOWED_ORIGINS not configured - failing closed');
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'CSRF protection requires ALLOWED_ORIGINS in production'
+      });
     }
     return next();
   }

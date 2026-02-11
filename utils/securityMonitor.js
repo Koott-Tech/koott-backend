@@ -77,21 +77,32 @@ class SecurityMonitor {
 
   // Log security events to database
   async logSecurityEvent(event) {
+    // Mask email for logging
+    const maskEmail = (email) => {
+      if (!email || typeof email !== 'string' || !email.includes('@')) return null;
+      const [local, domain] = email.split('@');
+      const maskedLocal = local.length > 2 
+        ? local.substring(0, 1) + '***' + local.substring(local.length - 1)
+        : '***';
+      return `${maskedLocal}@${domain}`;
+    };
+    
     // Prepare database entry
     const logEntry = {
       event_type: event.type,
       ip_address: event.ip || null,
       user_agent: event.userAgent || null,
-      email: event.email || null,
+      email: maskEmail(event.email), // Use masked email
       reason: event.reason || null,
       url: event.url || null,
       method: event.method || null,
       memory_usage_mb: event.memoryUsage || null,
       event_data: {
-        // Store any additional event data
+        // Store any additional event data (sanitized)
         ...(event.userAgent ? { userAgent: event.userAgent } : {}),
         ...(event.url ? { url: event.url } : {}),
         ...(event.method ? { method: event.method } : {})
+        // Note: email removed from event_data to avoid PII leakage
       },
       timestamp: event.timestamp || new Date().toISOString()
     };
@@ -102,14 +113,16 @@ class SecurityMonitor {
       .insert([logEntry])
       .then(({ error }) => {
         if (error) {
-          // Table might not exist - this is a critical security issue
-          if (error.code === '42P01') { // Table doesn't exist
-            console.error('🚨 CRITICAL: security_logs table not found! Run migration: create_security_logs_table.sql');
-            console.error('🚨 Security log (console only):', JSON.stringify(event, null, 2));
+          // Table might not exist (42P01 = PostgreSQL, PGRST205 = PostgREST)
+          if (error.code === '42P01' || error.code === 'PGRST205') {
+            // Log once at debug level; table may be optional or project uses audit_logs
+            if (process.env.NODE_ENV !== 'production') {
+              console.warn('ℹ️ security_logs table not found; log saved to console only.');
+            }
           } else {
             // Other database errors - log but don't break
             console.error('🚨 Failed to write security log to database:', error);
-            console.error('🚨 Security log (console only):', JSON.stringify(event, null, 2));
+            console.error('🚨 Security log (console only):', JSON.stringify(logEntry, null, 2));
           }
         } else {
           // Only log in non-production to reduce noise
@@ -120,7 +133,7 @@ class SecurityMonitor {
       })
       .catch((err) => {
         console.error('🚨 Exception writing security log:', err);
-        console.error('🚨 Security log (console only):', JSON.stringify(event, null, 2));
+        console.error('🚨 Security log (console only):', JSON.stringify(logEntry, null, 2));
       });
 
     // Console warning for critical events
@@ -139,7 +152,7 @@ class SecurityMonitor {
         .limit(limit);
 
       if (error) {
-        if (error.code === '42P01') {
+        if (error.code === '42P01' || error.code === 'PGRST205') {
           // Table doesn't exist yet - return empty array
           return [];
         }
@@ -147,20 +160,29 @@ class SecurityMonitor {
         return [];
       }
 
-      // Convert database format to old format for backward compatibility
-      return (data || []).map(log => ({
-        id: log.id,
-        type: log.event_type,
-        ip: log.ip_address,
-        userAgent: log.user_agent,
-        email: log.email,
-        reason: log.reason,
-        url: log.url,
-        method: log.method,
-        memoryUsage: log.memory_usage_mb,
-        timestamp: log.timestamp,
-        ...(log.event_data || {})
-      }));
+      // Convert database format to old format; explicit fields override event_data (mirror getRecentEvents)
+      const explicitKeys = ['id', 'type', 'ip', 'userAgent', 'email', 'reason', 'url', 'method', 'memoryUsage', 'timestamp'];
+      return (data || []).map(log => {
+        const sanitizedEventData = {};
+        if (log.event_data) {
+          for (const [key, value] of Object.entries(log.event_data)) {
+            if (!explicitKeys.includes(key)) sanitizedEventData[key] = value;
+          }
+        }
+        return {
+          ...sanitizedEventData,
+          id: log.id,
+          type: log.event_type,
+          ip: log.ip_address,
+          userAgent: log.user_agent,
+          email: log.email,
+          reason: log.reason,
+          url: log.url,
+          method: log.method,
+          memoryUsage: log.memory_usage_mb,
+          timestamp: log.timestamp
+        };
+      });
     } catch (error) {
       console.error('Failed to load security logs:', error);
       return [];
@@ -185,40 +207,55 @@ class SecurityMonitor {
       const supabaseAdmin = getSupabaseAdmin();
 
       // Count blocked requests
-      const { count: blockedCount } = await supabaseAdmin
+      const { count: blockedCount, error: blockedError } = await supabaseAdmin
         .from('security_logs')
         .select('*', { count: 'exact', head: true })
         .eq('event_type', 'BLOCKED_REQUEST')
         .gte('timestamp', oneWeekAgo.toISOString());
+      if (blockedError && blockedError.code !== '42P01' && blockedError.code !== 'PGRST205') {
+        console.error('Failed to count blocked requests:', blockedError);
+      }
 
       // Count bot detections
-      const { count: botCount } = await supabaseAdmin
+      const { count: botCount, error: botError } = await supabaseAdmin
         .from('security_logs')
         .select('*', { count: 'exact', head: true })
         .eq('event_type', 'BOT_DETECTED')
         .gte('timestamp', oneWeekAgo.toISOString());
+      if (botError && botError.code !== '42P01' && botError.code !== 'PGRST205') {
+        console.error('Failed to count bot detections:', botError);
+      }
 
       // Count memory alerts
-      const { count: memoryCount } = await supabaseAdmin
+      const { count: memoryCount, error: memoryError } = await supabaseAdmin
         .from('security_logs')
         .select('*', { count: 'exact', head: true })
         .eq('event_type', 'MEMORY_ALERT')
         .gte('timestamp', oneWeekAgo.toISOString());
+      if (memoryError && memoryError.code !== '42P01' && memoryError.code !== 'PGRST205') {
+        console.error('Failed to count memory alerts:', memoryError);
+      }
 
       // Count auth failures
-      const { count: authCount } = await supabaseAdmin
+      const { count: authCount, error: authError } = await supabaseAdmin
         .from('security_logs')
         .select('*', { count: 'exact', head: true })
         .eq('event_type', 'AUTH_FAILURE')
         .gte('timestamp', oneWeekAgo.toISOString());
+      if (authError && authError.code !== '42P01' && authError.code !== 'PGRST205') {
+        console.error('Failed to count auth failures:', authError);
+      }
 
       // Get unique suspicious IPs
-      const { data: ipData } = await supabaseAdmin
+      const { data: ipData, error: ipError } = await supabaseAdmin
         .from('security_logs')
         .select('ip_address')
         .eq('event_type', 'BLOCKED_REQUEST')
         .gte('timestamp', oneWeekAgo.toISOString())
         .not('ip_address', 'is', null);
+      if (ipError && ipError.code !== '42P01' && ipError.code !== 'PGRST205') {
+        console.error('Failed to get suspicious IPs:', ipError);
+      }
 
       const uniqueIPs = new Set((ipData || []).map(log => log.ip_address).filter(Boolean));
 
@@ -273,7 +310,7 @@ class SecurityMonitor {
         .limit(limit);
 
       if (error) {
-        if (error.code === '42P01') {
+        if (error.code === '42P01' || error.code === 'PGRST205') {
           // Table doesn't exist yet
           return [];
         }
@@ -282,19 +319,33 @@ class SecurityMonitor {
       }
 
       // Convert database format to old format for backward compatibility
-      return (data || []).map(log => ({
-        id: log.id,
-        type: log.event_type,
-        ip: log.ip_address,
-        userAgent: log.user_agent,
-        email: log.email,
-        reason: log.reason,
-        url: log.url,
-        method: log.method,
-        memoryUsage: log.memory_usage_mb,
-        timestamp: log.timestamp,
-        ...(log.event_data || {})
-      }));
+      // Ensure explicit fields override event_data to prevent overwriting
+      return (data || []).map(log => {
+        // Extract non-conflicting fields from event_data
+        const sanitizedEventData = {};
+        if (log.event_data) {
+          const explicitFields = ['id', 'type', 'ip', 'userAgent', 'email', 'reason', 'url', 'method', 'memoryUsage', 'timestamp'];
+          for (const [key, value] of Object.entries(log.event_data)) {
+            if (!explicitFields.includes(key)) {
+              sanitizedEventData[key] = value;
+            }
+          }
+        }
+        
+        return {
+          ...sanitizedEventData, // Spread sanitized event_data first
+          id: log.id,
+          type: log.event_type,
+          ip: log.ip_address,
+          userAgent: log.user_agent,
+          email: log.email,
+          reason: log.reason,
+          url: log.url,
+          method: log.method,
+          memoryUsage: log.memory_usage_mb,
+          timestamp: log.timestamp
+        };
+      });
     } catch (error) {
       console.error('Failed to get recent security events:', error);
       return [];
@@ -312,29 +363,49 @@ class SecurityMonitor {
 // Create singleton instance
 const securityMonitor = new SecurityMonitor();
 
-// Don't load metrics immediately - wait for dotenv to load first
-// Metrics will be loaded when first needed or by the interval below
+// Module-level interval ID for cleanup
+let securityMonitorIntervalId = null;
 
-// Refresh metrics every 5 minutes (starts after first interval)
-// This ensures dotenv is loaded before first call
-setTimeout(() => {
-  // Initial load after a short delay to ensure dotenv is loaded
-  securityMonitor.loadMetrics().catch(err => {
+/**
+ * Initialize security monitor
+ * Extracts startup logic for explicit initialization
+ * @returns {Promise<void>}
+ */
+async function initializeSecurityMonitor() {
+  try {
+    // Initial load
+    await securityMonitor.loadMetrics();
+    
+    // Set up periodic refresh (every 5 minutes) and store interval ID
+    securityMonitorIntervalId = setInterval(() => {
+      securityMonitor.loadMetrics().catch(err => {
+        // Silently fail - metrics are not critical for operation
+        if (process.env.NODE_ENV === 'development') {
+          console.error('Failed to refresh security metrics:', err);
+        }
+      });
+    }, 5 * 60 * 1000);
+  } catch (err) {
     // Silently fail on first load - it's expected if dotenv isn't loaded yet
     if (process.env.NODE_ENV === 'development') {
-      // Only log in development for debugging
+      console.error('Failed to initialize security monitor:', err);
     }
-  });
-  
-  // Then set up periodic refresh
-  setInterval(() => {
-    securityMonitor.loadMetrics().catch(err => {
-      // Silently fail - metrics are not critical for operation
-      if (process.env.NODE_ENV === 'development') {
-        console.error('Failed to refresh security metrics:', err);
-      }
-    });
-  }, 5 * 60 * 1000);
-}, 1000); // Wait 1 second for dotenv to load
+  }
+}
+
+/**
+ * Stop security monitor (for graceful shutdown)
+ * @returns {Promise<void>}
+ */
+async function stopSecurityMonitor() {
+  if (securityMonitorIntervalId) {
+    clearInterval(securityMonitorIntervalId);
+    securityMonitorIntervalId = null;
+  }
+  // Cancel any in-flight loadMetrics promise if needed
+  // (Note: Promises can't be cancelled, but we've stopped scheduling new ones)
+}
 
 module.exports = securityMonitor;
+module.exports.initializeSecurityMonitor = initializeSecurityMonitor;
+module.exports.stopSecurityMonitor = stopSecurityMonitor;

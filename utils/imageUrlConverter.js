@@ -46,6 +46,11 @@ function convertToSupabaseUrl(proxyUrl, supabaseUrl) {
   if (!proxyUrl || typeof proxyUrl !== 'string') {
     return null;
   }
+  
+  // Validate supabaseUrl parameter
+  if (!supabaseUrl || typeof supabaseUrl !== 'string') {
+    return null;
+  }
 
   // Check if it's already a Supabase URL
   if (proxyUrl.includes('.supabase.co/storage/')) {
@@ -64,8 +69,8 @@ function convertToSupabaseUrl(proxyUrl, supabaseUrl) {
   const bucket = match[1];
   const filePath = match[2];
 
-  // Extract project ID from Supabase URL
-  const projectId = supabaseUrl?.match(/https:\/\/([^.]+)\.supabase\.co/)?.[1];
+  // Extract project ID from Supabase URL (safe now that supabaseUrl is validated)
+  const projectId = supabaseUrl.match(/https:\/\/([^.]+)\.supabase\.co/)?.[1];
   if (!projectId) {
     return null;
   }
@@ -82,7 +87,13 @@ function convertToSupabaseUrl(proxyUrl, supabaseUrl) {
  * @returns {string} Converted URL
  */
 function convertImageUrl(imageUrl, frontendUrl = 'https://www.little.care') {
-  if (!imageUrl) return imageUrl;
+  // Validate and coerce input to string
+  if (!imageUrl) return '';
+  if (typeof imageUrl !== 'string') {
+    const imageUrlString = String(imageUrl);
+    if (!imageUrlString) return '';
+    imageUrl = imageUrlString;
+  }
 
   // If proxy is enabled, convert to proxy URL
   if (process.env.USE_IMAGE_PROXY === 'true') {
@@ -106,8 +117,7 @@ function convertImageUrl(imageUrl, frontendUrl = 'https://www.little.care') {
  * @returns {string|null} File path or null
  */
 function extractFilePath(supabaseUrl) {
-  if (!supabaseUrl) return null;
-
+  if (typeof supabaseUrl !== 'string' || !supabaseUrl.trim()) return null;
   const pattern = /\/storage\/v1\/object\/public\/[^\/]+\/(.+)/;
   const match = supabaseUrl.match(pattern);
   return match ? match[1] : null;
@@ -119,8 +129,7 @@ function extractFilePath(supabaseUrl) {
  * @returns {string|null} Bucket name or null
  */
 function extractBucketName(supabaseUrl) {
-  if (!supabaseUrl) return null;
-
+  if (typeof supabaseUrl !== 'string' || !supabaseUrl.trim()) return null;
   const pattern = /\/storage\/v1\/object\/public\/([^\/]+)\//;
   const match = supabaseUrl.match(pattern);
   return match ? match[1] : null;

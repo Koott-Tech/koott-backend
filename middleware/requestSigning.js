@@ -38,13 +38,18 @@ function verifySignature(req, secret) {
     return { valid: false, error: 'Missing signature headers' };
   }
 
-  // Check timestamp (prevent replay attacks - 5 minute window)
+  // Check timestamp first (prevent replay attacks - 5 minute window)
   const requestTime = parseInt(timestamp, 10);
   const now = Date.now();
   const timeDiff = Math.abs(now - requestTime);
 
   if (timeDiff > 5 * 60 * 1000) { // 5 minutes
     return { valid: false, error: 'Request timestamp too old or too far in future' };
+  }
+
+  // Replay check: reject if nonce already seen (do not cache nonce until signature is verified)
+  if (verifySignature._nonceCache && verifySignature._nonceCache.has(nonce)) {
+    return { valid: false, error: 'Replay detected' };
   }
 
   // Verify signature
@@ -57,22 +62,27 @@ function verifySignature(req, secret) {
     secret
   );
 
-  // Constant-time comparison to prevent timing attacks
   if (signature.length !== expectedSignature.length) {
     return { valid: false, error: 'Invalid signature' };
   }
-
-  let result = 0;
-  for (let i = 0; i < signature.length; i++) {
-    result |= signature.charCodeAt(i) ^ expectedSignature.charCodeAt(i);
-  }
-
-  if (result !== 0) {
+  try {
+    const sigBuf = Buffer.from(signature, 'utf8');
+    const expBuf = Buffer.from(expectedSignature, 'utf8');
+    if (!crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return { valid: false, error: 'Invalid signature' };
+    }
+  } catch (e) {
     return { valid: false, error: 'Invalid signature' };
   }
 
+  // Cache nonce only after signature verification succeeds (prevents DoS from caching nonces of invalid requests)
+  if (verifySignature._nonceCache) {
+    verifySignature._nonceCache.set(nonce, true);
+    setTimeout(() => verifySignature._nonceCache.delete(nonce), 5 * 60 * 1000);
+  }
   return { valid: true };
 }
+verifySignature._nonceCache = new Map();
 
 /**
  * Request signing middleware for critical operations
@@ -83,7 +93,13 @@ const requireRequestSignature = (req, res, next) => {
   const signingSecret = process.env.REQUEST_SIGNING_SECRET;
 
   if (!signingSecret) {
-    // If secret not configured, skip signing (backward compatibility)
+    if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod') {
+      console.error('❌ REQUEST_SIGNING_SECRET required in production');
+      return res.status(500).json({
+        error: 'Server configuration error',
+        message: 'Request signing is required in production'
+      });
+    }
     console.warn('⚠️ REQUEST_SIGNING_SECRET not configured. Request signing disabled.');
     return next();
   }
@@ -107,7 +123,7 @@ const requireRequestSignature = (req, res, next) => {
         error: verification.error,
         ip: req.ip
       },
-      ip: req.ip || req.connection.remoteAddress,
+      ip: req.ip || req.socket.remoteAddress,
       userAgent: req.headers['user-agent'] || 'Unknown'
     }).catch(err => {
       console.error('Error logging signature failure:', err);

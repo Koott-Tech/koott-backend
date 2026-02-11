@@ -23,38 +23,33 @@ const createRateLimiters = () => {
     // Custom key generator for better tracking
     // Use IP only for payment endpoints to avoid blocking legitimate duplicate requests
     keyGenerator: (req) => {
-      const url = req.url || req.path || '';
-      if (url.includes('/payment/')) {
+      const path = req.path || (req.url ? req.url.split('?')[0] : '');
+      if (path.startsWith('/payment/')) {
         // For payment endpoints, use IP only (Razorpay may send multiple requests with same IP)
         return req.ip || 'unknown';
       }
       // For other endpoints, use IP + User-Agent
       return `${req.ip}-${req.headers['user-agent']?.slice(0, 50) || 'unknown'}`;
     },
-    // Skip rate limiting for payment success endpoints (Razorpay may send duplicates)
-    // Also skip for payment-related endpoints to prevent blocking legitimate payment flows
+    // Payment endpoints are subject to rate limiting here; signature verification happens in the webhook handler and a separate webhookLimiter is used for webhook routes.
+    // Use strict path matching instead of includes() to prevent bypass
     skip: (req) => {
       const url = req.url || req.path || '';
-      // Allow payment success callbacks to bypass rate limiting
-      // Razorpay may send multiple callbacks for the same payment
-      if (url.includes('/payment/success') || 
-          url.includes('/payment/failure') ||
-          url.includes('/payment/verify') ||
-          url.includes('/payment/status')) {
-        return true;
+      const path = req.path || url.split('?')[0];
+      
+      // Strict path matching for payment endpoints
+      // Note: Signature verification happens in webhook handler, not here
+      // These endpoints use a dedicated webhookLimiter with higher threshold (see route setup)
+      // Do not bypass rate limiting based on unverified header presence
+      const paymentPaths = ['/payment/success', '/payment/failure', '/payment/verify', '/payment/status'];
+      if (paymentPaths.some(p => path === p || path.startsWith(p + '/'))) {
+        // Apply rate limiting - webhook handler will verify signature
+        return false;
       }
+      
       // Allow health check and status endpoints
-      if (url.includes('/health') || url.includes('/status')) {
+      if (path === '/health' || path === '/status' || path.startsWith('/health/') || path.startsWith('/status/')) {
         return true;
-      }
-      // Allow more requests for international users (detect via Accept-Language header)
-      const acceptLanguage = req.headers['accept-language'] || '';
-      const userAgent = req.headers['user-agent'] || '';
-      const isInternational = /ar|fr|de|es|zh|ja|ko/i.test(acceptLanguage);
-      const isMobile = /Mobile|Android|iPhone|iPad/i.test(userAgent);
-      // Give international mobile users more leniency
-      if (isInternational && isMobile) {
-        return false; // Don't skip, but they get higher limit (150 instead of 100)
       }
       return false;
     },

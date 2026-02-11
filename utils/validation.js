@@ -57,6 +57,13 @@ const validateClientProfile = [
     .withMessage('Child name must be between 2 and 50 characters if provided'),
   body('child_age')
     .optional({ nullable: true, checkFalsy: true })
+    .custom((value) => {
+      // Explicitly reject 0 while allowing null/undefined/empty string
+      if (value === 0 || value === '0') {
+        throw new Error('Child age cannot be 0');
+      }
+      return true;
+    })
     .isInt({ min: 1, max: 18 })
     .withMessage('Child age must be between 1 and 18 years if provided'),
   handleValidationErrors

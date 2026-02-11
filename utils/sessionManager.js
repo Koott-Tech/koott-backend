@@ -80,42 +80,46 @@ class SessionManager {
   /**
    * Get all active sessions for a user
    * @param {string} userId - User ID
-   * @returns {Promise<Array>}
+   * @returns {Promise<{sessions: Array, error: Error|null}>}
    */
   async getUserSessions(userId) {
     try {
       if (!userId) {
-        return [];
+        return { 
+          sessions: null, 
+          error: new Error('Missing required parameter: userId') 
+        };
       }
 
       if (this.useDatabase) {
         try {
           const { data, error } = await supabaseAdmin
             .from('user_sessions')
-            .select('*')
+            .select('id, user_id, expires_at, last_activity, created_at, ip_address, user_agent')
             .eq('user_id', userId)
             .gt('expires_at', new Date().toISOString())
             .order('last_activity', { ascending: false });
 
           if (error) {
             if (error.code === '42P01') {
-              return [];
+              // Table doesn't exist - return empty with no error
+              return { sessions: [], error: null };
             }
             console.error('❌ Error getting user sessions:', error);
-            return [];
+            return { sessions: [], error };
           }
 
-          return data || [];
+          return { sessions: data || [], error: null };
         } catch (dbError) {
           console.error('❌ Database error getting sessions:', dbError);
-          return [];
+          return { sessions: [], error: dbError };
         }
       }
 
-      return [];
+      return { sessions: [], error: null };
     } catch (error) {
       console.error('❌ Error getting user sessions:', error);
-      return [];
+      return { sessions: [], error };
     }
   }
 
@@ -133,11 +137,12 @@ class SessionManager {
 
       if (this.useDatabase) {
         try {
-          const { error } = await supabaseAdmin
+          const { data: deletedRows, error } = await supabaseAdmin
             .from('user_sessions')
             .delete()
             .eq('id', sessionId)
-            .eq('user_id', userId); // Verify ownership
+            .eq('user_id', userId) // Verify ownership
+            .select('id');
 
           if (error) {
             if (error.code === '42P01') {
@@ -145,6 +150,10 @@ class SessionManager {
             }
             console.error('❌ Error revoking session:', error);
             return { success: false, error: error.message };
+          }
+
+          if (!deletedRows || deletedRows.length === 0) {
+            return { success: false, error: 'Session not found or not owned by user' };
           }
 
           return { success: true };
@@ -202,6 +211,49 @@ class SessionManager {
   }
 
   /**
+   * Revoke all sessions except the one matching the current token
+   * Uses token_hash internally (never exposed)
+   * @param {string} userId - User ID
+   * @param {string} currentToken - JWT of the session to keep
+   * @returns {Promise<{success: boolean, revokedCount?: number}>}
+   */
+  async revokeOtherSessions(userId, currentToken) {
+    if (!userId || !currentToken) {
+      return { success: false, error: 'User ID and token required' };
+    }
+    
+    if (!this.useDatabase) {
+      return { success: false, error: 'Database not available' };
+    }
+    
+    const currentHash = this.hashToken(currentToken);
+    try {
+      // Use single DELETE query instead of N+1 pattern
+      const { data: deletedRows, error } = await supabaseAdmin
+        .from('user_sessions')
+        .delete()
+        .eq('user_id', userId)
+        .neq('token_hash', currentHash)
+        .gt('expires_at', new Date().toISOString())
+        .select('id');
+
+      if (error) {
+        if (error.code === '42P01') {
+          return { success: false, error: 'Sessions table not found' };
+        }
+        console.error('❌ Error revoking other sessions:', error);
+        return { success: false, error: error.message };
+      }
+      
+      const revokedCount = deletedRows?.length || 0;
+      return { success: true, revokedCount };
+    } catch (e) {
+      console.error('❌ Error in revokeOtherSessions:', e);
+      return { success: false, error: e.message };
+    }
+  }
+
+  /**
    * Update session last activity
    * @param {string} token - JWT token
    * @returns {Promise<void>}
@@ -219,11 +271,13 @@ class SessionManager {
             .update({ last_activity: new Date().toISOString() })
             .eq('token_hash', tokenHash);
         } catch (dbError) {
-          // Silently fail - not critical
+          // Log error instead of silently failing
+          console.debug('Failed updating session activity:', dbError.message || dbError);
         }
       }
     } catch (error) {
-      // Silently fail - not critical
+      // Log error instead of silently failing
+      console.debug('Failed updating session activity (hashing error):', error.message || error);
     }
   }
 }

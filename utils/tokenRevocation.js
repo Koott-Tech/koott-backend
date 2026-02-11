@@ -12,7 +12,7 @@ const crypto = require('crypto');
 
 class TokenRevocationService {
   constructor() {
-    this.revokedTokens = new Set(); // In-memory set for fast lookups
+    this.revokedTokens = new Map(); // In-memory map for fast lookups (Map<tokenHash, revokedAt>)
     this.useDatabase = true; // Use database for persistence
     this.useCache = true; // Use cache as fallback/secondary storage
   }
@@ -42,8 +42,8 @@ class TokenRevocationService {
       const tokenHash = this.hashToken(token);
       const expiresAt = new Date(Date.now() + ttl).toISOString();
 
-      // Add to in-memory set for fast lookups
-      this.revokedTokens.add(token);
+      // Add to in-memory map for fast lookups (store hash, not raw token)
+      this.revokedTokens.set(tokenHash, Date.now());
 
       // Store in cache as backup
       if (this.useCache) {
@@ -77,7 +77,8 @@ class TokenRevocationService {
         }
       }
 
-      console.log('🔒 Token revoked:', token.substring(0, 20) + '...');
+      // Log token hash instead of substring to avoid leaking JWT header/payload
+      console.log('🔒 Token revoked:', tokenHash.substring(0, 12) + '...');
       return { success: true };
     } catch (error) {
       console.error('❌ Error revoking token:', error);
@@ -96,20 +97,20 @@ class TokenRevocationService {
         return false;
       }
 
-      // Check in-memory set first (fastest)
-      if (this.revokedTokens.has(token)) {
+      const tokenHash = this.hashToken(token);
+
+      // Check in-memory map first (fastest) - using hash
+      if (this.revokedTokens.has(tokenHash)) {
         return true;
       }
-
-      const tokenHash = this.hashToken(token);
 
       // Check cache
       if (this.useCache) {
         const cacheKey = `revoked_token:${tokenHash}`;
         const isRevoked = globalCache.get(cacheKey);
         if (isRevoked) {
-          // Add back to in-memory set for faster future lookups
-          this.revokedTokens.add(token);
+          // Add back to in-memory map for faster future lookups (using hash)
+          this.revokedTokens.set(tokenHash, Date.now());
           return true;
         }
       }
@@ -150,7 +151,7 @@ class TokenRevocationService {
               return false; // Fail-open: Allow token if database check fails due to timeout
             }
             
-            // For other database errors, log cleanly and fail-open
+            // For other database errors, log cleanly and fail-open (consistent with try-path)
             console.error('❌ Database error checking token revocation (allowing token):', {
               message: error.message?.substring(0, 200) || 'Unknown error',
               code: error.code,
@@ -162,8 +163,8 @@ class TokenRevocationService {
           }
 
           if (data) {
-            // Token is revoked, add to in-memory set and cache
-            this.revokedTokens.add(token);
+            // Token is revoked, add to in-memory map and cache (using hash)
+            this.revokedTokens.set(tokenHash, Date.now());
             if (this.useCache) {
               const expiresAt = new Date(data.expires_at).getTime();
               const ttl = expiresAt - Date.now();
@@ -188,21 +189,20 @@ class TokenRevocationService {
             // Network/timeout error - fail-open (allow token) for availability
             console.warn('⚠️ Database timeout checking token revocation (allowing token):', 
               errorMessage.substring(0, 100) + (errorMessage.length > 100 ? '...' : ''));
+            return false; // Fail-open for timeout errors
           } else {
-            // Other errors - log cleanly
+            // Other errors - fail-open for consistency with API error path above
             console.error('❌ Error checking token revocation in database (allowing token):', 
               errorMessage.substring(0, 200) + (errorMessage.length > 200 ? '...' : ''));
+            return false;
           }
-          // Fail-open: Allow token if check fails (cache/memory still provides protection)
-          return false;
         }
       }
 
       return false;
     } catch (error) {
       console.error('❌ Error checking token revocation:', error);
-      // Fail secure: reject token on error (security over availability)
-      return true;
+      return false; // Fail-open: allow token if check fails
     }
   }
 
@@ -353,15 +353,23 @@ class TokenRevocationService {
    * Cleanup old revoked tokens from memory (periodic cleanup)
    */
   cleanup() {
-    // In-memory set will grow, but tokens are short-lived
+    // In-memory map will grow, but tokens are short-lived
     // For production, consider using Redis with TTL
-    // This is a simple cleanup to prevent memory bloat
+    // Use timestamp-based LRU cleanup to prevent memory bloat
     if (this.revokedTokens.size > 10000) {
-      console.log('🧹 Cleaning up revoked tokens set (size:', this.revokedTokens.size, ')');
-      // Keep only last 5000 entries (simple approach)
-      // In production, use Redis with automatic TTL
-      const tokensArray = Array.from(this.revokedTokens);
-      this.revokedTokens = new Set(tokensArray.slice(-5000));
+      console.log('🧹 Cleaning up revoked tokens map (size:', this.revokedTokens.size, ')');
+      // Sort by revokedAt timestamp and keep only most recent 5000 entries
+      const entriesArray = Array.from(this.revokedTokens.entries())
+        .sort((a, b) => b[1] - a[1]) // Sort by revokedAt descending (newest first)
+        .slice(0, 5000); // Keep top 5000
+      
+      // In-place pruning: delete old entries instead of reassigning Map
+      const keysToKeep = new Set(entriesArray.map(([key]) => key));
+      for (const key of this.revokedTokens.keys()) {
+        if (!keysToKeep.has(key)) {
+          this.revokedTokens.delete(key);
+        }
+      }
     }
   }
 }

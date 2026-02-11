@@ -18,10 +18,19 @@ router.use(authenticateToken);
  */
 router.get('/', async (req, res) => {
   try {
-    const sessions = await sessionManager.getUserSessions(req.user.id);
+    const { sessions, error } = await sessionManager.getUserSessions(req.user.id);
+    
+    // Handle errors from getUserSessions
+    if (error) {
+      console.error('Error getting sessions:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to retrieve sessions'
+      });
+    }
     
     // Remove sensitive data (token_hash)
-    const sanitizedSessions = sessions.map(session => ({
+    const sanitizedSessions = (sessions || []).map(session => ({
       id: session.id,
       ip_address: session.ip_address,
       user_agent: session.user_agent,
@@ -83,26 +92,28 @@ router.delete('/', async (req, res) => {
   try {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Authorization token is required' 
+      });
+    }
+
+    // Always use revokeOtherSessions when token is present (preserves current session)
+    const result = await sessionManager.revokeOtherSessions(req.user.id, token);
     
-    if (token) {
-      // Get all sessions
-      const sessions = await sessionManager.getUserSessions(req.user.id);
-      const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
-      
-      // Revoke all except current
-      for (const session of sessions) {
-        if (session.token_hash !== tokenHash) {
-          await sessionManager.revokeSession(session.id, req.user.id);
-        }
-      }
-    } else {
-      // If no token, revoke all
-      await sessionManager.revokeAllUserSessions(req.user.id);
+    if (!result.success) {
+      return res.status(500).json({ 
+        success: false, 
+        error: result.error || 'Failed to revoke sessions' 
+      });
     }
 
     res.json({
       success: true,
-      message: 'All other sessions revoked successfully'
+      message: 'Other sessions revoked',
+      revokedCount: result.revokedCount || 0
     });
   } catch (error) {
     console.error('Error revoking all sessions:', error);

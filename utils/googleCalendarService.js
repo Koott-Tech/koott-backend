@@ -34,9 +34,10 @@ class GoogleCalendarService {
    * @param {Date} timeMin - Start time
    * @param {Date} timeMax - End time
    * @param {string} syncToken - Optional sync token for incremental sync
+   * @param {number} retryCount - Internal retry counter (prevents infinite recursion)
    * @returns {Promise<Object>} Object with events array and nextSyncToken
    */
-  async getCalendarEvents(credentials, calendarId = 'primary', timeMin, timeMax, syncToken = null) {
+  async getCalendarEvents(credentials, calendarId = 'primary', timeMin, timeMax, syncToken = null, retryCount = 0) {
     try {
       const oauth2Client = this.createOAuthClient(credentials);
       
@@ -71,15 +72,23 @@ class GoogleCalendarService {
       // Handle sync token expiration (410 error) - need full sync
       if (error.code === 410) {
         console.warn('⚠️ Sync token expired, falling back to full sync');
+        // Validate and normalize timeMin/timeMax before retry
+        const safeTimeMin = timeMin && timeMin instanceof Date ? timeMin : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000); // 1 year ago
+        const safeTimeMax = timeMax && timeMax instanceof Date ? timeMax : new Date(); // Now
         // Retry without sync token (full sync)
-        return this.getCalendarEvents(credentials, calendarId, timeMin, timeMax, null);
+        return this.getCalendarEvents(credentials, calendarId, safeTimeMin, safeTimeMax, null, retryCount);
       }
       
-      // Handle token refresh if needed
+      // Handle token refresh if needed (with retry guard)
       if (error.code === 401) {
-        await this.refreshAccessToken(credentials);
-        // Retry the request
-        return this.getCalendarEvents(credentials, calendarId, timeMin, timeMax, syncToken);
+        if (retryCount >= 1) {
+          // Already retried once - prevent infinite recursion
+          console.error('❌ Token refresh retry limit reached, aborting');
+          throw new Error('Token refresh failed after retry');
+        }
+        const updatedCredentials = await this.refreshAccessToken(credentials);
+        // Retry the request with refreshed credentials
+        return this.getCalendarEvents(updatedCredentials, calendarId, timeMin, timeMax, syncToken, retryCount + 1);
       }
       
       throw error;

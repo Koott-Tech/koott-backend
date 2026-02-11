@@ -104,17 +104,22 @@ const register = async (req, res) => {
       }
     }
 
-    // Validate password against policy
-    if (password) {
-      const passwordValidation = validatePassword(password);
-      if (!passwordValidation.valid) {
-        return res.status(400).json(
-          errorResponse('Password does not meet requirements', passwordValidation.errors)
-        );
-      }
+    // Enforce password presence first
+    if (!password || typeof password !== 'string' || password.trim() === '') {
+      return res.status(400).json(
+        errorResponse('Password is required')
+      );
     }
 
-    // Hash password
+    // Validate password against policy
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.valid) {
+      return res.status(400).json(
+        errorResponse('Password does not meet requirements', passwordValidation.errors)
+      );
+    }
+
+    // Hash password only after validation succeeds
     const hashedPassword = await hashPassword(password);
 
     let user, profileData;
@@ -155,6 +160,14 @@ const register = async (req, res) => {
 
       console.log('✅ User created successfully:', { id: newUser.id, email: newUser.email });
 
+      const childName = req.body.child_name?.trim();
+      if (!childName) {
+        await supabaseAdmin.from('users').delete().eq('id', newUser.id);
+        return res.status(400).json(
+          errorResponse('Child name is required for client registration')
+        );
+      }
+
       // Then create client record with user_id reference
       const { data: client, error: clientError } = await supabaseAdmin
         .from('clients')
@@ -163,7 +176,7 @@ const register = async (req, res) => {
           first_name: req.body.first_name || 'Pending',
           last_name: req.body.last_name || '', // Use empty string instead of 'Update' since we only use full name as first_name
           phone_number: req.body.phone_number || '+91',
-          child_name: req.body.child_name?.trim() || 'Pending', // Use 'Pending' as default since column has NOT NULL constraint
+          child_name: childName,
           child_age: req.body.child_age || 1,
           client_message: req.body.client_message?.trim() || null,
           terms_accepted: req.body.terms_accepted || false,
@@ -674,7 +687,28 @@ const login = async (req, res) => {
       const token = generateToken(psychologist.id, 'psychologist');
 
       // Create session (reuse ip variable from above)
-      await sessionManager.createSession(psychologist.id, token, ip, req.headers['user-agent'] || 'Unknown');
+      try {
+        await sessionManager.createSession(psychologist.id, token, ip, req.headers['user-agent'] || 'Unknown');
+      } catch (sessionError) {
+        await auditLogger.logAction({
+          userId: psychologist.id,
+          userEmail: email,
+          userRole: 'psychologist',
+          action: 'SESSION_CREATION_FAILED',
+          resource: 'authentication',
+          resourceId: psychologist.id,
+          endpoint: '/api/auth/login',
+          method: 'POST',
+          details: { 
+            error: sessionError.message,
+            psychologistId: psychologist.id,
+            tokenPrefix: token.substring(0, 8) + '...'
+          },
+          ip: ip,
+          userAgent: req.headers['user-agent'] || 'Unknown'
+        }).catch(err => console.error('Error logging session creation failure:', err));
+        // Continue with login flow even if session creation fails
+      }
 
       res.json(
         successResponse({
@@ -854,31 +888,6 @@ const login = async (req, res) => {
       }
     }
 
-    if (!user) {
-      // Record failed attempt (don't reveal user doesn't exist)
-      const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-      await accountLockoutService.recordFailedAttempt(email, ip);
-      
-      // Log failed login attempt
-      await auditLogger.logAction({
-        userId: null,
-        userEmail: email,
-        userRole: 'unknown',
-        action: 'LOGIN_FAILED',
-        resource: 'authentication',
-        resourceId: null,
-        endpoint: '/api/auth/login',
-        method: 'POST',
-        details: { reason: 'User not found' },
-        ip: ip,
-        userAgent: req.headers['user-agent'] || 'Unknown'
-      }).catch(err => console.error('Error logging failed login:', err));
-      
-      return res.status(401).json(
-        errorResponse('Invalid email or password')
-      );
-    }
-
     // Log successful login
     const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
     await auditLogger.logAction({
@@ -915,7 +924,28 @@ const login = async (req, res) => {
     const token = generateToken(user.id, userRole);
 
     // Create session (reuse ip variable from above)
-    await sessionManager.createSession(user.id, token, ip, req.headers['user-agent'] || 'Unknown');
+    try {
+      await sessionManager.createSession(user.id, token, ip, req.headers['user-agent'] || 'Unknown');
+    } catch (sessionError) {
+      await auditLogger.logAction({
+        userId: user.id,
+        userEmail: email,
+        userRole: userRole,
+        action: 'SESSION_CREATION_FAILED',
+        resource: 'authentication',
+        resourceId: user.id,
+        endpoint: '/api/auth/login',
+        method: 'POST',
+        details: { 
+          error: sessionError.message,
+          userId: user.id,
+          tokenPrefix: token.substring(0, 8) + '...'
+        },
+        ip: ip,
+        userAgent: req.headers['user-agent'] || 'Unknown'
+      }).catch(err => console.error('Error logging session creation failure:', err));
+      // Continue with login flow even if session creation fails
+    }
 
     res.json(
       successResponse({

@@ -1,17 +1,20 @@
 /**
  * Payment Status Controller
  * 
- * READ-ONLY endpoint for checking payment and session status.
+ * Endpoint for checking payment and session status.
  * 
  * This endpoint:
  * - Does NOT create sessions (webhook does that)
- * - Only returns current status
+ * - Returns current status
  * - Used by frontend to poll for session creation
- * - Fully idempotent (read-only)
+ * - Performs optional reconciliation writes (updates payment.session_id when session is found)
+ * - Idempotent except for optional reconciliation writes
  */
 
 const { supabaseAdmin } = require('../config/supabase');
 const { getSlotLockByOrderId } = require('../services/slotLockService');
+const { getRazorpayInstance, getRazorpayConfig, verifyPaymentSignature: verifyRazorpaySignature } = require('../config/razorpay');
+const { processPaymentCaptured } = require('./razorpayWebhookController');
 
 /**
  * Get booking status by order ID
@@ -35,16 +38,36 @@ const getBookingStatusByOrderId = async (req, res) => {
       });
     }
 
+    // Validate orderId format - must be non-guessable (UUID or cryptographically random string)
+    // Razorpay order IDs are typically 14 characters alphanumeric, but we'll accept any reasonable format
+    // Reject obviously predictable patterns
+    if (orderId.length < 10 || /^[0-9]+$/.test(orderId)) {
+      // Sequential numeric IDs are predictable - reject them
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid order ID format'
+      });
+    }
+
     if (process.env.NODE_ENV !== 'production') {
       console.log('🔍 Checking booking status for order:', orderId?.substring(0, 10) + '...');
     }
 
     // Get payment record first (always check this)
-    const { data: paymentRecord } = await supabaseAdmin
+    const { data: paymentRecord, error: paymentError } = await supabaseAdmin
       .from('payments')
       .select('id, status, amount, session_id, created_at, completed_at, psychologist_id, client_id, razorpay_params')
       .eq('razorpay_order_id', orderId)
       .maybeSingle();
+
+    if (paymentError) {
+      console.error('Error fetching payment record:', paymentError);
+      return res.status(500).json({
+        success: false,
+        message: 'Database error while fetching payment',
+        status: 'ERROR'
+      });
+    }
 
     if (!paymentRecord) {
       return res.status(404).json({
@@ -118,8 +141,8 @@ const getBookingStatusByOrderId = async (req, res) => {
           } : null,
           slotDetails: paymentRecord.razorpay_params?.notes ? {
             psychologistId: paymentRecord.psychologist_id,
-            scheduledDate: paymentRecord.razorpay_params.notes.scheduledDate,
-            scheduledTime: paymentRecord.razorpay_params.notes.scheduledTime
+            scheduledDate: paymentRecord.razorpay_params.notes?.scheduledDate,
+            scheduledTime: paymentRecord.razorpay_params.notes?.scheduledTime
           } : null
         },
         legacy: true // Flag to indicate using legacy mode
@@ -169,11 +192,14 @@ const getBookingStatusByOrderId = async (req, res) => {
       if (sessionData) {
         session = sessionData;
         console.log('✅ Found session by slot details, updating payment record...');
-        // Update payment record with session_id for future queries
-        await supabaseAdmin
+        // Update payment record with session_id for future queries (reconciliation side-effect)
+        const { error: updatePayErr } = await supabaseAdmin
           .from('payments')
           .update({ session_id: sessionData.id })
           .eq('razorpay_order_id', orderId);
+        if (updatePayErr) {
+          console.warn('⚠️ Failed to update payment.session_id:', updatePayErr.message);
+        }
       } else {
         console.warn('⚠️ Session not found even though slot lock is SESSION_CREATED');
       }
@@ -203,42 +229,56 @@ const getBookingStatusByOrderId = async (req, res) => {
     // CRITICAL: If slot is SLOT_HELD and payment is pending for > 30 seconds,
     // check Razorpay directly (webhook might not have fired in test mode)
     if (slotLock.status === 'SLOT_HELD' && paymentRecord.status === 'pending') {
-      const paymentAge = Date.now() - new Date(paymentRecord.created_at).getTime();
-      if (paymentAge > 30000) { // 30 seconds
-        console.log('🔍 Payment pending for >30s, checking Razorpay status...');
-        
-        try {
-          const { getRazorpayInstance } = require('../config/razorpay');
-          const razorpay = getRazorpayInstance();
+      // Verify paymentRecord.created_at exists and is valid before computing age
+      if (paymentRecord.created_at && !isNaN(new Date(paymentRecord.created_at).getTime())) {
+        const paymentAge = Date.now() - new Date(paymentRecord.created_at).getTime();
+        if (paymentAge > 30000) { // 30 seconds
+          console.log('🔍 Payment pending for >30s, checking Razorpay status...');
           
-          // Check payment status with Razorpay - fetch payments for this order
-          const razorpayPayments = await razorpay.orders.fetchPayments(orderId);
-          
-          if (razorpayPayments && razorpayPayments.items && razorpayPayments.items.length > 0) {
-            const razorpayPayment = razorpayPayments.items[0];
-            
-            if (razorpayPayment.status === 'captured' || razorpayPayment.status === 'authorized') {
-              console.log('✅ Payment successful in Razorpay, processing manually...');
+          try {
+            const razorpay = getRazorpayInstance();
+            const razorpayPayments = await razorpay.orders.fetchPayments(orderId);
+            if (razorpayPayments && razorpayPayments.items && razorpayPayments.items.length > 0) {
+              // Filter for captured payments and pick the most recent one
+              const capturedPayments = razorpayPayments.items
+                .filter(item => item.status === 'captured')
+                .sort((a, b) => {
+                  // Sort by created_at descending (most recent first), fallback to id comparison
+                  const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+                  const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+                  return bTime - aTime || (b.id > a.id ? 1 : -1);
+                });
               
-              // Process payment directly (bypass webhook signature for manual trigger)
-              const { processPaymentCaptured } = require('./razorpayWebhookController');
-              await processPaymentCaptured({
-                payment: {
-                  entity: {
-                    id: razorpayPayment.id,
-                    order_id: orderId,
-                    amount: razorpayPayment.amount,
-                    currency: razorpayPayment.currency,
-                    status: razorpayPayment.status
+              if (capturedPayments.length > 0) {
+                const razorpayPayment = capturedPayments[0];
+                console.log('✅ Payment captured in Razorpay, processing manually...');
+                // Use payment.id as idempotency key (processPaymentCaptured checks by razorpay_payment_id)
+                await processPaymentCaptured({
+                  payment: {
+                    entity: {
+                      id: razorpayPayment.id,
+                      order_id: orderId,
+                      amount: razorpayPayment.amount,
+                      currency: razorpayPayment.currency,
+                      status: razorpayPayment.status
+                    }
                   }
+                }, razorpayPayment.id, true);
+              } else {
+                // Check if any payment is authorized but not captured
+                const authorizedPayments = razorpayPayments.items.filter(item => item.status === 'authorized');
+                if (authorizedPayments.length > 0) {
+                  console.log('ℹ️ Payment authorized but not captured; manual capture required');
                 }
-              }, 'manual-' + Date.now(), true); // true = skip signature verification
+              }
             }
+          } catch (razorpayError) {
+            console.warn('⚠️ Could not check Razorpay status:', razorpayError.message);
+            // Continue with normal flow
           }
-        } catch (razorpayError) {
-          console.warn('⚠️ Could not check Razorpay status:', razorpayError.message);
-          // Continue with normal flow
         }
+      } else {
+        console.warn('⚠️ Payment record missing or invalid created_at, skipping Razorpay check');
       }
     }
 
@@ -270,7 +310,7 @@ const getBookingStatusByOrderId = async (req, res) => {
         message = 'Processing...';
     }
 
-    // If status is COMPLETED but session is null, use slot details as fallback
+    // If status is COMPLETED but session is null, use slot details as fallback and mark incomplete
     const sessionResponse = session ? {
       id: session.id,
       status: session.status,
@@ -279,16 +319,19 @@ const getBookingStatusByOrderId = async (req, res) => {
       meetLink: session.google_meet_link || null,
       session_type: session.session_type || null,
       package_id: session.package_id || null
-    } : (overallStatus === 'COMPLETED' ? {
-      // Fallback: use slot details if session not found but status is COMPLETED
-      id: null,
-      status: 'booked',
-      scheduledDate: slotLock.scheduled_date,
-      scheduledTime: slotLock.scheduled_time,
-      meetLink: null,
-      session_type: null,
-      package_id: null
-    } : null);
+    } : (overallStatus === 'COMPLETED' ? (() => {
+      console.warn('⚠️ Missing session for completed booking (orderId:', slotLock.order_id, ') — data inconsistency');
+      return {
+        id: null,
+        status: 'incomplete',
+        incomplete: true,
+        scheduledDate: slotLock.scheduled_date,
+        scheduledTime: slotLock.scheduled_time,
+        meetLink: null,
+        session_type: null,
+        package_id: null
+      };
+    })() : null);
 
     return res.status(200).json({
       success: true,
@@ -339,21 +382,32 @@ const verifyPaymentSignature = async (req, res) => {
       });
     }
 
-    // Get slot lock to verify order exists
+    // Get slot lock to verify order exists; fallback to payments table (legacy)
+    let slotLock = null;
     const slotLockResult = await getSlotLockByOrderId(razorpay_order_id);
-
-    if (!slotLockResult.success || !slotLockResult.data) {
-      return res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
+    if (slotLockResult.success && slotLockResult.data) {
+      slotLock = slotLockResult.data;
+    } else {
+      const { data: paymentRecord } = await supabaseAdmin
+        .from('payments')
+        .select('id, razorpay_order_id, status')
+        .eq('razorpay_order_id', razorpay_order_id)
+        .maybeSingle();
+      if (!paymentRecord) {
+        return res.status(404).json({
+          success: false,
+          message: 'Order not found'
+        });
+      }
+      // Map legacy payment status to canonical slot status for consistent API
+      const statusMap = { pending: 'PAYMENT_PENDING', success: 'SESSION_CREATED', failed: 'FAILED', authorized: 'PAYMENT_PENDING' };
+      const normalizedStatus = statusMap[String(paymentRecord.status).toLowerCase()] || 'PAYMENT_PENDING';
+      slotLock = { order_id: razorpay_order_id, status: normalizedStatus };
     }
 
     // Verify signature (optional - webhook is source of truth)
-    const { verifyPaymentSignature } = require('../config/razorpay');
-    const { getRazorpayConfig } = require('../config/razorpay');
     const config = getRazorpayConfig();
-    const isValid = verifyPaymentSignature(
+    const isValid = verifyRazorpaySignature(
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature,
@@ -372,8 +426,7 @@ const verifyPaymentSignature = async (req, res) => {
       success: true,
       message: 'Payment signature verified',
       orderId: razorpay_order_id,
-      // Return current status
-      status: slotLockResult.data.status
+      status: slotLock?.status ?? null
     });
   } catch (error) {
     console.error('❌ Error verifying payment signature:', error);

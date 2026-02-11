@@ -3,8 +3,32 @@ const { supabaseAdmin } = require('../config/supabase');
 // Alias for storage operations (same client, just for clarity)
 const supabase = supabaseAdmin;
 
+const path = require('path');
 const BLOG_IMAGES_BUCKET = 'blog-images';
 const COUNSELLING_IMAGES_BUCKET = 'counselling-images';
+
+/**
+ * Sanitize file path for storage: reject empty/absolute, posix-normalize, detect '..'.
+ * Uses '/' for splitting so it works with path.posix.normalize() on all platforms.
+ * @param {string} filePath - Raw file path
+ * @returns {{ valid: boolean, normalizedPath?: string, error?: string }}
+ */
+function sanitizeFilePath(filePath) {
+  if (!filePath || typeof filePath !== 'string') {
+    return { valid: false, error: 'Path is required' };
+  }
+  const trimmed = filePath.trim();
+  if (trimmed === '' || path.isAbsolute(trimmed)) {
+    return { valid: false, error: 'Empty or absolute path not allowed' };
+  }
+  let normalizedPath = trimmed.replace(/^\/+/, '');
+  normalizedPath = path.posix.normalize(normalizedPath);
+  const segments = normalizedPath.split('/');
+  if (segments.includes('..')) {
+    return { valid: false, error: 'Path traversal not allowed' };
+  }
+  return { valid: true, normalizedPath };
+}
 
 /**
  * Upload image to blog images bucket
@@ -65,11 +89,14 @@ async function deleteBlogImage(filePath) {
  * @returns {string} Proxy URL (which will generate signed URL when accessed)
  */
 function getBlogImageUrl(filePath) {
-  if (!filePath) return null;
-  
-  // Always use relative proxy URL (works in both development and production)
-  // This avoids issues with localhost vs production URLs
-  return `/api/images/${BLOG_IMAGES_BUCKET}/${filePath}`;
+  const result = sanitizeFilePath(filePath);
+  if (!result.valid) {
+    if (result.error && result.error.includes('traversal')) {
+      console.warn('⚠️ Path traversal detected in blog image path:', filePath);
+    }
+    return null;
+  }
+  return `/api/images/${BLOG_IMAGES_BUCKET}/${result.normalizedPath}`;
 }
 
 /**
@@ -79,18 +106,27 @@ function getBlogImageUrl(filePath) {
  * @returns {Promise<{success: boolean, url?: string, error?: string}>}
  */
 async function getBlogImageSignedUrl(filePath, expiresIn = 3600) {
-  if (!filePath) return { success: false, error: 'File path is required' };
-  
+  const result = sanitizeFilePath(filePath);
+  if (!result.valid) {
+    if (result.error && result.error.includes('traversal')) {
+      console.warn('⚠️ Path traversal detected in blog image signed URL path:', filePath);
+    }
+    return { success: false, error: result.error || 'Invalid file path' };
+  }
+  const normalizedPath = result.normalizedPath;
   try {
     const { data, error } = await supabase.storage
       .from(BLOG_IMAGES_BUCKET)
-      .createSignedUrl(filePath, expiresIn);
+      .createSignedUrl(normalizedPath, expiresIn);
     
     if (error) {
       console.error('Error creating signed URL:', error);
       return { success: false, error: error.message };
     }
-    
+    if (!data || !data.signedUrl) {
+      console.error('getBlogImageSignedUrl: missing data or signedUrl');
+      return { success: false, error: 'Failed to generate signed URL' };
+    }
     return { success: true, url: data.signedUrl };
   } catch (error) {
     console.error('Error generating signed URL:', error);
@@ -199,11 +235,14 @@ async function deleteCounsellingImage(filePath) {
  * @returns {string} Proxy URL (which will generate signed URL when accessed)
  */
 function getCounsellingImageUrl(filePath) {
-  if (!filePath) return null;
-  
-  // Always use relative proxy URL (works in both development and production)
-  // This avoids issues with localhost vs production URLs
-  return `/api/images/${COUNSELLING_IMAGES_BUCKET}/${filePath}`;
+  const result = sanitizeFilePath(filePath);
+  if (!result.valid) {
+    if (result.error && result.error.includes('traversal')) {
+      console.warn('⚠️ Path traversal detected in counselling image path:', filePath);
+    }
+    return null;
+  }
+  return `/api/images/${COUNSELLING_IMAGES_BUCKET}/${result.normalizedPath}`;
 }
 
 /**
@@ -213,16 +252,27 @@ function getCounsellingImageUrl(filePath) {
  * @returns {Promise<{success: boolean, url?: string, error?: string}>}
  */
 async function getCounsellingImageSignedUrl(filePath, expiresIn = 3600) {
-  if (!filePath) return { success: false, error: 'File path is required' };
-  
+  const result = sanitizeFilePath(filePath);
+  if (!result.valid) {
+    if (result.error && result.error.includes('traversal')) {
+      console.warn('⚠️ Path traversal detected in counselling image signed URL path:', filePath);
+    }
+    return { success: false, error: result.error || 'Invalid file path' };
+  }
+  const normalizedPath = result.normalizedPath;
   try {
     const { data, error } = await supabase.storage
       .from(COUNSELLING_IMAGES_BUCKET)
-      .createSignedUrl(filePath, expiresIn);
+      .createSignedUrl(normalizedPath, expiresIn);
     
     if (error) {
       console.error('Error creating signed URL:', error);
       return { success: false, error: error.message };
+    }
+    
+    if (!data || !data.signedUrl) {
+      console.error('getCounsellingImageSignedUrl: missing data or signedUrl');
+      return { success: false, error: 'Signed URL missing' };
     }
     
     return { success: true, url: data.signedUrl };
@@ -254,6 +304,7 @@ module.exports = {
   uploadBlogImage,
   deleteBlogImage,
   getBlogImageUrl,
+  getBlogImageSignedUrl,
   generateUniqueFileName,
   validateImageFile,
   uploadCounsellingImage,

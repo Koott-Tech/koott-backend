@@ -20,7 +20,7 @@ function convertToRelativeUrl(url) {
   // Extract the path from absolute URL
   try {
     const urlObj = new URL(url);
-    return urlObj.pathname; // Returns /api/images/...
+    return urlObj.pathname + (urlObj.search || '') + (urlObj.hash || '');
   } catch (e) {
     // If URL parsing fails, try regex
     const match = url.match(/\/api\/images\/.+/);
@@ -39,7 +39,13 @@ function convertToRelativeUrl(url) {
  * @returns {string} Relative URL
  */
 function normalizeImageUrl(imageUrl) {
+  // Validate input is string
   if (!imageUrl) return imageUrl;
+  if (typeof imageUrl !== 'string') {
+    const imageUrlString = String(imageUrl);
+    if (!imageUrlString) return '';
+    imageUrl = imageUrlString;
+  }
   
   // If it's already relative, return as-is
   if (imageUrl.startsWith('/')) return imageUrl;

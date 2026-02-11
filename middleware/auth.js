@@ -11,11 +11,21 @@ const authenticateToken = async (req, res, next) => {
 
     // Check if token is revoked
     if (token) {
-      const isRevoked = await tokenRevocationService.isTokenRevoked(token);
-      if (isRevoked) {
-        return res.status(401).json({
-          error: 'Access denied',
-          message: 'Token has been revoked'
+      try {
+        const isRevoked = await tokenRevocationService.isTokenRevoked(token);
+        if (isRevoked) {
+          return res.status(401).json({
+            error: 'Access denied',
+            message: 'Token has been revoked'
+          });
+        }
+      } catch (revocationError) {
+        // Log error and apply fail-closed policy (consistent with user revocation check)
+        // This ensures security consistency - both checks fail closed
+        console.error('❌ Error checking token revocation:', revocationError);
+        return res.status(500).json({
+          error: 'Internal error',
+          message: 'Unable to verify token status'
         });
       }
     }
@@ -32,7 +42,7 @@ const authenticateToken = async (req, res, next) => {
     }
 
     if (!token) {
-      if (process.env.NODE_ENV === 'development') {
+      if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
         console.log('🔍 No token provided');
       }
       return res.status(401).json({
@@ -71,13 +81,13 @@ const authenticateToken = async (req, res, next) => {
           if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
             console.error('Supabase token verification failed:', supabaseError);
           }
-          // Log in production so Render logs show why (no token content)
+          // Log detailed error server-side only (never expose to client)
           if (process.env.NODE_ENV === 'production') {
-            console.warn('Auth: Supabase token verification failed. Ensure backend SUPABASE_URL and SUPABASE_ANON_KEY match the frontend Supabase project.', supabaseError?.message || 'No user');
+            console.error('Auth: Supabase token verification failed. Ensure backend SUPABASE_URL and SUPABASE_ANON_KEY match the frontend Supabase project.', supabaseError?.message || 'No user');
           }
           return res.status(401).json({
             error: 'Invalid token',
-            message: 'Token verification failed. If you signed in with Google, ensure this server\'s SUPABASE_URL and SUPABASE_ANON_KEY match your frontend Supabase project. Otherwise ensure JWT_SECRET is set correctly.'
+            message: 'Token verification failed'
           });
         }
         
@@ -88,7 +98,7 @@ const authenticateToken = async (req, res, next) => {
         // For Supabase users, we need to find them in our database
         // Check clients table first (since clients are stored directly in clients table)
         // Use supabaseAdmin to bypass RLS (authentication middleware needs database access)
-        const { supabaseAdmin } = require('../config/supabase');
+        // Note: supabaseAdmin is already imported at the top of the file
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.log('🔍 Looking up client in database for email:', supabaseUser.email);
         }
@@ -132,6 +142,12 @@ const authenticateToken = async (req, res, next) => {
         }
 
         if (user && !userError) {
+          if (user.is_active === false) {
+            return res.status(401).json({
+              error: 'Access denied',
+              message: 'Account has been deactivated'
+            });
+          }
           if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
             console.log('🔍 Found existing user:', user.id);
           }
@@ -225,12 +241,13 @@ const authenticateToken = async (req, res, next) => {
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.error('Supabase JWT verification failed:', supabaseJwtError);
         }
+        // Log detailed error server-side only (never expose infrastructure details to client)
         if (process.env.NODE_ENV === 'production') {
-          console.warn('Auth: Supabase JWT verification threw.', supabaseJwtError?.message || supabaseJwtError);
+          console.error('Auth: Supabase JWT verification threw.', supabaseJwtError?.message || supabaseJwtError);
         }
         return res.status(401).json({
           error: 'Invalid token',
-          message: 'Token verification failed. If you signed in with Google, ensure this server\'s SUPABASE_URL and SUPABASE_ANON_KEY match your frontend Supabase project.'
+          message: 'Token verification failed'
         });
       }
     }
@@ -245,11 +262,23 @@ const authenticateToken = async (req, res, next) => {
     }
 
     // Check if user's tokens are revoked (e.g., account deactivated)
-    const isUserRevoked = await tokenRevocationService.isUserRevoked(userId);
-    if (isUserRevoked) {
-      return res.status(401).json({
-        error: 'Access denied',
-        message: 'Account access has been revoked'
+    try {
+      const isUserRevoked = await tokenRevocationService.isUserRevoked(userId);
+      if (isUserRevoked) {
+        return res.status(401).json({
+          error: 'Access denied',
+          message: 'Account access has been revoked'
+        });
+      }
+    } catch (userRevocationError) {
+      // Log error and send appropriate error response
+      console.error('❌ Error checking user revocation status:', {
+        userId,
+        error: userRevocationError
+      });
+      return res.status(500).json({
+        error: 'Internal error',
+        message: 'Unable to verify account status'
       });
     }
     
@@ -313,6 +342,13 @@ const authenticateToken = async (req, res, next) => {
         id: user.id,
         email: user.email,
         role: user.role
+      });
+    }
+
+    if (user.is_active === false) {
+      return res.status(401).json({
+        error: 'Access denied',
+        message: 'Account has been deactivated'
       });
     }
 

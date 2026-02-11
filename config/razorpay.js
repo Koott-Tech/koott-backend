@@ -15,14 +15,26 @@ const getFrontendUrl = () => {
     }
   }
   
-  // Always check FRONTEND_PORT first, even in production
-  if (process.env.FRONTEND_PORT) {
+  // Prefer explicit full URL override (production-safe)
+  if (process.env.FRONTEND_URL) {
+    try {
+      const url = new URL(process.env.FRONTEND_URL);
+      const baseUrl = `${url.protocol}//${url.host}`;
+      console.log('🔧 Using FRONTEND_URL:', baseUrl);
+      return baseUrl;
+    } catch (error) {
+      console.warn('⚠️ Invalid FRONTEND_URL format, falling through');
+    }
+  }
+
+  // FRONTEND_PORT localhost fallback only for non-production
+  if (process.env.NODE_ENV !== 'production' && process.env.FRONTEND_PORT) {
     const frontendPort = process.env.FRONTEND_PORT;
     const baseUrl = `http://localhost:${frontendPort}`;
     console.log('🔧 Using FRONTEND_PORT from env:', frontendPort);
     return baseUrl;
   }
-  
+
   if (process.env.NODE_ENV === 'development') {
     // Default to 3000 in development
     const frontendPort = '3000';
@@ -30,9 +42,14 @@ const getFrontendUrl = () => {
     return `http://localhost:${frontendPort}`;
   }
   
-  // Production URL
-  console.log('🔧 Using production URL');
-  return 'https://kutikkal-one.vercel.app';
+  // Production URL from environment (no hardcoded fallback)
+  const productionUrl = process.env.PRODUCTION_URL || process.env.NEXT_PUBLIC_PRODUCTION_URL;
+  if (!productionUrl || typeof productionUrl !== 'string' || !productionUrl.startsWith('http')) {
+    console.error('❌ PRODUCTION_URL or NEXT_PUBLIC_PRODUCTION_URL must be set to a valid URL in production.');
+    throw new Error('Production URL not configured. Set PRODUCTION_URL or NEXT_PUBLIC_PRODUCTION_URL.');
+  }
+  console.log('🔧 Using production URL from env');
+  return productionUrl.trim();
 };
 
 // Razorpay Configuration
@@ -99,10 +116,13 @@ const getRazorpayInstance = () => {
 
 // Generate transaction ID (receipt ID for Razorpay)
 const generateTransactionId = () => {
-  return 'TXN_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  // Use cryptographically secure randomness
+  const randomBytes = crypto.randomBytes(8); // 8 bytes = 16 hex characters
+  const randomHex = randomBytes.toString('hex');
+  return 'TXN_' + Date.now() + '_' + randomHex;
 };
 
-// Verify Razorpay payment signature
+// Verify Razorpay payment signature (constant-time comparison)
 const verifyPaymentSignature = (orderId, paymentId, signature, secret) => {
   try {
     const payload = orderId + '|' + paymentId;
@@ -110,23 +130,31 @@ const verifyPaymentSignature = (orderId, paymentId, signature, secret) => {
       .createHmac('sha256', secret)
       .update(payload.toString())
       .digest('hex');
-    
-    return expectedSignature === signature;
+    const expectedBuf = Buffer.from(expectedSignature, 'hex');
+    const incomingBuf = Buffer.from(signature, 'hex');
+    if (expectedBuf.length !== incomingBuf.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(expectedBuf, incomingBuf);
   } catch (error) {
     console.error('❌ Error verifying payment signature:', error);
     return false;
   }
 };
 
-// Verify Razorpay webhook signature
+// Verify Razorpay webhook signature (constant-time comparison)
 const verifyWebhookSignature = (webhookBody, signature, secret) => {
   try {
     const expectedSignature = crypto
       .createHmac('sha256', secret)
       .update(webhookBody)
       .digest('hex');
-    
-    return expectedSignature === signature;
+    const expectedBuf = Buffer.from(expectedSignature, 'hex');
+    const incomingBuf = Buffer.from(signature, 'hex');
+    if (expectedBuf.length !== incomingBuf.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(expectedBuf, incomingBuf);
   } catch (error) {
     console.error('❌ Error verifying webhook signature:', error);
     return false;

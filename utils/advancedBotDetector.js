@@ -49,13 +49,8 @@ class AdvancedBotDetector {
       /Version.*Safari/i
     ];
 
-    // Check if it's a legitimate Apple device - if so, reduce suspicious score significantly
+    // Check if it's a legitimate Apple device - will apply negative weight at end, not bypass
     const isLegitimateApple = legitimateApplePatterns.some(pattern => pattern.test(userAgent));
-    if (isLegitimateApple) {
-      // Legitimate Apple device - reduce any suspicious scores
-      score.suspicious = Math.max(0, score.suspicious - 50);
-      return score; // Early return for legitimate Apple devices
-    }
 
     // Check for bot patterns
     this.botPatterns.forEach(pattern => {
@@ -88,6 +83,7 @@ class AdvancedBotDetector {
       }
     });
 
+    // Don't apply Apple reduction here - will be handled in detectBot with multiple signals
     return score;
   }
 
@@ -305,39 +301,63 @@ class AdvancedBotDetector {
       actions: []
     };
 
-    // ALWAYS whitelist payment endpoints - never flag them as bots
+    // Soft scoring for payment endpoints and Apple devices (don't bypass detection)
     const url = req.url || req.path || '';
-    if (url.includes('/payment/') || 
+    const userAgent = req.headers['user-agent'] || '';
+    const isPaymentEndpoint = url.includes('/payment/') || 
         url.includes('/payment/success') || 
         url.includes('/payment/failure') ||
         url.includes('/payment/verify') ||
-        url.includes('/payment/status')) {
-      // Payment endpoints are critical - return zero confidence (not a bot)
-      return detectionResults;
-    }
+        url.includes('/payment/status');
+    
+    // Check for Apple UA and additional corroborating signals
+    const isLegitimateAppleUA = /iPhone|iPad|iPod|Macintosh|Safari|AppleWebKit/i.test(userAgent);
+    const hasAppleHeaders = req.headers['sec-ch-ua-platform']?.includes('macOS') || 
+                           req.headers['sec-ch-ua-platform']?.includes('iOS');
+    const hasConsistentAcceptLanguage = req.headers['accept-language']?.includes('en') || 
+                                       req.headers['accept-language']?.includes('en-US');
+    
+    // Require multiple signals before applying Apple reduction
+    const isLegitimateApple = isLegitimateAppleUA && (hasAppleHeaders || hasConsistentAcceptLanguage);
 
-    // ALWAYS whitelist legitimate Apple devices
-    const userAgent = req.headers['user-agent'] || '';
-    const isLegitimateApple = /iPhone|iPad|iPod|Macintosh|Safari|AppleWebKit/i.test(userAgent);
-    if (isLegitimateApple) {
-      // Legitimate Apple device - return zero confidence (not a bot)
-      return detectionResults;
-    }
-
-    // Run all detection methods
+    // Run all detection methods (don't bypass)
     const userAgentScore = this.analyzeUserAgent(userAgent);
     const patternScore = this.analyzeRequestPattern(req);
     const behaviorScore = this.analyzeBehavior(req);
     const ipScore = this.analyzeIPReputation(req);
 
     // Calculate total confidence
-    detectionResults.confidence = Math.min(
-      userAgentScore.suspicious + 
+    let totalConfidence = userAgentScore.suspicious + 
       patternScore.suspicious + 
       behaviorScore.suspicious + 
-      ipScore.suspicious, 
-      100
-    );
+      ipScore.suspicious;
+
+    // Apply soft scoring adjustments (reduce confidence, don't zero it)
+    if (isPaymentEndpoint) {
+      // Payment endpoints get reduced bot confidence (but still checked)
+      totalConfidence = Math.max(0, totalConfidence - 30);
+      detectionResults.reasons.push('Payment endpoint - reduced bot confidence');
+    }
+
+    // Apply single Apple reduction only when multiple signals match (reduced magnitude)
+    if (isLegitimateApple) {
+      // Apple devices get reduced bot confidence (but still checked) - single, capped reduction
+      const appleReduction = 30; // Reduced from cumulative 70 (50+20) to single 30
+      totalConfidence = Math.max(0, totalConfidence - appleReduction);
+      detectionResults.reasons.push('Apple device (multiple signals) - reduced bot confidence');
+      
+      // Log for monitoring
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('🍎 Apple reduction applied:', {
+          hasUA: isLegitimateAppleUA,
+          hasHeaders: hasAppleHeaders,
+          hasAcceptLang: hasConsistentAcceptLanguage,
+          reduction: appleReduction
+        });
+      }
+    }
+
+    detectionResults.confidence = Math.min(totalConfidence, 100);
 
     // Collect all reasons
     detectionResults.reasons = [

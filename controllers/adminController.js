@@ -7,6 +7,7 @@ const {
   formatTime,
   addMinutesToTime
 } = require('../utils/helpers');
+const { validatePassword } = require('../utils/passwordPolicy');
 const { formatFriendlyTime } = require('../utils/whatsappService');
 
 // Helper function to get availability dates for a day of the week
@@ -38,6 +39,15 @@ const getAvailabilityDatesForDay = (dayName, numOccurrences = 1) => {
   return dates;
 };
 
+// Escape SQL LIKE/ILIKE special characters (%, _, \) so search string is treated literally
+const escapeLike = (str) => {
+  if (str == null || typeof str !== 'string') return '';
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_');
+};
+
 // NOTE: This file was partially overwritten. Only createManualBooking function is present.
 // Other functions need to be restored from backup or re-implemented.
 // Functions needed: getAllUsers, getUserDetails, updateUserRole, deactivateUser, 
@@ -55,7 +65,9 @@ const createManualBooking = async (req, res) => {
   // Track created resources for rollback on error
   let paymentRecord = null;
   let session = null;
-  
+  let meetData = null;
+  let meetUserAuth = null;
+
   try {
     // ============================================
     // STEP 1: VALIDATE INPUT
@@ -85,6 +97,36 @@ const createManualBooking = async (req, res) => {
     if (!client_id || !psychologist_id || !scheduled_date || !scheduled_time || !amount) {
       return res.status(400).json(
         errorResponse('Missing required fields: client_id, psychologist_id, scheduled_date, scheduled_time, amount')
+      );
+    }
+
+    const amountNum = Number(amount);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      return res.status(400).json(
+        errorResponse('Invalid amount: must be a positive number')
+      );
+    }
+
+    // Validate scheduled_date format (YYYY-MM-DD)
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if (!datePattern.test(scheduled_date)) {
+      return res.status(400).json(
+        errorResponse('Invalid scheduled_date format. Expected YYYY-MM-DD')
+      );
+    }
+    // Validate it's a real date
+    const dateObj = new Date(scheduled_date + 'T00:00:00');
+    if (isNaN(dateObj.getTime()) || dateObj.toISOString().split('T')[0] !== scheduled_date) {
+      return res.status(400).json(
+        errorResponse('Invalid scheduled_date: not a valid date')
+      );
+    }
+
+    // Validate scheduled_time format (HH:MM 24-hour)
+    const timePattern = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
+    if (!timePattern.test(scheduled_time)) {
+      return res.status(400).json(
+        errorResponse('Invalid scheduled_time format. Expected HH:MM in 24-hour format')
       );
     }
 
@@ -189,6 +231,36 @@ const createManualBooking = async (req, res) => {
     console.log('✅ [MANUAL BOOKING] Slot is available');
 
     // ============================================
+    // STEP 5.5: VALIDATE PACKAGE REMAINING SESSIONS (before creating payment/session)
+    // ============================================
+    if (package_id && packageData) {
+      try {
+        const { data: existingClientPackage } = await supabaseAdmin
+          .from('client_packages')
+          .select('*')
+          .eq('client_id', client.id)
+          .eq('package_id', package_id)
+          .eq('status', 'active')
+          .single();
+
+        if (existingClientPackage) {
+          // Validate remaining_sessions BEFORE creating payment/session
+          if (existingClientPackage.remaining_sessions <= 0) {
+            console.error('❌ [MANUAL BOOKING] Cannot consume session from exhausted package');
+            return res.status(400).json(
+              errorResponse('Package has no remaining sessions')
+            );
+          }
+        }
+      } catch (packageValidationError) {
+        console.error('❌ [MANUAL BOOKING] Error validating package:', packageValidationError);
+        return res.status(500).json(
+          errorResponse('Failed to validate package availability')
+        );
+      }
+    }
+
+    // ============================================
     // STEP 6: CREATE PAYMENT RECORD
     // ============================================
     const transactionId = `MANUAL-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -237,11 +309,10 @@ const createManualBooking = async (req, res) => {
     // ============================================
     const meetLinkService = require('../utils/meetLinkService');
     const { addMinutesToTime } = require('../utils/helpers');
-    let meetData = null;
 
     try {
       console.log('🔄 [MANUAL BOOKING] Creating Google Meet link...');
-      
+
       const sessionData = {
         summary: `Therapy Session - ${client.child_name || client.first_name} with ${psychologist.first_name}`,
         description: `Online therapy session between ${client.child_name || client.first_name} and ${psychologist.first_name} ${psychologist.last_name}`,
@@ -283,7 +354,8 @@ const createManualBooking = async (req, res) => {
           console.warn('⚠️ [MANUAL BOOKING] Error parsing OAuth credentials:', credError.message);
         }
       }
-      
+
+      meetUserAuth = userAuth;
       const meetResult = await meetLinkService.generateSessionMeetLink(sessionData, userAuth);
       
       if (meetResult.success && meetResult.meetLink && !meetResult.meetLink.includes('meet.google.com/new')) {
@@ -421,13 +493,50 @@ const createManualBooking = async (req, res) => {
           .single();
 
         if (existingClientPackage) {
-          await supabaseAdmin
+          // Atomic conditional update: decrement remaining_sessions only if > 0
+          // This prevents TOCTOU race conditions by using WHERE clause in update
+          // First, get current value to calculate new value
+          const currentRemaining = existingClientPackage.remaining_sessions;
+          
+          if (currentRemaining <= 0) {
+            // Rollback session and payment
+            if (session) {
+              await supabaseAdmin.from('sessions').delete().eq('id', session.id);
+            }
+            if (paymentRecord) {
+              await supabaseAdmin.from('payments').delete().eq('id', paymentRecord.id);
+            }
+            return res.status(400).json(
+              errorResponse('Package has no remaining sessions. Session and payment have been rolled back.')
+            );
+          }
+
+          // Perform atomic update with condition: only update if remaining_sessions > 0
+          // Use .gt() filter to ensure atomicity at database level
+          const { data: updatedPackage, error: updateError } = await supabaseAdmin
             .from('client_packages')
-            .update({
-              remaining_sessions: existingClientPackage.remaining_sessions - 1
-            })
-            .eq('id', existingClientPackage.id);
-          console.log('✅ [MANUAL BOOKING] Updated existing client package');
+            .update({ remaining_sessions: currentRemaining - 1 })
+            .eq('id', existingClientPackage.id)
+            .gt('remaining_sessions', 0) // Critical: only update if > 0 (atomic check)
+            .select('remaining_sessions')
+            .single();
+
+          // Check if update succeeded (updatedPackage exists) and remaining_sessions is valid
+          if (updateError || !updatedPackage) {
+            // Update failed - likely because remaining_sessions was 0 (race condition detected)
+            // Rollback session and payment
+            if (session) {
+              await supabaseAdmin.from('sessions').delete().eq('id', session.id);
+            }
+            if (paymentRecord) {
+              await supabaseAdmin.from('payments').delete().eq('id', paymentRecord.id);
+            }
+            return res.status(400).json(
+              errorResponse('Package has no remaining sessions (race condition detected). Session and payment have been rolled back.')
+            );
+          }
+
+          console.log('✅ [MANUAL BOOKING] Updated existing client package (atomic update successful)');
         } else {
           const clientPackageData = {
             client_id: client.id,
@@ -450,7 +559,22 @@ const createManualBooking = async (req, res) => {
         }
       } catch (packageError) {
         console.error('❌ [MANUAL BOOKING] Error handling client package:', packageError);
-        // Continue - package handling failure is not critical
+        // Rollback session and payment creation to maintain consistency
+        try {
+          if (session) {
+            await supabaseAdmin.from('sessions').delete().eq('id', session.id);
+            console.log('✅ [MANUAL BOOKING] Rolled back session creation due to package error');
+          }
+          if (paymentRecord) {
+            await supabaseAdmin.from('payments').delete().eq('id', paymentRecord.id);
+            console.log('✅ [MANUAL BOOKING] Rolled back payment creation due to package error');
+          }
+        } catch (rollbackError) {
+          console.error('❌ [MANUAL BOOKING] Error during rollback:', rollbackError);
+        }
+        return res.status(500).json(
+          errorResponse('Failed to handle client package. Session and payment have been rolled back.')
+        );
       }
     }
 
@@ -622,7 +746,7 @@ const createManualBooking = async (req, res) => {
 
   } catch (error) {
     console.error('❌ [MANUAL BOOKING] Unexpected error:', error);
-    
+
     // Rollback any created resources
     if (session) {
       try {
@@ -632,7 +756,7 @@ const createManualBooking = async (req, res) => {
         console.error('❌ [MANUAL BOOKING] Failed to rollback session:', rollbackError);
       }
     }
-    
+
     if (paymentRecord) {
       try {
         await supabaseAdmin.from('payments').delete().eq('id', paymentRecord.id);
@@ -641,7 +765,21 @@ const createManualBooking = async (req, res) => {
         console.error('❌ [MANUAL BOOKING] Failed to rollback payment:', rollbackError);
       }
     }
-    
+
+    if (meetData?.eventId) {
+      try {
+        const meetLinkService = require('../utils/meetLinkService');
+        const delResult = await meetLinkService.deleteCalendarEvent(meetData.eventId, meetUserAuth);
+        if (!delResult.success) {
+          console.error('❌ [MANUAL BOOKING] Failed to delete calendar event on rollback:', delResult.error);
+        } else {
+          console.log('🔄 [MANUAL BOOKING] Rolled back calendar event');
+        }
+      } catch (calendarRollbackError) {
+        console.error('❌ [MANUAL BOOKING] Error deleting calendar event on rollback:', calendarRollbackError);
+      }
+    }
+
     return res.status(500).json(
       errorResponse('Internal server error while creating manual booking')
     );
@@ -683,7 +821,8 @@ const getAllUsers = async (req, res) => {
         `, { count: 'exact' });
       
       if (search) {
-        query = query.or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%,child_name.ilike.%${search}%`);
+        const escapedSearch = escapeLike(search);
+        query = query.or(`first_name.ilike.%${escapedSearch}%,last_name.ilike.%${escapedSearch}%,child_name.ilike.%${escapedSearch}%`);
       }
       
       query = query.range(offset, offset + limit - 1).order('created_at', { ascending: false });
@@ -736,7 +875,8 @@ const getAllUsers = async (req, res) => {
       
       if (role) query = query.eq('role', role);
       if (search) {
-        query = query.or(`email.ilike.%${search}%`);
+        const escapedSearch = escapeLike(search);
+        query = query.or(`email.ilike.%${escapedSearch}%`);
       }
       
       query = query.range(offset, offset + limit - 1).order('created_at', { ascending: false });
@@ -922,17 +1062,16 @@ const deactivateUser = async (req, res) => {
     // Revoke all tokens for the deactivated user
     await tokenRevocationService.revokeUserTokens(userId);
 
-    // For now, we'll just update the user to indicate deactivation
-    // In a real system, you might want to add a status field or move to archive table
+    // Deactivate user: set is_active false so auth can reject revoked tokens
     // Use supabaseAdmin to bypass RLS (admin endpoint, proper auth already checked)
     const { data: updatedUser, error } = await supabaseAdmin
       .from('users')
       .update({
+        is_active: false,
         updated_at: new Date().toISOString()
-        // Add deactivation logic here
       })
       .eq('id', userId)
-      .select('id, email, role, updated_at')
+      .select('id, email, role, is_active, updated_at')
       .single();
 
     if (error) {
@@ -1019,14 +1158,24 @@ const searchUsers = async (req, res) => {
         profile_picture_url,
         created_at,
         updated_at
-      `);
+      `, { count: 'exact' });
 
     // Filter by role if provided
     if (role) {
       supabaseQuery = supabaseQuery.eq('role', role);
     }
 
-    const { data: users, error } = await supabaseQuery;
+    // Filter by search query using database-level filtering
+    if (searchQuery) {
+      const escapedSearch = escapeLike(searchQuery);
+      supabaseQuery = supabaseQuery.or(`email.ilike.%${escapedSearch}%,role.ilike.%${escapedSearch}%`);
+    }
+
+    // Add pagination at database level
+    const offset = (page - 1) * limit;
+    supabaseQuery = supabaseQuery.range(offset, offset + limit - 1);
+
+    const { data: users, error, count } = await supabaseQuery;
 
     if (error) {
       console.error('Search users error:', error);
@@ -1035,24 +1184,13 @@ const searchUsers = async (req, res) => {
       );
     }
 
-    // Filter by search query
-    const query = searchQuery.toLowerCase();
-    const filteredUsers = users.filter(user => 
-      user.email.toLowerCase().includes(query) ||
-      user.role.toLowerCase().includes(query)
-    );
-
-    // Add pagination
-    const offset = (page - 1) * limit;
-    const paginatedUsers = filteredUsers.slice(offset, offset + limit);
-
     res.json(
       successResponse({
-        users: paginatedUsers,
+        users: users || [],
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
-          total: filteredUsers.length
+          total: count || 0
         }
       })
     );
@@ -1065,13 +1203,9 @@ const searchUsers = async (req, res) => {
   }
 };
 
-const getRecentActivities = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
 const getRecentUsers = async (req, res) => {
   try {
-    const { data } = await supabaseAdmin.from('users').select('*').order('created_at', { ascending: false }).limit(10);
+    const { data } = await supabaseAdmin.from('users').select('id, email, name, created_at').order('created_at', { ascending: false }).limit(10);
     return res.json(successResponse(data || []));
   } catch (error) {
     return res.status(500).json(errorResponse('Internal server error'));
@@ -1167,10 +1301,29 @@ const createPsychologist = async (req, res) => {
       );
     }
 
+    // Validate password before hashing
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.valid) {
+      return res.status(400).json(
+        errorResponse('Password does not meet requirements', passwordValidation.errors)
+      );
+    }
+
     // Hash password
     const hashedPassword = await hashPassword(password);
 
-    // Create psychologist directly in psychologists table (standalone)
+    // Validate individual session price BEFORE creating psychologist to prevent orphaned records
+    // Use price from request body, or require explicit price
+    const individualSessionPrice = price ? parseInt(price) : null;
+    
+    if (!individualSessionPrice || individualSessionPrice <= 0) {
+      console.error('❌ Error: Individual session price is required and must be positive');
+      return res.status(400).json(
+        errorResponse('Individual session price is required. Please provide a valid price.')
+      );
+    }
+
+    // Create psychologist directly in psychologists table (standalone) - after validation passes
     const { data: psychologist, error: psychologistError } = await supabaseAdmin
       .from('psychologists')
       .insert([{
@@ -1187,7 +1340,7 @@ const createPsychologist = async (req, res) => {
         personality_traits, // NEW
         description,
         experience_years: experience_years || 0,
-        individual_session_price: price ? parseInt(price) : null,
+        individual_session_price: individualSessionPrice,
         cover_image_url: cover_image_url || null,
         display_order: display_order ? parseInt(display_order) : null,
         faq_question_1: faq_question_1 || null,
@@ -1208,16 +1361,41 @@ const createPsychologist = async (req, res) => {
       );
     }
 
-    // Always create individual session option first
     const individualSession = {
       psychologist_id: psychologist.id,
       package_type: 'individual',
       name: 'Single Session',
       description: 'One therapy session',
       session_count: 1,
-      price: 100, // Default price, can be customized
+      price: individualSessionPrice,
       discount_percentage: 0
     };
+
+    // Insert individual session package into database
+    const { error: individualSessionError } = await supabaseAdmin
+      .from('packages')
+      .insert([individualSession]);
+
+    if (individualSessionError) {
+      console.error('❌ Error creating individual session package:', individualSessionError);
+      // Rollback psychologist creation to prevent orphaned record
+      const { error: deleteError } = await supabaseAdmin
+        .from('psychologists')
+        .delete()
+        .eq('id', psychologist.id);
+      
+      if (deleteError) {
+        console.error('❌ Error rolling back psychologist creation:', deleteError);
+      } else {
+        console.log('✅ Rolled back psychologist creation due to package creation failure');
+      }
+      
+      return res.status(500).json(
+        errorResponse('Failed to create individual session package')
+      );
+    } else {
+      console.log('✅ Individual session package created');
+    }
 
     // Create dynamic packages for the psychologist based on admin selection
     if (packages && Array.isArray(packages) && packages.length > 0) {
@@ -1391,9 +1569,9 @@ const updatePsychologist = async (req, res) => {
       psychologistUpdateData.display_order = psychologistUpdateData.display_order ? parseInt(psychologistUpdateData.display_order) : null;
     }
 
-    // Remove undefined/null values from update data
+    // Remove only undefined values from update data (preserve null for intentional field clearing)
     Object.keys(psychologistUpdateData).forEach(key => {
-      if (psychologistUpdateData[key] === undefined || psychologistUpdateData[key] === null) {
+      if (psychologistUpdateData[key] === undefined) {
         delete psychologistUpdateData[key];
       }
     });
@@ -1466,9 +1644,11 @@ const updatePsychologist = async (req, res) => {
       try {
         let targetUserId = psychologist.user_id;
 
-        if (password.length < 6) {
+        // Use validatePassword function for consistent password policy enforcement
+        const passwordValidation = validatePassword(password);
+        if (!passwordValidation.valid) {
           return res.status(400).json(
-            errorResponse('New password must be at least 6 characters long')
+            errorResponse('Password does not meet requirements', passwordValidation.errors)
           );
         }
 
@@ -1726,6 +1906,44 @@ const deletePsychologist = async (req, res) => {
       );
     }
 
+    // Check for upcoming or active bookings before deletion
+    const now = new Date();
+    const today = now.toISOString().split('T')[0]; // YYYY-MM-DD
+    
+    const { data: upcomingSessions, error: sessionsError } = await supabaseAdmin
+      .from('sessions')
+      .select('id, client_id, scheduled_date, scheduled_time, status')
+      .eq('psychologist_id', psychologistId)
+      .in('status', ['booked', 'confirmed'])
+      .gte('scheduled_date', today);
+
+    if (sessionsError) {
+      console.error('Error checking upcoming sessions:', sessionsError);
+      return res.status(500).json(
+        errorResponse('Failed to check upcoming sessions')
+      );
+    }
+
+    if (upcomingSessions && upcomingSessions.length > 0) {
+      // Filter to only include sessions that are actually in the future
+      const futureSessions = upcomingSessions.filter(session => {
+        if (!session.scheduled_date || !session.scheduled_time) return false;
+        const sessionDateTime = new Date(`${session.scheduled_date}T${session.scheduled_time}`);
+        return sessionDateTime >= now;
+      });
+
+      if (futureSessions.length > 0) {
+        const earliestSession = futureSessions.sort((a, b) => {
+          const dateA = new Date(`${a.scheduled_date}T${a.scheduled_time}`);
+          const dateB = new Date(`${b.scheduled_date}T${b.scheduled_time}`);
+          return dateA - dateB;
+        })[0];
+        return res.status(409).json(
+          errorResponse(`Cannot delete psychologist: ${futureSessions.length} upcoming session(s) found. Earliest session: ${earliestSession.scheduled_date} ${earliestSession.scheduled_time}`)
+        );
+      }
+    }
+
     // Delete availability records first
     const { error: deleteAvailabilityError } = await supabaseAdmin
       .from('availability')
@@ -1735,6 +1953,19 @@ const deletePsychologist = async (req, res) => {
     if (deleteAvailabilityError) {
       console.error('Delete availability error:', deleteAvailabilityError);
       // Continue with deletion even if availability deletion fails
+    }
+
+    // Delete associated packages before deleting psychologist profile
+    const { error: deletePackagesError } = await supabaseAdmin
+      .from('packages')
+      .delete()
+      .eq('psychologist_id', psychologistId);
+
+    if (deletePackagesError) {
+      console.error('Delete packages error:', deletePackagesError);
+      // Log error but continue with psychologist deletion
+    } else {
+      console.log('✅ Deleted associated packages for psychologist');
     }
 
     // Delete psychologist profile
@@ -1770,10 +2001,6 @@ const deletePsychologist = async (req, res) => {
   }
 };
 
-const addNextDayAvailability = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
 const updateAllPsychologistsAvailability = async (req, res) => {
   try {
     const defaultAvailabilityService = require('../utils/defaultAvailabilityService');
@@ -1789,25 +2016,19 @@ const updateAllPsychologistsAvailability = async (req, res) => {
   }
 };
 
-const createPsychologistPackages = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
-const checkMissingPackages = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
-const deletePackage = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
-const getStuckSlotLocks = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
 const createUser = async (req, res) => {
   try {
     const { email, password, first_name, last_name, phone_number, child_name, child_age } = req.body;
+
+    if (!password || typeof password !== 'string' || password.trim() === '') {
+      return res.status(400).json(errorResponse('Password is required'));
+    }
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.valid) {
+      return res.status(400).json(
+        errorResponse('Password does not meet requirements', passwordValidation.errors)
+      );
+    }
 
     // Check if user already exists
     const { data: existingUser } = await supabaseAdmin
@@ -1844,6 +2065,9 @@ const createUser = async (req, res) => {
     }
 
     // Create client profile (use admin client to bypass RLS)
+    // child_name and child_age are NOT NULL in DB; use placeholders when admin leaves them blank (e.g. manual booking)
+    const childNameForDb = (child_name && String(child_name).trim()) ? String(child_name).trim() : 'Not provided';
+    const childAgeForDb = (child_age != null && child_age !== '') ? Number(child_age) : 0;
     const { data: client, error: clientError } = await supabaseAdmin
       .from('clients')
       .insert([{
@@ -1851,8 +2075,8 @@ const createUser = async (req, res) => {
         first_name,
         last_name,
         phone_number,
-        child_name,
-        child_age
+        child_name: childNameForDb,
+        child_age: childAgeForDb
       }])
       .select('*')
       .single();
@@ -1889,10 +2113,6 @@ const createUser = async (req, res) => {
       errorResponse('Internal server error while creating user')
     );
   }
-};
-
-const updateUser = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
 };
 
 const deleteUser = async (req, res) => {
@@ -1934,93 +2154,173 @@ const deleteUser = async (req, res) => {
         .eq('user_id', userId)
         .maybeSingle();
 
+      // Detect when clientRecord is missing and handle explicitly
+      if (!clientRecord) {
+        const processLogger = require('../utils/processLogger');
+        const logger = processLogger || console;
+        logger.warn('⚠️ Client record not found for user deletion', {
+          userId,
+          context: 'deleteUser',
+          action: 'fallback_to_userId',
+          warning: 'Cascade deletes will use userId instead of client.id - may cause incorrect deletions'
+        });
+      }
+
       const clientId = clientRecord?.id || userId; // Fallback to userId for old system
 
       console.log(`🗑️  Deleting all related data for client_id: ${clientId}`);
 
       // 1. Delete messages (via conversations)
-      const { data: conversations } = await supabaseAdmin
+      const { data: conversations, error: convErr } = await supabaseAdmin
         .from('conversations')
         .select('id')
         .eq('client_id', clientId);
 
+      if (convErr) {
+        console.error('Delete client cascade: fetch conversations error:', convErr);
+        throw new Error(`Failed to fetch conversations for cascade delete: ${convErr.message}`);
+      }
+
       if (conversations && conversations.length > 0) {
         const conversationIds = conversations.map(c => c.id);
-        await supabaseAdmin
+        const { error: msgDelErr } = await supabaseAdmin
           .from('messages')
           .delete()
           .in('conversation_id', conversationIds);
+        if (msgDelErr) {
+          console.error('Delete client cascade: delete messages error:', msgDelErr);
+          throw new Error(`Failed to delete messages: ${msgDelErr.message}`);
+        }
         console.log(`   ✅ Deleted messages from ${conversations.length} conversation(s)`);
       }
 
       // 2. Delete conversations
-      await supabaseAdmin
+      const { error: convDelErr } = await supabaseAdmin
         .from('conversations')
         .delete()
         .eq('client_id', clientId);
+      if (convDelErr) {
+        console.error('Delete client cascade: delete conversations error:', convDelErr);
+        throw new Error(`Failed to delete conversations: ${convDelErr.message}`);
+      }
       console.log(`   ✅ Deleted conversations`);
 
       // 3. Delete receipts (via sessions)
-      const { data: sessions } = await supabaseAdmin
+      const { data: sessions, error: sessFetchErr } = await supabaseAdmin
         .from('sessions')
         .select('id')
         .eq('client_id', clientId);
 
+      if (sessFetchErr) {
+        console.error('Delete client cascade: fetch sessions error:', sessFetchErr);
+        throw new Error(`Failed to fetch sessions for cascade delete: ${sessFetchErr.message}`);
+      }
+
       if (sessions && sessions.length > 0) {
         const sessionIds = sessions.map(s => s.id);
-        await supabaseAdmin
+        const { error: recDelErr } = await supabaseAdmin
           .from('receipts')
           .delete()
           .in('session_id', sessionIds);
+        if (recDelErr) {
+          console.error('Delete client cascade: delete receipts error:', recDelErr);
+          throw new Error(`Failed to delete receipts: ${recDelErr.message}`);
+        }
         console.log(`   ✅ Deleted receipts for ${sessions.length} session(s)`);
       }
 
       // 4. Delete payments
-      await supabaseAdmin
+      const { error: payDelErr } = await supabaseAdmin
         .from('payments')
         .delete()
         .eq('client_id', clientId);
+      if (payDelErr) {
+        console.error('Delete client cascade: delete payments error:', payDelErr);
+        throw new Error(`Failed to delete payments: ${payDelErr.message}`);
+      }
       console.log(`   ✅ Deleted payments`);
 
       // 5. Delete sessions
-      await supabaseAdmin
+      const { error: sessDelErr } = await supabaseAdmin
         .from('sessions')
         .delete()
         .eq('client_id', clientId);
+      if (sessDelErr) {
+        console.error('Delete client cascade: delete sessions error:', sessDelErr);
+        throw new Error(`Failed to delete sessions: ${sessDelErr.message}`);
+      }
       console.log(`   ✅ Deleted sessions`);
 
       // 6. Delete assessment sessions
-      await supabaseAdmin
+      const { error: assSessDelErr } = await supabaseAdmin
         .from('assessment_sessions')
         .delete()
         .eq('client_id', clientId);
+      if (assSessDelErr) {
+        console.error('Delete client cascade: delete assessment_sessions error:', assSessDelErr);
+        throw new Error(`Failed to delete assessment sessions: ${assSessDelErr.message}`);
+      }
       console.log(`   ✅ Deleted assessment sessions`);
 
       // 7. Delete free assessments
-      await supabaseAdmin
+      const { error: freeAssDelErr } = await supabaseAdmin
         .from('free_assessments')
         .delete()
         .eq('client_id', clientId);
+      if (freeAssDelErr) {
+        console.error('Delete client cascade: delete free_assessments error:', freeAssDelErr);
+        throw new Error(`Failed to delete free assessments: ${freeAssDelErr.message}`);
+      }
       console.log(`   ✅ Deleted free assessments`);
 
       // 8. Delete client packages
-      await supabaseAdmin
+      const { error: pkgDelErr } = await supabaseAdmin
         .from('client_packages')
         .delete()
         .eq('client_id', clientId);
+      if (pkgDelErr) {
+        console.error('Delete client cascade: delete client_packages error:', pkgDelErr);
+        throw new Error(`Failed to delete client packages: ${pkgDelErr.message}`);
+      }
       console.log(`   ✅ Deleted client packages`);
 
       // 9. Delete client profile
-      const { error: deleteProfileError } = await supabaseAdmin
+      // Validate and coerce IDs to integers to prevent SQL injection
+      const clientIdInt = Number(clientId);
+      const userIdInt = Number(userId);
+      if (!Number.isInteger(clientIdInt) || !Number.isInteger(userIdInt)) {
+        console.error('Delete client cascade: Invalid ID format', { clientId, userId });
+        throw new Error('Invalid client or user ID format');
+      }
+      // Use safe parameterized queries instead of string interpolation
+      const { error: deleteProfileError1 } = await supabaseAdmin
         .from('clients')
         .delete()
-        .or(`id.eq.${clientId},user_id.eq.${userId}`); // Delete by either id or user_id
+        .eq('id', clientIdInt);
+      
+      // Also try deleting by user_id if different from id
+      if (clientIdInt !== userIdInt) {
+        const { error: deleteProfileError2 } = await supabaseAdmin
+          .from('clients')
+          .delete()
+          .eq('user_id', userIdInt);
+        
+        const deleteProfileError = deleteProfileError1 || deleteProfileError2;
 
-      if (deleteProfileError) {
-        console.error('Delete client profile error:', deleteProfileError);
-        return res.status(500).json(
-          errorResponse('Failed to delete client profile')
-        );
+        if (deleteProfileError) {
+          console.error('Delete client profile error:', deleteProfileError);
+          return res.status(500).json(
+            errorResponse('Failed to delete client profile')
+          );
+        }
+      } else {
+        // If IDs are the same, only one delete was needed
+        if (deleteProfileError1) {
+          console.error('Delete client profile error:', deleteProfileError1);
+          return res.status(500).json(
+            errorResponse('Failed to delete client profile')
+          );
+        }
       }
       console.log(`   ✅ Deleted client profile`);
     }
@@ -2050,14 +2350,6 @@ const deleteUser = async (req, res) => {
       errorResponse('Internal server error while deleting user')
     );
   }
-};
-
-const rescheduleSession = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
-const updateSessionPayment = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
 };
 
 const updateSession = async (req, res) => {
@@ -2112,7 +2404,15 @@ const updateSession = async (req, res) => {
       updateData.original_scheduled_date = original_scheduled_date || scheduled_date || null;
     }
     if (status) updateData.status = status;
-    if (price !== undefined) updateData.price = price ? parseFloat(price) : null;
+    if (price !== undefined) {
+      const parsed = price ? parseFloat(price) : null;
+      if (parsed !== null && !Number.isFinite(parsed)) {
+        return res.status(400).json(
+          errorResponse('Invalid price: must be a valid number')
+        );
+      }
+      updateData.price = parsed;
+    }
 
     // Update session
     const { data: updatedSession, error: updateError } = await supabaseAdmin
@@ -2314,10 +2614,6 @@ const getPsychologistAvailabilityForReschedule = async (req, res) => {
   }
 };
 
-const handleRescheduleRequest = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
 const getRescheduleRequests = async (req, res) => {
   try {
     const { status } = req.query; // 'pending', 'approved', 'rejected', or undefined for all
@@ -2346,40 +2642,61 @@ const getRescheduleRequests = async (req, res) => {
       notif.related_type === 'session'
     );
 
-    // Filter by status
+    // Filter by status (use status field or is_approved if available, fallback to is_read for backward compatibility)
     if (status === 'pending') {
-      rescheduleRequests = rescheduleRequests.filter(req => !req.is_read);
+      rescheduleRequests = rescheduleRequests.filter(req => 
+        (req.status === 'pending' || req.status === undefined) && 
+        (!req.is_approved || req.is_approved === false) && 
+        !req.is_read
+      );
     } else if (status === 'approved') {
-      rescheduleRequests = rescheduleRequests.filter(req => req.is_read);
+      rescheduleRequests = rescheduleRequests.filter(req => 
+        req.status === 'approved' || 
+        req.is_approved === true || 
+        req.is_read
+      );
+    } else if (status === 'rejected') {
+      rescheduleRequests = rescheduleRequests.filter(req => 
+        req.status === 'rejected' || 
+        req.is_approved === false
+      );
     }
 
-    // Enrich with session, client, and psychologist data
-    const enrichedRequests = await Promise.all(
-      rescheduleRequests.map(async (request) => {
-        const sessionId = request.related_id;
-        
-        // Get session details with client user email
-        const { data: session } = await supabaseAdmin
-          .from('sessions')
-          .select(`
+    // Batch-fetch sessions to avoid N+1
+    const sessionIds = [...new Set((rescheduleRequests || [])
+      .map(req => req.related_id)
+      .filter(Boolean))];
+    let sessionMap = {};
+    if (sessionIds.length > 0) {
+      const { data: sessions, error: sessionsError } = await supabaseAdmin
+        .from('sessions')
+        .select(`
+          *,
+          client:clients(
             *,
-            client:clients(
-              *,
-              user:users(email)
-            ),
-            psychologist:psychologists(*)
-          `)
-          .eq('id', sessionId)
-          .single();
+            user:users(email)
+          ),
+          psychologist:psychologists(*)
+        `)
+        .in('id', sessionIds);
+      if (sessionsError) {
+        console.error('Get reschedule requests: batch fetch sessions error:', sessionsError);
+        return res.status(500).json(
+          errorResponse('Failed to fetch session details for reschedule requests')
+        );
+      }
+      (sessions || []).forEach(s => { sessionMap[s.id] = s; });
+    }
 
-        return {
-          ...request,
-          session: session || null,
-          client: session?.client || null,
-          psychologist: session?.psychologist || null
-        };
-      })
-    );
+    const enrichedRequests = (rescheduleRequests || []).map((request) => {
+      const session = request.related_id ? sessionMap[request.related_id] : null;
+      return {
+        ...request,
+        session: session || null,
+        client: session?.client || null,
+        psychologist: session?.psychologist || null
+      };
+    });
 
     res.json(successResponse(enrichedRequests || [], 'Reschedule requests fetched successfully'));
 
@@ -2389,10 +2706,6 @@ const getRescheduleRequests = async (req, res) => {
       errorResponse('Internal server error while fetching reschedule requests')
     );
   }
-};
-
-const approveAssessmentRescheduleRequest = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
 };
 
 const getPsychologistCalendarEvents = async (req, res) => {
@@ -2463,12 +2776,22 @@ const getPsychologistCalendarEvents = async (req, res) => {
           endDateObj
         );
 
-        // Filter out events created by our own system
-        externalEvents = calendarEvents.filter(event => 
-          !event.summary?.includes('LittleMinds') && 
-          !event.summary?.includes('Session') &&
-          !event.summary?.includes('Therapy')
-        ).map(event => ({
+        // Filter out events created by our own system using platform-specific metadata
+        // Only exclude events that are positively identified as platform-created
+        externalEvents = calendarEvents.filter(event => {
+          // Check for platform-specific metadata indicators
+          const isPlatformCreated = 
+            event.creator?.email === 'no-reply@littleminds' ||
+            event.creator?.email === 'assessment.koott@gmail.com' ||
+            event.extendedProperties?.private?.littleMindsEvent === 'true' ||
+            event.extendedProperties?.private?.littleCareEvent === 'true' ||
+            event.source?.title === 'LittleMinds' ||
+            event.source?.title === 'Little Care';
+          
+          // Only exclude if positively identified as platform-created
+          // Keep events when metadata is absent (fail-safe: don't exclude by summary text alone)
+          return !isPlatformCreated;
+        }).map(event => ({
           id: event.id,
           summary: event.summary || 'Untitled Event',
           start: event.start,
@@ -2493,7 +2816,18 @@ const getPsychologistCalendarEvents = async (req, res) => {
         dateTime: `${session.scheduled_date}T${session.scheduled_time}:00`
       },
       end: {
-        dateTime: `${session.scheduled_date}T${session.scheduled_time}:00`
+        dateTime: (() => {
+          // Calculate end time by adding 50 minutes to start time
+          const startDateTime = new Date(`${session.scheduled_date}T${session.scheduled_time}:00`);
+          const endDateTime = new Date(startDateTime.getTime() + 50 * 60 * 1000); // Add 50 minutes
+          // Format back to ISO string format (YYYY-MM-DDTHH:MM:SS)
+          const year = endDateTime.getFullYear();
+          const month = String(endDateTime.getMonth() + 1).padStart(2, '0');
+          const day = String(endDateTime.getDate()).padStart(2, '0');
+          const hours = String(endDateTime.getHours()).padStart(2, '0');
+          const minutes = String(endDateTime.getMinutes()).padStart(2, '0');
+          return `${year}-${month}-${day}T${hours}:${minutes}:00`;
+        })()
       },
       status: session.status,
       session_type: session.session_type,
@@ -2528,10 +2862,6 @@ const getPsychologistCalendarEvents = async (req, res) => {
   }
 };
 
-const checkCalendarSyncStatus = async (req, res) => {
-  return res.status(501).json(errorResponse('Function needs to be restored from backup'));
-};
-
 module.exports = {
   getAllUsers,
   getUserDetails,
@@ -2539,30 +2869,18 @@ module.exports = {
   deactivateUser,
   getPlatformStats,
   searchUsers,
-  getRecentActivities,
   getRecentUsers,
   getRecentBookings,
   getAllPsychologists,
   createPsychologist,
   updatePsychologist,
   deletePsychologist,
-  addNextDayAvailability,
   updateAllPsychologistsAvailability,
-  createPsychologistPackages,
-  checkMissingPackages,
-  deletePackage,
-  getStuckSlotLocks,
   createUser,
-  updateUser,
   deleteUser,
-  rescheduleSession,
-  updateSessionPayment,
   updateSession,
   getPsychologistAvailabilityForReschedule,
   createManualBooking,
-  handleRescheduleRequest,
   getRescheduleRequests,
-  approveAssessmentRescheduleRequest,
-  getPsychologistCalendarEvents,
-  checkCalendarSyncStatus
+  getPsychologistCalendarEvents
 };

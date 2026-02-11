@@ -2,6 +2,12 @@ const { google } = require('googleapis');
 const crypto = require('crypto');
 const fs = require('fs').promises;
 
+// Shared redirect URI constant
+const GOOGLE_OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI || 'http://localhost:5001/api/oauth2/callback';
+if (!process.env.GOOGLE_OAUTH_REDIRECT_URI) {
+  console.warn('⚠️ GOOGLE_OAUTH_REDIRECT_URI not set, using default localhost. Set this in production!');
+}
+
 // Logging toggle for production
 const DEBUG_MEET = process.env.DEBUG_MEET === 'true';
 const log = (...args) => DEBUG_MEET && console.log(...args);
@@ -13,28 +19,67 @@ class MeetLinkService {
     this.serviceAccount = null;
     this.oauthTokens = null;
     this.tokensLoaded = false;
-    this.initializeAuth();
+    this.serviceAccountReady = null; // Promise that resolves when service account is initialized
+    
+    // Initialize service account and create readiness promise
+    this.serviceAccountReady = this.initializeAuth().then(() => {
+      log('✅ Service account initialized');
+      return true;
+    }).catch(error => {
+      log('❌ Error initializing auth:', error.message || error);
+      console.error('Failed to initialize Meet link auth:', error);
+      // Still resolve to allow fallback behavior
+      return false;
+    });
+    
     // Load OAuth tokens asynchronously - but track when done
     this.loadOAuthTokensFromFile().catch(error => {
-      log('ℹ️ OAuth token loading completed');
+      log('❌ Error loading OAuth tokens from file:', error.message || error);
+      console.error('Failed to load OAuth tokens:', error);
     });
   }
 
   // Helper: Format time consistently (HH:MM -> HH:MM:SS)
   formatTime(time) {
     if (!time) return '00:00:00';
-    return time.length === 5 ? `${time}:00` : time;
+    
+    // Validate and normalize input: H:MM(:SS)? or HH:MM(:SS)?
+    const timePattern = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+    const match = time.match(timePattern);
+    
+    if (!match) {
+      // Invalid format, return default
+      return '00:00:00';
+    }
+    
+    const hours = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const seconds = match[3] || '00';
+    const secondsInt = parseInt(seconds, 10);
+    
+    // Validate ranges
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || secondsInt < 0 || secondsInt > 59) {
+      return '00:00:00';
+    }
+    
+    // Zero-pad hour and minute to two digits, use validated seconds
+    const paddedHours = String(hours).padStart(2, '0');
+    const paddedMinutes = String(minutes).padStart(2, '0');
+    const paddedSeconds = String(secondsInt).padStart(2, '0');
+    
+    return `${paddedHours}:${paddedMinutes}:${paddedSeconds}`;
   }
 
   // Helper: Build normalized return object
   createResult(success, meetLink, method, eventId = null, eventLink = null, error = null, note = null) {
     return {
       success,
-      meetLink: meetLink || 'https://meet.google.com/new?hs=122&authuser=0',
+      meetLink: meetLink || null, // Return null when no valid link available
       method: method || 'fallback',
       eventId,
       eventLink,
-      error
+      error,
+      note: note || null
     };
   }
 
@@ -69,7 +114,7 @@ class MeetLinkService {
       const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        'http://localhost:5001/api/oauth2/callback'
+        GOOGLE_OAUTH_REDIRECT_URI
       );
 
       oauth2Client.setCredentials({
@@ -252,7 +297,7 @@ class MeetLinkService {
       const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        'http://localhost:5001/api/oauth2/callback'
+        GOOGLE_OAUTH_REDIRECT_URI
       );
 
       // If userAuth is provided, check if token needs refresh and set refresh token
@@ -311,11 +356,17 @@ class MeetLinkService {
       }
 
       // Update credentials with refreshed token if it was refreshed
-      if (accessToken !== oauthToken) {
+      // Guard against null userAuth to prevent TypeError
+      if (accessToken !== oauthToken && userAuth) {
         oauth2Client.setCredentials({
           access_token: accessToken,
-          refresh_token: userAuth.refresh_token,
-          expiry_date: userAuth.expiry_date
+          refresh_token: userAuth.refresh_token || undefined,
+          expiry_date: userAuth.expiry_date || undefined
+        });
+      } else if (accessToken !== oauthToken && !userAuth) {
+        // If userAuth is null, only set access token
+        oauth2Client.setCredentials({
+          access_token: accessToken
         });
       }
       
@@ -360,7 +411,7 @@ class MeetLinkService {
         anyoneCanAddSelf: true, // Allows anyone with the link to join without approval
         conferenceData: {
           createRequest: {
-            requestId: `meet-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            requestId: `meet-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
             conferenceSolutionKey: {
               type: 'hangoutsMeet'
             }
@@ -369,7 +420,16 @@ class MeetLinkService {
       };
 
       log('📅 Creating calendar event with Meet link...');
-      log('   👥 Attendees:', attendees.map(a => a.email).join(', ') || 'None');
+      // Mask attendee emails for logging
+      const maskEmail = (email) => {
+        if (!email || typeof email !== 'string' || !email.includes('@')) return '***@***';
+        const [local, domain] = email.split('@');
+        const maskedLocal = local.length > 2 
+          ? local.substring(0, 1) + '***' + local.substring(local.length - 1)
+          : '***';
+        return `${maskedLocal}@${domain}`;
+      };
+      log('   👥 Attendees:', attendees.length > 0 ? `${attendees.length} attendee(s)` : 'None');
       const createdEvent = await calendar.events.insert({
         calendarId: 'primary',
         resource: event,
@@ -440,13 +500,26 @@ class MeetLinkService {
       
       logError('   OAuth error details:', errorDetails);
       
-      // Log the event data that was sent (for debugging)
+      // Log the event data that was sent (for debugging) - mask attendee emails
+      const maskEmail = (email) => {
+        if (!email || typeof email !== 'string' || !email.includes('@')) return '***@***';
+        const [local, domain] = email.split('@');
+        const maskedLocal = local.length > 2 
+          ? local.substring(0, 1) + '***' + local.substring(local.length - 1)
+          : '***';
+        return `${maskedLocal}@${domain}`;
+      };
+      const maskedAttendees = (sessionData.attendees || []).map(a => {
+        if (typeof a === 'string') return maskEmail(a);
+        if (a && a.email) return maskEmail(a.email);
+        return '***@***';
+      });
       logError('   Event data that was sent:', {
         summary: sessionData.summary,
         startDate: sessionData.startDate,
         startTime: sessionData.startTime,
         endTime: sessionData.endTime,
-        attendees: sessionData.attendees || []
+        attendees: maskedAttendees
       });
       
       return this.createResult(false, null, 'oauth_calendar', null, null, error.message);
@@ -460,6 +533,23 @@ class MeetLinkService {
   async createMeetLinkWithCalendar(sessionData) {
     try {
       log('🔄 Creating Meet link with Calendar API...');
+      
+      // Wait for service account to be initialized
+      if (this.serviceAccountReady) {
+        await this.serviceAccountReady;
+      }
+      
+      if (!this.serviceAccount) {
+        logError('❌ Service account not available');
+        return this.createResult(
+          false,
+          null,
+          'service_account_not_available',
+          null,
+          null,
+          'Service account not initialized'
+        );
+      }
       
       // Create service account auth
       const auth = new google.auth.JWT({
@@ -497,10 +587,10 @@ class MeetLinkService {
       // Service accounts CANNOT use attendees field - detect upfront and skip it
       const canUseAttendees = false; // Service account limitation
       
-      // Add attendee emails to description so they're documented
+      // Do not put PII (attendee emails) in description; use non-identifying reference
       let description = sessionData.description || 'Therapy session with Google Meet';
       if (attendeeEmails.length > 0) {
-        description += `\n\nAttendees: ${attendeeEmails.join(', ')}\n\nJoin via the Google Meet link above.`;
+        description += `\n\nAttendees: see guest list in calendar.\n\nJoin via the Google Meet link above.`;
       }
 
       // Create event WITHOUT attendees field (service account limitation)
@@ -527,11 +617,20 @@ class MeetLinkService {
         }
       };
 
+      // Mask attendee emails for logging
+      const maskEmail = (email) => {
+        if (!email || typeof email !== 'string' || !email.includes('@')) return '***@***';
+        const [local, domain] = email.split('@');
+        const maskedLocal = local.length > 2 
+          ? local.substring(0, 1) + '***' + local.substring(local.length - 1)
+          : '***';
+        return `${maskedLocal}@${domain}`;
+      };
       log('🔍 Calendar API Event Data:', {
         summary: event.summary,
         start: event.start?.dateTime || event.start?.date,
         end: event.end?.dateTime || event.end?.date,
-        attendees: attendeeEmails.join(', ') || 'None (service account limitation)',
+        attendeesCount: attendeeEmails.length || 0,
         conferenceData: event.conferenceData ? 'present' : 'none'
       });
 
@@ -710,6 +809,85 @@ class MeetLinkService {
     } catch (error) {
       logError('❌ Error waiting for conference:', error);
       return null;
+    }
+  }
+
+  /**
+   * Delete a calendar event by ID (e.g. on rollback).
+   * Uses userAuth if provided (event on user's primary calendar), else service account (primary).
+   */
+  async deleteCalendarEvent(eventId, userAuth = null) {
+    if (!eventId) return { success: false, error: 'No eventId provided' };
+    try {
+      let calendar;
+      if (userAuth?.access_token) {
+        const oauth2Client = new google.auth.OAuth2(
+          process.env.GOOGLE_CLIENT_ID,
+          process.env.GOOGLE_CLIENT_SECRET,
+          GOOGLE_OAUTH_REDIRECT_URI
+        );
+        
+        // Check if token is expired and refresh if needed
+        const now = Date.now();
+        const expiryDate = userAuth.expiry_date ? new Date(userAuth.expiry_date).getTime() : null;
+        const bufferTime = 5 * 60 * 1000; // 5 minutes buffer
+        
+        if (expiryDate && expiryDate <= (now + bufferTime)) {
+          log('🔄 Access token expired or expires soon, refreshing before delete...');
+          try {
+            oauth2Client.setCredentials({
+              access_token: userAuth.access_token,
+              refresh_token: userAuth.refresh_token,
+              expiry_date: userAuth.expiry_date
+            });
+            const { token } = await oauth2Client.getAccessToken();
+            const updatedCredentials = oauth2Client.credentials;
+            
+            // Update userAuth with refreshed tokens
+            if (updatedCredentials && updatedCredentials.access_token) {
+              userAuth.access_token = updatedCredentials.access_token || token;
+              userAuth.expiry_date = updatedCredentials.expiry_date;
+              userAuth.refresh_token = updatedCredentials.refresh_token || userAuth.refresh_token;
+            } else if (token) {
+              userAuth.access_token = token;
+            }
+            log('✅ Token refreshed before delete');
+          } catch (refreshError) {
+            logError('❌ Token refresh failed before delete:', refreshError.message);
+            // Continue with original token - might still work
+          }
+        }
+        
+        oauth2Client.setCredentials({
+          access_token: userAuth.access_token,
+          refresh_token: userAuth.refresh_token,
+          expiry_date: userAuth.expiry_date
+        });
+        calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+      } else if (this.serviceAccount) {
+        const auth = new google.auth.JWT({
+          email: this.serviceAccount.client_email,
+          key: this.serviceAccount.private_key,
+          scopes: ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events']
+        });
+        await auth.authorize();
+        calendar = google.calendar({ version: 'v3', auth });
+      } else {
+        return { success: false, error: 'No auth available to delete event' };
+      }
+      
+      await calendar.events.delete({ calendarId: 'primary', eventId });
+      log('✅ Calendar event deleted:', eventId);
+      return { success: true };
+    } catch (error) {
+      logError('❌ deleteCalendarEvent failed:', error.message);
+      
+      // Check for 401/invalid-auth errors and return clear message
+      if (error.code === 401 || error.message?.includes('invalid') || error.message?.includes('expired')) {
+        return { success: false, error: 'access_token expired' };
+      }
+      
+      return { success: false, error: error.message };
     }
   }
 

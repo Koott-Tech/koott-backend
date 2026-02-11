@@ -4,7 +4,7 @@
  * Provides atomic slot locking to prevent double bookings during payment process.
  * 
  * Flow:
- * 1. User clicks "Pay" -> holdSlot() creates lock with 10min expiry
+ * 1. User clicks "Pay" -> holdSlot() creates lock with 5min expiry
  * 2. Payment succeeds -> webhook updates lock to PAYMENT_SUCCESS
  * 3. Session created -> lock updated to SESSION_CREATED
  * 4. Expired locks -> automatically released by cleanup job
@@ -242,9 +242,11 @@ const extendSlotLock = async (orderId, extendByMinutes = 10) => {
       };
     }
 
-    // Calculate new expiry time
+    // Calculate new expiry time - use max of current time and currentExpiry to handle expired locks
     const currentExpiry = new Date(slotLock.slot_expires_at);
-    const newExpiry = new Date(currentExpiry);
+    const now = new Date();
+    const baseExpiry = currentExpiry > now ? currentExpiry : now;
+    const newExpiry = new Date(baseExpiry);
     newExpiry.setMinutes(newExpiry.getMinutes() + extendByMinutes);
 
     const { data: updatedLock, error: updateError } = await supabaseAdmin
@@ -556,18 +558,37 @@ const releaseExpiredSlots = async () => {
     
     // Check which of these old locks have failed payments
     const failedPaymentLocks = [];
-    if (oldLocks && !oldLocksError) {
-      for (const lock of oldLocks) {
-        if (lock.order_id) {
-          const { data: payment } = await supabaseAdmin
-            .from('payments')
-            .select('status')
-            .eq('razorpay_order_id', lock.order_id)
-            .maybeSingle();
+    if (oldLocks && !oldLocksError && oldLocks.length > 0) {
+      // Batch query: collect all order IDs and query once
+      const orderIds = oldLocks
+        .map(lock => lock.order_id)
+        .filter(Boolean); // Remove null/undefined
+      
+      if (orderIds.length > 0) {
+        // Single batched query for all payments
+        const { data: payments, error: paymentsError } = await supabaseAdmin
+          .from('payments')
+          .select('razorpay_order_id, status')
+          .in('razorpay_order_id', orderIds);
+        
+        if (paymentsError) {
+          console.error('❌ Error fetching payments for old locks:', paymentsError);
+        } else {
+          // Build map from razorpay_order_id to payment status
+          const paymentMap = new Map();
+          (payments || []).forEach(payment => {
+            paymentMap.set(payment.razorpay_order_id, payment);
+          });
           
-          // If payment is failed or doesn't exist, mark lock for release
-          if (!payment || payment.status === 'failed') {
-            failedPaymentLocks.push(lock);
+          // Iterate oldLocks and check payment status from map
+          for (const lock of oldLocks) {
+            if (lock.order_id) {
+              const payment = paymentMap.get(lock.order_id);
+              // If payment is failed or doesn't exist, mark lock for release
+              if (!payment || payment.status === 'failed') {
+                failedPaymentLocks.push(lock);
+              }
+            }
           }
         }
       }
@@ -575,18 +596,37 @@ const releaseExpiredSlots = async () => {
 
     // Also check for pending payments with expired locks (user cancelled/exited payment)
     const pendingPaymentLocks = [];
-    if (expiredLocks) {
-      for (const lock of expiredLocks) {
-        if (lock.order_id) {
-          const { data: payment } = await supabaseAdmin
-            .from('payments')
-            .select('id, status')
-            .eq('razorpay_order_id', lock.order_id)
-            .maybeSingle();
+    if (expiredLocks && expiredLocks.length > 0) {
+      // Batch query: collect all order IDs and query once
+      const orderIds = expiredLocks
+        .map(lock => lock.order_id)
+        .filter(Boolean); // Remove null/undefined
+      
+      if (orderIds.length > 0) {
+        // Single batched query for all payments
+        const { data: payments, error: paymentsError } = await supabaseAdmin
+          .from('payments')
+          .select('id, status, razorpay_order_id')
+          .in('razorpay_order_id', orderIds);
+        
+        if (paymentsError) {
+          console.error('❌ Error fetching payments for expired locks:', paymentsError);
+        } else {
+          // Build map from razorpay_order_id to payment
+          const paymentMap = new Map();
+          (payments || []).forEach(payment => {
+            paymentMap.set(payment.razorpay_order_id, payment);
+          });
           
-          // If payment is still pending, it means user cancelled/exited without completing
-          if (payment && payment.status === 'pending') {
-            pendingPaymentLocks.push(lock);
+          // Iterate expiredLocks and check payment status from map
+          for (const lock of expiredLocks) {
+            if (lock.order_id) {
+              const payment = paymentMap.get(lock.order_id);
+              // If payment is still pending, it means user cancelled/exited without completing
+              if (payment && payment.status === 'pending') {
+                pendingPaymentLocks.push(lock);
+              }
+            }
           }
         }
       }
@@ -715,20 +755,19 @@ const cleanupAbandonedPendingPayments = async () => {
       };
     }
 
-    // Check which payments have no active slot locks
+    // Batch lookup: collect order IDs and fetch matching slot_locks in one query
+    const orderIds = oldPendingPayments.map(p => p.razorpay_order_id).filter(Boolean);
     const abandonedPayments = [];
-    for (const payment of oldPendingPayments) {
-      if (payment.razorpay_order_id) {
-        const { data: slotLock } = await supabaseAdmin
-          .from('slot_locks')
-          .select('id, status')
-          .eq('order_id', payment.razorpay_order_id)
-          .in('status', ['SLOT_HELD', 'PAYMENT_PENDING'])
-          .maybeSingle();
-
-        // If no active slot lock exists, payment was abandoned
-        if (!slotLock) {
-          abandonedPayments.push(payment.razorpay_order_id);
+    if (orderIds.length > 0) {
+      const { data: matchingLocks } = await supabaseAdmin
+        .from('slot_locks')
+        .select('order_id')
+        .in('order_id', orderIds)
+        .in('status', ['SLOT_HELD', 'PAYMENT_PENDING']);
+      const lockedOrderIds = new Set((matchingLocks || []).map(l => l.order_id));
+      for (const orderId of orderIds) {
+        if (!lockedOrderIds.has(orderId)) {
+          abandonedPayments.push(orderId);
         }
       }
     }
@@ -785,6 +824,8 @@ module.exports = {
   releaseSlotLock,
   releaseExpiredSlots,
   cleanupAbandonedPendingPayments,
+  extendSlotLock,
+  checkPaymentOrderMatchesLock,
   SLOT_HOLD_DURATION_MINUTES
 };
 

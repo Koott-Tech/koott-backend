@@ -15,6 +15,36 @@ const COMMON_PASSWORDS = [
 ];
 
 /**
+ * Shared pattern detection logic for sequential and common patterns
+ * @param {string} password - Password to check
+ * @returns {boolean} - True if password contains weak patterns
+ */
+function hasSequentialOrCommonPattern(password) {
+  if (!password || typeof password !== 'string') return false;
+  
+  const passwordLower = password.toLowerCase();
+  
+  // Check against common passwords
+  if (COMMON_PASSWORDS.includes(passwordLower)) {
+    return true;
+  }
+  
+  // Check for repeated characters (e.g., "aaaaaa")
+  if (/(.)\1{3,}/.test(password)) {
+    return true;
+  }
+  
+  // Check for sequential characters (e.g., "12345", "abcde", "23456")
+  const sequentialPatterns = [
+    /01234|12345|23456|34567|45678|56789/i,
+    /abcdef|bcdefg|cdefgh|defghi|efghij|fghijk|ghijkl|hijklm|ijklmn|jklmno|klmnop|lmnopq|mnopqr|nopqrs|opqrst|pqrstu|qrstuv|rstuvw|stuvwx|tuvwxy|uvwxyz/i,
+    /qwerty/i
+  ];
+  
+  return sequentialPatterns.some(pattern => pattern.test(password));
+}
+
+/**
  * Validate password against policy
  * @param {string} password - Password to validate
  * @returns {{valid: boolean, errors: string[]}}
@@ -33,7 +63,7 @@ function validatePassword(password) {
 
   // Maximum length: 128 characters (prevent DoS)
   if (password.length > 128) {
-    errors.push('Password must be less than 128 characters');
+    errors.push('Password must be at most 128 characters');
   }
 
   // Require uppercase letter
@@ -56,20 +86,16 @@ function validatePassword(password) {
     errors.push('Password must contain at least one special character (!@#$%^&*...)');
   }
 
-  // Check against common passwords
-  const passwordLower = password.toLowerCase();
-  if (COMMON_PASSWORDS.includes(passwordLower)) {
-    errors.push('Password is too common. Please choose a more unique password');
-  }
-
-  // Check for repeated characters (e.g., "aaaaaa")
-  if (/(.)\1{3,}/.test(password)) {
-    errors.push('Password contains too many repeated characters');
-  }
-
-  // Check for sequential characters (e.g., "12345", "abcde")
-  if (/01234|12345|23456|34567|45678|56789|abcdef|bcdefg|cdefgh|defghi|efghij|fghijk|ghijkl|hijklm|ijklmn|jklmno|klmnop|lmnopq|mnopqr|nopqrs|opqrst|pqrstu|qrstuv|rstuvw|stuvwx|tuvwxy|uvwxyz/i.test(password)) {
-    errors.push('Password contains sequential characters');
+  // Check for weak patterns using shared logic
+  if (hasSequentialOrCommonPattern(password)) {
+    const passwordLower = password.toLowerCase();
+    if (COMMON_PASSWORDS.includes(passwordLower)) {
+      errors.push('Password is too common. Please choose a more unique password');
+    } else if (/(.)\1{3,}/.test(password)) {
+      errors.push('Password contains too many repeated characters');
+    } else {
+      errors.push('Password contains sequential characters');
+    }
   }
 
   return {
@@ -79,11 +105,12 @@ function validatePassword(password) {
 }
 
 /**
- * Get password strength score (0-100)
+ * Get password strength score (0-85)
  * @param {string} password - Password to score
- * @returns {number} - Strength score (0-100)
+ * @returns {number} - Strength score (0-85)
  */
 function getPasswordStrength(password) {
+  if (typeof password !== 'string') return 0;
   if (!password) return 0;
 
   let score = 0;
@@ -104,12 +131,19 @@ function getPasswordStrength(password) {
   if (uniqueChars >= password.length * 0.5) score += 10;
   if (uniqueChars >= password.length * 0.7) score += 10;
 
-  // Penalties
-  if (COMMON_PASSWORDS.includes(password.toLowerCase())) score -= 50;
-  if (/(.)\1{3,}/.test(password)) score -= 20;
-  if (/01234|12345|abcdef|qwerty/i.test(password)) score -= 30;
+  // Penalties using shared pattern detection
+  if (hasSequentialOrCommonPattern(password)) {
+    const passwordLower = password.toLowerCase();
+    if (COMMON_PASSWORDS.includes(passwordLower)) {
+      score -= 50;
+    } else if (/(.)\1{3,}/.test(password)) {
+      score -= 20;
+    } else {
+      score -= 30; // Sequential pattern penalty
+    }
+  }
 
-  return Math.max(0, Math.min(100, score));
+  return Math.max(0, Math.min(85, score));
 }
 
 module.exports = {

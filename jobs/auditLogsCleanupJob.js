@@ -56,27 +56,39 @@ const runAuditLogsCleanup = async () => {
 
     console.log(`📋 Found ${logsToDelete} audit log(s) older than 1 week`);
 
-    // Delete logs older than 1 week
-    const { error: deleteError } = await supabaseAdmin
-      .from('audit_logs')
-      .delete()
-      .lt('timestamp', cutoffDate);
+    // Batched deletion to avoid long transactions/timeouts
+    const BATCH_SIZE = 1000;
+    let totalDeleted = 0;
+    let hasMore = true;
 
-    if (deleteError) {
-      console.error('❌ Error deleting audit logs:', deleteError);
-      return {
-        success: false,
-        deleted: 0,
-        error: deleteError.message
-      };
+    while (hasMore) {
+      const { data: deletedRows, error: deleteError } = await supabaseAdmin
+        .from('audit_logs')
+        .delete()
+        .lt('timestamp', cutoffDate)
+        .limit(BATCH_SIZE)
+        .select('id');
+
+      if (deleteError) {
+        console.error('❌ Error deleting audit logs:', deleteError);
+        return {
+          success: false,
+          deleted: totalDeleted,
+          error: deleteError.message
+        };
+      }
+
+      const deletedCount = deletedRows?.length || 0;
+      totalDeleted += deletedCount;
+      hasMore = deletedCount === BATCH_SIZE; // If we got a full batch, there might be more
     }
 
     const duration = Date.now() - startTime;
-    console.log(`✅ Audit logs cleanup completed: Deleted ${logsToDelete} log(s) (${duration}ms)`);
+    console.log(`✅ Audit logs cleanup completed: Deleted ${totalDeleted} log(s) (${duration}ms)`);
 
     return {
       success: true,
-      deleted: logsToDelete,
+      deleted: totalDeleted,
       duration
     };
   } catch (error) {
@@ -95,22 +107,35 @@ const runAuditLogsCleanup = async () => {
  * Runs cleanup job weekly (every 7 days)
  * 
  * @param {number} intervalDays - Interval in days (default: 7)
+ * @returns {Function} Stop function to cancel the scheduler
  */
 const startAuditLogsCleanupScheduler = (intervalDays = 7) => {
   console.log(`⏰ Starting audit logs cleanup scheduler (every ${intervalDays} days)`);
 
+  let intervalId = null;
+  let inFlightPromise = null;
+
   // Run immediately on start
-  runAuditLogsCleanup().catch(err => {
+  inFlightPromise = runAuditLogsCleanup().catch(err => {
     console.error('❌ Error in initial audit logs cleanup run:', err);
   });
 
   // Schedule recurring runs (weekly)
   const intervalMs = intervalDays * 24 * 60 * 60 * 1000;
-  setInterval(() => {
-    runAuditLogsCleanup().catch(err => {
+  intervalId = setInterval(() => {
+    inFlightPromise = runAuditLogsCleanup().catch(err => {
       console.error('❌ Error in scheduled audit logs cleanup:', err);
     });
   }, intervalMs);
+
+  // Return stop function
+  return function stopAuditLogsCleanup() {
+    if (intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
+    }
+    // Note: inFlightPromise will complete naturally, we don't cancel it
+  };
 };
 
 module.exports = {
@@ -118,3 +143,9 @@ module.exports = {
   startAuditLogsCleanupScheduler
 };
 
+// Export stop function separately for convenience
+module.exports.stopAuditLogsCleanupScheduler = function(stopFn) {
+  if (stopFn && typeof stopFn === 'function') {
+    stopFn();
+  }
+};

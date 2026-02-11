@@ -7,7 +7,14 @@ let advancedBotDetector = null;
 try {
   advancedBotDetector = require('../utils/advancedBotDetector');
 } catch (e) {
-  // Bot detector not available - Cloudflare handles bot detection now
+  // Only treat MODULE_NOT_FOUND as optional, rethrow other errors
+  if (e.code === 'MODULE_NOT_FOUND' || e.code === 'ERR_MODULE_NOT_FOUND') {
+    // Bot detector not available - Cloudflare handles bot detection now
+  } else {
+    // Unexpected error (syntax, runtime, etc.) - log and rethrow
+    console.error('❌ Unexpected error loading advancedBotDetector:', e);
+    throw e;
+  }
 }
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 

@@ -5,7 +5,8 @@ const {
   errorResponse,
   formatDate,
   formatTime,
-  addMinutesToTime
+  addMinutesToTime,
+  maskPhoneNumber
 } = require('../utils/helpers');
 const availabilityService = require('../utils/availabilityCalendarService');
 const meetLinkService = require('../utils/meetLinkService');
@@ -105,13 +106,29 @@ const getPaymentCredit = async (req, res) => {
       );
     }
 
-    // In the clients table, id is the client_id used in payments
+    // Multi-strategy lookup: new system uses user_id, legacy uses id
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
-    const { data: client, error: clientError } = await supabaseAdmin
+    let client = null;
+    let clientError = null;
+    const { data: clientByUserId, error: errorByUserId } = await supabaseAdmin
       .from('clients')
       .select('id')
-      .eq('id', userId)
+      .eq('user_id', userId)
       .single();
+    if (clientByUserId && !errorByUserId) {
+      client = clientByUserId;
+    } else {
+      const { data: clientById, error: errorById } = await supabaseAdmin
+        .from('clients')
+        .select('id')
+        .eq('id', userId)
+        .single();
+      if (clientById && !errorById) {
+        client = clientById;
+      } else {
+        clientError = errorByUserId || errorById;
+      }
+    }
 
     if (clientError || !client) {
       console.error('Client profile not found for credit lookup:', clientError);
@@ -207,13 +224,19 @@ const updateProfile = async (req, res) => {
     }
     // If child_name is not in updateData, preserve existing value (don't update it)
     
-    // Handle optional child_age - allow clearing by setting to null or default
+    // Handle optional child_age - allow clearing by setting to null or default; guard against non-numeric/NaN
     if (updateData.child_age !== undefined) {
       if (updateData.child_age === null || updateData.child_age === '' || updateData.child_age === 0) {
         // User wants to clear it - try null first, if database rejects it, use default value 1
         updateData.child_age = null;
       } else {
-        updateData.child_age = Number(updateData.child_age);
+        const num = Number(updateData.child_age);
+        if (!Number.isFinite(num) || num < 0) {
+          return res.status(400).json(
+            errorResponse('child_age must be a valid non-negative number')
+          );
+        }
+        updateData.child_age = num;
       }
     }
     // If child_age is not in updateData, preserve existing value (don't update it)
@@ -368,6 +391,23 @@ const updateProfile = async (req, res) => {
         ? `Failed with ${lastErrorDetails.attempt?.column}=${lastErrorDetails.attempt?.value}: ${lastErrorDetails.error?.message || errorMessage}`
         : errorMessage;
       
+      // Sanitize updateData to remove PII
+      const sanitizeUpdateData = (data) => {
+        if (!data || typeof data !== 'object') return {};
+        const sanitized = {};
+        const sensitiveKeys = ['first_name', 'last_name', 'phone_number', 'email', 'ssn', 'social_security_number'];
+        Object.keys(data).forEach(key => {
+          if (sensitiveKeys.includes(key)) {
+            sanitized[key] = '[REDACTED]';
+          } else {
+            sanitized[key] = data[key];
+          }
+        });
+        return sanitized;
+      };
+      
+      const sanitizedUpdateData = sanitizeUpdateData(updateData);
+      
       console.error('Update client profile error:', {
         error,
         errorCode,
@@ -375,7 +415,7 @@ const updateProfile = async (req, res) => {
         lastErrorDetails,
         userId,
         userRole,
-        updateData
+        updateData: sanitizedUpdateData
       });
       
       return res.status(500).json(
@@ -468,11 +508,11 @@ const getSessions = async (req, res) => {
       // For regular queries, use standard pagination
       let sessions, upcomingTotalCount, sessionsCount = 0;
       if (isUpcomingFilter || isPendingFilter) {
-        // Fetch larger batch for upcoming (enough to get all upcoming sessions)
-        const fetchLimit = 100;
-        const { data: allSessions, error, count } = await query.limit(fetchLimit);
+        // Fetch larger batch for upcoming (configurable to avoid silent truncation)
+        const fetchLimit = parseInt(process.env.SESSIONS_UPCOMING_FETCH_LIMIT, 10) || 500;
+        const { data: allSessions, error } = await query.limit(fetchLimit);
 
-      if (error) {
+        if (error) {
           throw error;
         }
         
@@ -533,9 +573,12 @@ const getSessions = async (req, res) => {
           });
         }
         
-        // Store total count for pagination
+        // Store total count for pagination; detect potential truncation
         upcomingTotalCount = filteredSessions.length;
-        
+        if (allSessions && allSessions.length >= fetchLimit) {
+          console.warn(`⚠️ Sessions upcoming/pending fetch may be truncated (fetched ${fetchLimit}, consider increasing SESSIONS_UPCOMING_FETCH_LIMIT)`);
+        }
+
         // Apply pagination after filtering
         const offset = (page - 1) * limit;
         sessions = filteredSessions.slice(offset, offset + limit);
@@ -801,7 +844,7 @@ const bookSession = async (req, res) => {
       await userInteractionLogger.logBooking({
         userId: req.user.id,
         userRole: req.user.role,
-        psychologistId,
+        psychologistId: psychologist_id,
         packageId: package_id,
         scheduledDate: scheduled_date,
         scheduledTime: scheduled_time,
@@ -826,13 +869,29 @@ const bookSession = async (req, res) => {
       );
     }
 
-    // Get client profile from clients table
+    // Get client profile: try user_id first (new system), then id (legacy)
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
-    const { data: client, error: clientError } = await supabaseAdmin
+    let client = null;
+    let clientError = null;
+    const { data: clientByUserId, error: errorByUserId } = await supabaseAdmin
       .from('clients')
       .select('id')
-      .eq('id', userId)
+      .eq('user_id', userId)
       .single();
+    if (clientByUserId && !errorByUserId) {
+      client = clientByUserId;
+    } else {
+      const { data: clientById, error: errorById } = await supabaseAdmin
+        .from('clients')
+        .select('id')
+        .eq('id', userId)
+        .single();
+      if (clientById && !errorById) {
+        client = clientById;
+      } else {
+        clientError = errorByUserId || errorById;
+      }
+    }
 
     if (clientError || !client) {
       console.error('Client profile not found:', clientError);
@@ -1143,6 +1202,7 @@ const bookSession = async (req, res) => {
             console.log('✅ WhatsApp confirmation sent to client via UltraMsg');
             
             // Log WhatsApp success
+            const maskedClientPhone = maskPhoneNumber(clientPhone);
             await userInteractionLogger.logInteraction({
               userId,
               userRole,
@@ -1150,7 +1210,7 @@ const bookSession = async (req, res) => {
               status: 'success',
               details: {
                 sessionId: session.id,
-                clientPhone: clientPhone,
+                maskedClientPhone: maskedClientPhone,
                 messageId: clientWaResult.data?.msgId
               }
             });
@@ -1159,6 +1219,7 @@ const bookSession = async (req, res) => {
             console.log('ℹ️ Client WhatsApp skipped:', skipReason);
             
             // Log WhatsApp skip with reason
+            const maskedClientPhone = maskPhoneNumber(clientPhone);
             await userInteractionLogger.logInteraction({
               userId,
               userRole,
@@ -1166,7 +1227,7 @@ const bookSession = async (req, res) => {
               status: 'skipped',
               details: {
                 sessionId: session.id,
-                clientPhone: clientPhone,
+                maskedClientPhone: maskedClientPhone,
                 skipReason: skipReason
               }
             });
@@ -1178,6 +1239,7 @@ const bookSession = async (req, res) => {
             console.warn('⚠️ Client WhatsApp send failed:', failureReason);
             
             // Log WhatsApp failure with detailed reason
+            const maskedClientPhone = maskPhoneNumber(clientPhone);
             await userInteractionLogger.logInteraction({
               userId,
               userRole,
@@ -1185,7 +1247,7 @@ const bookSession = async (req, res) => {
               status: 'failure',
               details: {
                 sessionId: session.id,
-                clientPhone: clientPhone,
+                maskedClientPhone: maskedClientPhone,
                 failureReason: failureReason,
                 errorDetails: clientWaResult?.error || clientWaResult
               },
@@ -1197,6 +1259,7 @@ const bookSession = async (req, res) => {
           console.log('ℹ️ No client phone or meet link; skipping client WhatsApp');
           
           // Log WhatsApp skip with reason
+          const maskedClientPhone = maskPhoneNumber(clientPhone);
           await userInteractionLogger.logInteraction({
             userId,
             userRole,
@@ -1204,7 +1267,7 @@ const bookSession = async (req, res) => {
             status: 'skipped',
             details: {
               sessionId: session.id,
-              clientPhone: clientPhone,
+              maskedClientPhone: maskedClientPhone,
               hasMeetLink: !!meetData?.meetLink,
               skipReason: skipReason
             }
@@ -1252,6 +1315,7 @@ const bookSession = async (req, res) => {
           if (psychologistWaResult?.success) {
             console.log('✅ WhatsApp notification sent to psychologist via WhatsApp API');
             
+            const maskedPsychologistPhone = maskPhoneNumber(psychologistPhone);
             // Log WhatsApp success
             await userInteractionLogger.logInteraction({
               userId,
@@ -1260,7 +1324,7 @@ const bookSession = async (req, res) => {
               status: 'success',
               details: {
                 sessionId: session.id,
-                psychologistPhone: psychologistPhone,
+                psychologistPhone: maskedPsychologistPhone,
                 psychologistId: psychologist_id,
                 messageId: psychologistWaResult.data?.msgId
               }
@@ -1269,6 +1333,7 @@ const bookSession = async (req, res) => {
             const skipReason = psychologistWaResult.reason || 'Unknown reason';
             console.log('ℹ️ Psychologist WhatsApp skipped:', skipReason);
             
+            const maskedPsychologistPhone = maskPhoneNumber(psychologistPhone);
             // Log WhatsApp skip with reason
             await userInteractionLogger.logInteraction({
               userId,
@@ -1277,7 +1342,7 @@ const bookSession = async (req, res) => {
               status: 'skipped',
               details: {
                 sessionId: session.id,
-                psychologistPhone: psychologistPhone,
+                psychologistPhone: maskedPsychologistPhone,
                 psychologistId: psychologist_id,
                 skipReason: skipReason
               }
@@ -1289,6 +1354,7 @@ const bookSession = async (req, res) => {
                                  'Unknown WhatsApp API error';
             console.warn('⚠️ Psychologist WhatsApp send failed:', failureReason);
             
+            const maskedPsychologistPhone = maskPhoneNumber(psychologistPhone);
             // Log WhatsApp failure with detailed reason
             await userInteractionLogger.logInteraction({
               userId,
@@ -1297,7 +1363,7 @@ const bookSession = async (req, res) => {
               status: 'failure',
               details: {
                 sessionId: session.id,
-                psychologistPhone: psychologistPhone,
+                psychologistPhone: maskedPsychologistPhone,
                 psychologistId: psychologist_id,
                 failureReason: failureReason,
                 errorDetails: psychologistWaResult?.error || psychologistWaResult
@@ -1309,6 +1375,7 @@ const bookSession = async (req, res) => {
           const skipReason = !psychologistPhone ? 'No psychologist phone number' : 'No Google Meet link available';
           console.log('ℹ️ No psychologist phone or meet link; skipping psychologist WhatsApp');
           
+          const maskedPsychologistPhone = psychologistPhone ? maskPhoneNumber(psychologistPhone) : null;
           // Log WhatsApp skip with reason
           await userInteractionLogger.logInteraction({
             userId,
@@ -1317,7 +1384,7 @@ const bookSession = async (req, res) => {
             status: 'skipped',
             details: {
               sessionId: session.id,
-              psychologistPhone: psychologistPhone,
+              psychologistPhone: maskedPsychologistPhone,
               psychologistId: psychologist_id,
               hasMeetLink: !!meetData?.meetLink,
               skipReason: skipReason
@@ -1827,11 +1894,22 @@ const rescheduleSession = async (req, res) => {
     }
 
     // Get client ID (userId is from users.id, so we need to query clients.user_id)
-    const { data: client } = await supabaseAdmin
+    // First attempt to fetch by user_id, then fall back to id for legacy clients
+    let { data: client } = await supabaseAdmin
       .from('clients')
       .select('id')
       .eq('user_id', userId)
       .single();
+
+    // If not found by user_id, try by id (legacy clients)
+    if (!client) {
+      const { data: legacyClient } = await supabaseAdmin
+        .from('clients')
+        .select('id')
+        .eq('id', userId)
+        .single();
+      client = legacyClient;
+    }
 
     if (!client) {
       return res.status(404).json(
@@ -1977,6 +2055,7 @@ const rescheduleSession = async (req, res) => {
               related_id: session.id,
               related_type: 'session',
           is_read: false,
+              status: 'pending', // Set status for reschedule request filtering
               created_at: new Date().toISOString()
             });
           });
@@ -2893,6 +2972,7 @@ const createRescheduleNotification = async (originalSession, updatedSession, cli
       related_id: updatedSession.id,
       related_type: 'session',
       is_read: false,
+      status: 'approved', // Auto-approved reschedules (outside 24h window)
       created_at: new Date().toISOString()
     };
 
@@ -4350,12 +4430,28 @@ const bookSessionWithCredit = async (req, res) => {
       );
     }
 
-    // Get client profile
-    const { data: client, error: clientError } = await supabaseAdmin
+    // Get client profile: try user_id first (new system), then id (legacy)
+    let client = null;
+    let clientError = null;
+    const { data: clientByUserId, error: errorByUserId } = await supabaseAdmin
       .from('clients')
       .select('id')
-      .eq('id', userId)
+      .eq('user_id', userId)
       .single();
+    if (clientByUserId && !errorByUserId) {
+      client = clientByUserId;
+    } else {
+      const { data: clientById, error: errorById } = await supabaseAdmin
+        .from('clients')
+        .select('id')
+        .eq('id', userId)
+        .single();
+      if (clientById && !errorById) {
+        client = clientById;
+      } else {
+        clientError = errorByUserId || errorById;
+      }
+    }
 
     if (clientError || !client) {
       console.error('Client profile not found:', clientError);
@@ -4409,6 +4505,32 @@ const bookSessionWithCredit = async (req, res) => {
     }
 
     console.log('✅ Time slot is available for credit booking');
+
+    // Pre-check: Verify slot isn't already booked in sessions table (race condition protection)
+    const formattedDate = formatDate(scheduled_date);
+    const formattedTime = formatTime(scheduled_time);
+    const { data: existingSession, error: checkError } = await supabaseAdmin
+      .from('sessions')
+      .select('id, status')
+      .eq('psychologist_id', psychologist_id)
+      .eq('scheduled_date', formattedDate)
+      .eq('scheduled_time', formattedTime)
+      .in('status', ['booked', 'scheduled', 'reschedule_requested', 'rescheduled'])
+      .maybeSingle();
+
+    if (checkError) {
+      console.error('Error checking existing session:', checkError);
+      return res.status(500).json(
+        errorResponse('Error verifying slot availability')
+      );
+    }
+
+    if (existingSession) {
+      console.log('⚠️ Slot already booked - race condition detected');
+      return res.status(409).json(
+        errorResponse('This time slot was just booked by another user. Please select another time.')
+      );
+    }
 
     // Fetch client and psychologist details for meet link
     const { data: clientDetails, error: clientDetailsError } = await supabaseAdmin
@@ -4475,16 +4597,16 @@ const bookSessionWithCredit = async (req, res) => {
       console.error('⚠️ Error creating Google Meet link for credit booking:', meetError);
     }
 
-    // Create session using the existing payment
+    // Create session using the existing payment (formatted date/time already computed above)
     const sessionInsert = {
       client_id: clientId,
       psychologist_id: psychologist_id,
-      scheduled_date,
-      scheduled_time,
+      scheduled_date: formattedDate,
+      scheduled_time: formattedTime,
       status: 'booked',
       price: payment.amount,
       payment_id: payment.id,
-      original_scheduled_date: scheduled_date
+      original_scheduled_date: formattedDate
     };
 
     if (meetData) {
@@ -4501,6 +4623,25 @@ const bookSessionWithCredit = async (req, res) => {
 
     if (sessionError) {
       console.error('❌ Session creation failed for credit booking:', sessionError);
+      // Unique constraint violation (23505): slot/session already exists; return existing session idempotently
+      if (sessionError.code === '23505') {
+        const { data: existingSession, error: fetchErr } = await supabaseAdmin
+          .from('sessions')
+          .select('*')
+          .eq('client_id', clientId)
+          .eq('psychologist_id', psychologist_id)
+          .eq('scheduled_date', formattedDate)
+          .eq('scheduled_time', formattedTime)
+          .maybeSingle();
+        if (!fetchErr && existingSession) {
+          return res.json(
+            successResponse(
+              { sessionId: existingSession.id, paymentId: payment.id },
+              'Session already exists for this slot (idempotent)'
+            )
+          );
+        }
+      }
       return res.status(500).json(
         errorResponse('Failed to create session with existing payment. Please contact support.')
       );
@@ -4519,6 +4660,76 @@ const bookSessionWithCredit = async (req, res) => {
       console.error('⚠️ Failed to update payment status after credit booking:', updateError);
     }
 
+    // Block the booked slot from availability (mirror bookSession)
+    try {
+      await availabilityService.updateAvailabilityOnBooking(
+        psychologist_id,
+        formattedDate,
+        formattedTime
+      );
+      console.log('✅ Availability updated to block booked slot for credit booking');
+    } catch (blockErr) {
+      console.warn('⚠️ Failed to update availability after credit booking:', blockErr?.message);
+    }
+
+    // Send email + WhatsApp notifications (mirror bookSession)
+    try {
+      const emailService = require('../utils/emailService');
+      const clientName = clientDetails.child_name ||
+        `${clientDetails.first_name || ''} ${clientDetails.last_name || ''}`.trim() || 'Client';
+      const psychologistName = `${psychologistDetails.first_name || ''} ${psychologistDetails.last_name || ''}`.trim() || 'Psychologist';
+
+      await emailService.sendSessionConfirmation({
+        clientEmail: clientDetails.user?.email || 'client@placeholder.com',
+        psychologistEmail: psychologistDetails?.email || 'psychologist@placeholder.com',
+        clientName,
+        psychologistName,
+        sessionId: session.id,
+        scheduledDate: formattedDate,
+        scheduledTime: formattedTime,
+        meetLink: meetData?.meetLink || 'https://meet.google.com/new',
+        price: session.price
+      });
+      console.log('✅ Email notifications sent for credit booking');
+
+      try {
+        const { sendBookingConfirmation } = require('../utils/whatsappService');
+        const clientPhone = clientDetails.phone_number || null;
+        if (clientPhone && meetData?.meetLink) {
+          const childName = clientDetails.child_name &&
+            clientDetails.child_name.trim() !== '' &&
+            clientDetails.child_name.toLowerCase() !== 'pending'
+            ? clientDetails.child_name
+            : null;
+          await sendBookingConfirmation(clientPhone, {
+            childName,
+            date: formattedDate,
+            time: formattedTime,
+            meetLink: meetData.meetLink,
+            psychologistName
+          });
+        }
+      } catch (waErr) {
+        console.warn('⚠️ WhatsApp notification skipped for credit booking:', waErr?.message);
+      }
+    } catch (notifyErr) {
+      console.warn('⚠️ Notification error for credit booking:', notifyErr?.message);
+    }
+
+    // Log successful booking
+    await userInteractionLogger.logBooking({
+      userId: req.user.id,
+      userRole: req.user.role,
+      psychologistId: psychologist_id,
+      packageId: payment.package_id,
+      scheduledDate: scheduled_date,
+      scheduledTime: scheduled_time,
+      price: payment.amount,
+      status: 'success',
+      sessionId: session.id,
+      paymentId: payment.id
+    });
+
     return res.json(
       successResponse(
         {
@@ -4530,6 +4741,22 @@ const bookSessionWithCredit = async (req, res) => {
     );
   } catch (error) {
     console.error('Book session with credit error:', error);
+    
+    // Log failed booking (no await so .catch() handles rejection and response is always sent)
+    userInteractionLogger.logBooking({
+      userId: req.user?.id,
+      userRole: req.user?.role,
+      psychologistId: req.body?.psychologist_id,
+      packageId: req.body?.package_id,
+      scheduledDate: req.body?.scheduled_date,
+      scheduledTime: req.body?.scheduled_time,
+      price: null,
+      status: 'failure',
+      error: error
+    }).catch(logErr => {
+      console.error('Failed to log booking failure:', logErr);
+    });
+    
     res.status(500).json(
       errorResponse('Internal server error while booking session with existing payment')
     );

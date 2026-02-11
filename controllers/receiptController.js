@@ -5,8 +5,9 @@ const { successResponse, errorResponse } = require('../utils/helpers');
 const getClientReceipts = async (req, res) => {
   try {
     const userId = req.user.id;
-    console.log('🔍 Fetching receipts for user:', userId);
-    console.log('🔍 req.user data:', { id: req.user.id, client_id: req.user.client_id, role: req.user.role });
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('🔍 Fetching receipts for user (debug):', userId);
+    }
 
     // Determine client ID: use client_id if available (new system), otherwise use id (old system)
     let clientId = req.user.client_id || userId;
@@ -21,11 +22,8 @@ const getClientReceipts = async (req, res) => {
       
       if (!clientError && clientData) {
         clientId = clientData.id;
-        console.log('🔍 Found client by user_id:', clientId);
       }
     }
-    
-    console.log('🔍 Using client ID for receipts:', clientId);
 
     // 1) Fetch sessions for this client
     const { data: clientSessions, error: sessionsError } = await supabaseAdmin
@@ -49,7 +47,7 @@ const getClientReceipts = async (req, res) => {
     // 2) Fetch receipts for those sessions
     const { data: receipts, error: receiptsError } = await supabaseAdmin
       .from('receipts')
-        .select('id, receipt_number, receipt_details, file_url, created_at, session_id, payment_id')
+        .select('id, receipt_number, short_receipt_number, receipt_details, file_url, created_at, session_id, payment_id')
       .in('session_id', sessionIdList)
       .order('created_at', { ascending: false });
 
@@ -69,7 +67,7 @@ const getClientReceipts = async (req, res) => {
     if (paymentIdList.length > 0) {
       const { data: paymentsData, error: paymentsError } = await supabaseAdmin
         .from('payments')
-        .select('id, transaction_id, amount, status, completed_at')
+        .select('id, transaction_id, amount, status, completed_at, created_at')
         .in('id', paymentIdList);
       if (paymentsError) {
         console.error('❌ Error fetching payments:', paymentsError);
@@ -432,6 +430,15 @@ const getReceiptByOrderId = async (req, res) => {
       .eq('payment_id', payment.id)
       .single();
 
+    // Compute payment_status: if receipt exists but payment.status is missing we default to 'success' for backward compatibility; log when status is missing so data gaps are visible.
+    let payment_status;
+    if (receipt && !payment.status) {
+      console.warn('⚠️ Receipt exists but payment.status is missing for payment id:', payment.id);
+      payment_status = 'success';
+    } else {
+      payment_status = payment.status || 'pending';
+    }
+
     // If receipt doesn't exist yet, return payment and session info anyway
     // This handles the case where payment verification is still processing
     if (receiptError || !receipt) {
@@ -439,7 +446,7 @@ const getReceiptByOrderId = async (req, res) => {
       return res.json(
         successResponse({
           receipt_available: false,
-          payment_status: payment.status || 'pending',
+          payment_status: payment_status,
           transaction_id: payment.transaction_id,
           session: sessionDetails, // Include session details even without receipt
           message: 'Receipt is being generated. Please check back in a moment.'
@@ -459,7 +466,7 @@ const getReceiptByOrderId = async (req, res) => {
         has_receipt_details: !!receipt.receipt_details,
         created_at: receipt.created_at,
         transaction_id: payment.transaction_id,
-        payment_status: payment.status || 'success',
+        payment_status: payment_status,
         session: sessionDetails // Include session details
       }, 'Receipt fetched successfully')
     );

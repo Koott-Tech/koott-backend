@@ -6,6 +6,37 @@ const supabase = supabaseAdmin;
 const LOGS_BUCKET = 'logs';
 
 /**
+ * Safely serialize error objects, handling circular references
+ * @param {*} error - Error object or any value
+ * @returns {Object|null} Serializable error object or null
+ */
+function safeSerializeError(error) {
+  if (!error) return null;
+  if (typeof error !== 'object') return { message: String(error) };
+
+  const seen = new WeakSet();
+  const replacer = (key, value) => {
+    if (typeof value === 'object' && value !== null) {
+      if (seen.has(value)) {
+        return '[Circular Reference]';
+      }
+      seen.add(value);
+    }
+    return value;
+  };
+
+  try {
+    return JSON.parse(JSON.stringify(error, replacer));
+  } catch (e) {
+    return {
+      message: error.message || String(error),
+      name: error.name,
+      stack: error.stack ? error.stack.substring(0, 500) : undefined
+    };
+  }
+}
+
+/**
  * User Interaction Logger Service
  * Logs all user interactions to Supabase Storage in organized folders by user name
  */
@@ -13,6 +44,7 @@ class UserInteractionLogger {
   constructor() {
     this.initialized = false;
     this.bucketName = LOGS_BUCKET;
+    this.writeQueues = new Map(); // Per-filePath queue for serializing writes
   }
 
   /**
@@ -131,25 +163,21 @@ class UserInteractionLogger {
 
   /**
    * Get file path in bucket - NEW STRUCTURE: 1 folder per user, 1 file per user
-   * Structure: logs/{user_email}/all_logs.json
+   * Structure: logs/{hashed_identifier}/all_logs.json
+   * Uses hashed identifier instead of email to avoid PII leakage
    */
-  getFilePath(userEmail) {
-    // Sanitize email for folder name: replace @ with _at_, remove invalid chars
-    const sanitizedEmail = userEmail
-      .replace('@', '_at_')
-      .replace(/[^a-zA-Z0-9_\-.]/g, '_')
-      .toLowerCase()
-      .trim();
-    // One file per user: logs/{user_email}/all_logs.json
-    return `logs/${sanitizedEmail}/all_logs.json`;
+  getFilePath(identifier) {
+    // Caller must pass already-hashed identifier to avoid double-hashing
+    return `logs/${String(identifier)}/all_logs.json`;
   }
 
   /**
    * Find existing log file in Supabase Storage
+   * @param {string} identifier - Hashed identifier (not email)
    */
-  async findExistingLogFile(userEmail) {
+  async findExistingLogFile(identifier) {
     try {
-      const filePath = this.getFilePath(userEmail);
+      const filePath = this.getFilePath(identifier);
       const folderPath = filePath.split('/').slice(0, -1).join('/'); // Get folder path
       const fileName = filePath.split('/').pop(); // Get filename
       
@@ -193,15 +221,18 @@ class UserInteractionLogger {
         return;
       }
 
-      // Get user email
+      // Get user email (for internal use only, will be hashed for file path)
       const userEmail = await this.getUserEmail(userId, userRole);
+      
+      // Use hashed identifier for file path (avoid PII leakage)
+      const crypto = require('crypto');
+      const hashedIdentifier = crypto.createHash('sha256').update(String(userEmail || userId)).digest('hex').substring(0, 16);
 
       // Create detailed log entry with backend-style logging
       const timestamp = new Date().toISOString();
       const logEntry = {
         timestamp,
-        userEmail,
-        userId,
+        userId, // Keep userId for reference, but don't use email in path
         userRole,
         action,
         status,
@@ -213,8 +244,8 @@ class UserInteractionLogger {
             stack: error.stack,
             code: error.code,
             name: error.name,
-            // Include full error object for debugging
-            fullError: error
+          // Include full error object for debugging (safely serialized)
+          fullError: safeSerializeError(error)
           } : null,
           // Add failure reason if status is failure
           failureReason: status === 'failure' && error 
@@ -230,127 +261,117 @@ class UserInteractionLogger {
         } : null
       };
 
-      // Get file path: logs/{user_email}/all_logs.json
-      const filePath = this.getFilePath(userEmail);
+      // Get file path: logs/{hashed_identifier}/all_logs.json
+      const filePath = this.getFilePath(hashedIdentifier);
       const folderPath = filePath.split('/').slice(0, -1).join('/'); // Get folder path
 
-      // Check if file exists (append to it) or create new
-      const existingFilePath = await this.findExistingLogFile(userEmail);
+      // Check if file exists (append to it) or create new (use hashed identifier)
+      const existingFilePath = await this.findExistingLogFile(hashedIdentifier);
+      const targetPath = existingFilePath || filePath;
       
-      if (existingFilePath) {
-        // Read existing file, append new log, write back
-        const { data: fileData, error: downloadError } = await supabase.storage
-          .from(this.bucketName)
-          .download(existingFilePath);
-
-        if (downloadError) {
-          console.error('❌ Error downloading existing log file:', downloadError.message);
-          // Create new file instead
-        } else {
-          try {
-            const fileText = await fileData.text();
-            let logs = [];
-            try {
-              logs = JSON.parse(fileText);
-              if (!Array.isArray(logs)) {
-                logs = [logs];
-              }
-            } catch (e) {
-              logs = [];
-            }
-
-            // Sort logs by timestamp to maintain chronological order
-            logs.push(logEntry);
-            logs.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-            // Update file
-            const { error: uploadError } = await supabase.storage
-              .from(this.bucketName)
-              .update(existingFilePath, JSON.stringify(logs, null, 2), {
-                contentType: 'application/json',
-                upsert: true
-              });
-
-            if (uploadError) {
-              console.error('❌ Error updating log file:', uploadError.message);
-            } else {
-              console.log(`✅ Logged ${action} (${status}) for user: ${userEmail} → ${filePath}`);
-            }
-            return;
-          } catch (parseError) {
-            console.error('❌ Error parsing existing log file:', parseError.message);
-            // Fall through to create new file
-          }
-        }
+      // Serialize writes per target path to prevent race conditions
+      if (!this.writeQueues.has(targetPath)) {
+        this.writeQueues.set(targetPath, Promise.resolve());
       }
 
-      // Create new file - ensure folder exists first
-      try {
-        // Try to create folder by uploading a placeholder (Supabase creates folders automatically)
-        // But we'll just upload the file directly - Supabase will create the folder structure
-      const logContent = JSON.stringify([logEntry], null, 2);
+      // Enqueue this write operation
+      this.writeQueues.set(targetPath, this.writeQueues.get(targetPath).then(async () => {
+        if (existingFilePath) {
+          // Read existing file, append new log, write back
+          const { data: fileData, error: downloadError } = await supabase.storage
+            .from(this.bucketName)
+            .download(existingFilePath);
+
+          if (downloadError) {
+            console.error('❌ Error downloading existing log file:', downloadError.message);
+            // Create new file instead
+            return this.createNewLogFile(filePath, logEntry, userEmail, action, status);
+          } else {
+            try {
+              const fileText = await fileData.text();
+              let logs = [];
+              try {
+                logs = JSON.parse(fileText);
+                if (!Array.isArray(logs)) {
+                  logs = [logs];
+                }
+              } catch (e) {
+                logs = [];
+              }
+
+              // Sort logs by timestamp to maintain chronological order
+              logs.push(logEntry);
+              logs.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+              // Update file
+              const { error: uploadError } = await supabase.storage
+                .from(this.bucketName)
+                .update(existingFilePath, JSON.stringify(logs, null, 2), {
+                  contentType: 'application/json',
+                  upsert: true
+                });
+
+              if (uploadError) {
+                console.error('❌ Error updating log file:', uploadError.message);
+              } else {
+                console.log(`✅ Logged ${action} (${status}) for user: ${hashedIdentifier} → ${filePath}`);
+              }
+              return;
+            } catch (parseError) {
+              console.error('❌ Error parsing existing log file:', parseError.message);
+              // Fall through to create new file
+              return this.createNewLogFile(filePath, logEntry, userEmail, action, status);
+            }
+          }
+        } else {
+          return this.createNewLogFile(filePath, logEntry, userEmail, action, status);
+        }
+      }).catch(err => {
+        console.error('❌ Error in write queue for', targetPath, ':', err);
+      }));
+
+      // Wait for the write to complete
+      await this.writeQueues.get(targetPath);
+    } catch (error) {
+      // Don't throw - logging failures shouldn't break the app
+      console.error('❌ Error logging user interaction:', error.message);
+    }
+  }
+
+  /**
+   * Create a new log file
+   * @param {string} filePath - File path in bucket
+   * @param {Object} logEntry - Log entry object
+   * @param {string} identifier - Hashed identifier (for logging)
+   * @param {string} action - Action name (for logging)
+   * @param {string} status - Status (for logging)
+   * @returns {Promise<void>}
+   */
+  async createNewLogFile(filePath, logEntry, identifier, action, status) {
+    try {
+      const folderPath = filePath.split('/').slice(0, -1).join('/');
+      
+      // Ensure folder exists (create if needed)
+      // Note: Supabase Storage doesn't require explicit folder creation
+      
+      // Create new file with single log entry
+      const logs = [logEntry];
+      const fileContent = JSON.stringify(logs, null, 2);
+      
       const { error: uploadError } = await supabase.storage
         .from(this.bucketName)
-        .upload(filePath, logContent, {
+        .upload(filePath, fileContent, {
           contentType: 'application/json',
-          cacheControl: '3600',
           upsert: false // Don't overwrite if exists
         });
 
       if (uploadError) {
-        // If file exists, try updating instead
-        if (uploadError.message.includes('already exists') || uploadError.message.includes('duplicate')) {
-            // File exists, read it, append, and update
-            const { data: fileData, error: downloadError } = await supabase.storage
-              .from(this.bucketName)
-              .download(filePath);
-
-            if (!downloadError && fileData) {
-              try {
-                const fileText = await fileData.text();
-                let logs = [];
-                try {
-                  logs = JSON.parse(fileText);
-                  if (!Array.isArray(logs)) {
-                    logs = [logs];
-                  }
-                } catch (e) {
-                  logs = [];
-                }
-
-                logs.push(logEntry);
-                logs.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-          const { error: updateError } = await supabase.storage
-            .from(this.bucketName)
-                  .update(filePath, JSON.stringify(logs, null, 2), {
-              contentType: 'application/json',
-              upsert: true
-            });
-
-          if (updateError) {
-                  console.error('❌ Error updating existing log file:', updateError.message);
-                } else {
-                  console.log(`✅ Logged ${action} (${status}) for user: ${userEmail} → ${filePath}`);
-                }
-              } catch (parseError) {
-                console.error('❌ Error parsing existing log file:', parseError.message);
-              }
-          } else {
-              console.error('❌ Error downloading existing log file:', downloadError?.message);
-          }
-        } else {
-          console.error('❌ Error creating log file:', uploadError.message);
-        }
+        console.error('❌ Error creating new log file:', uploadError.message);
       } else {
-          console.log(`✅ Logged ${action} (${status}) for user: ${userEmail} → ${filePath}`);
-        }
-      } catch (folderError) {
-        console.error('❌ Error creating user log folder/file:', folderError.message);
+        console.log(`✅ Created new log file for ${identifier}: ${action} (${status}) → ${filePath}`);
       }
     } catch (error) {
-      // Don't throw - logging failures shouldn't break the app
-      console.error('❌ Error logging user interaction:', error.message);
+      console.error('❌ Error in createNewLogFile:', error.message);
     }
   }
 

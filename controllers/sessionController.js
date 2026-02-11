@@ -1705,10 +1705,10 @@ const handleRescheduleRequest = async (req, res) => {
         .insert([clientNotificationData]);
       }
 
-      // Mark original request as read
+      // Mark original request as read and set status to approved
       await supabaseAdmin
         .from('notifications')
-        .update({ is_read: true })
+        .update({ is_read: true, status: 'approved', is_approved: true })
         .eq('id', notificationId);
 
       console.log('✅ Reschedule request approved');
@@ -1746,10 +1746,10 @@ const handleRescheduleRequest = async (req, res) => {
         .insert([clientNotificationData]);
       }
 
-      // Mark original request as read
+      // Mark original request as read and set status to rejected
       await supabaseAdmin
         .from('notifications')
-        .update({ is_read: true })
+        .update({ is_read: true, status: 'rejected', is_approved: false })
         .eq('id', notificationId);
 
       console.log('❌ Reschedule request rejected');

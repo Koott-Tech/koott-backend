@@ -24,9 +24,29 @@ class EmailVerificationService {
    * @param {string} userRole - Role of user (client, psychologist, admin)
    * @returns {Promise<Object>} Success/error response
    */
+  /**
+   * Mask email address for logging
+   * @param {string} email - Email address
+   * @returns {string} Masked email
+   */
+  maskEmail(email) {
+    if (!email || typeof email !== 'string') {
+      return '***@***';
+    }
+    const [localPart, domain] = email.split('@');
+    if (!localPart || !domain) {
+      return '***@***';
+    }
+    const maskedLocal = localPart.length > 2
+      ? localPart[0] + '*'.repeat(Math.min(localPart.length - 2, 5)) + localPart[localPart.length - 1]
+      : '*'.repeat(localPart.length);
+    return `${maskedLocal}@${domain}`;
+  }
+
   async sendOTP(email, verificationType = 'registration', userRole = 'client') {
     try {
-      console.log(`📧 Sending OTP to ${email} for ${verificationType} verification`);
+      const maskedEmail = this.maskEmail(email);
+      console.log(`📧 Sending OTP to ${maskedEmail} for ${verificationType} verification`);
 
       // Check if there's an active verification for this email
       // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
@@ -165,7 +185,7 @@ class EmailVerificationService {
    */
   async verifyOTP(email, otp, verificationType = 'registration') {
     try {
-      console.log(`🔍 Verifying OTP for ${email}`);
+      console.log(`🔍 Verifying OTP for ${this.maskEmail(email)}`);
 
       // Find active verification record
       // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)

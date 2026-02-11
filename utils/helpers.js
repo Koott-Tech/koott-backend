@@ -84,6 +84,19 @@ const sanitizePhoneNumber = (phone) => {
   return phone.replace(/[^\d+]/g, '');
 };
 
+// Mask phone number for logging (keep last 2-4 digits)
+const maskPhoneNumber = (phone) => {
+  if (!phone || typeof phone !== 'string') {
+    return null;
+  }
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length <= 4) {
+    return '***';
+  }
+  const keepDigits = Math.min(4, Math.max(2, Math.floor(digits.length * 0.2)));
+  return '***' + digits.slice(-keepDigits);
+};
+
 // Validate email format
 const isValidEmail = (email) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -193,6 +206,7 @@ module.exports = {
   calculateSessionPrice,
   generateInvoiceNumber,
   sanitizePhoneNumber,
+  maskPhoneNumber,
   isValidEmail,
   formatCurrency,
   getTimeSlots,

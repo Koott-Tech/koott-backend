@@ -15,7 +15,7 @@ class SessionReminderService {
 
   /**
    * Start the session reminder service
-   * Runs every hour to check for sessions and free assessments in the next 2 hours (0-2 hours from now)
+   * Runs every hour to check for sessions and free assessments in the next 1 hour (0-1 hour from now)
    */
   start() {
     console.log('🔔 Starting Session Reminder Service...');
@@ -34,18 +34,18 @@ class SessionReminderService {
   }
 
   /**
-   * Check for sessions and free assessments in the next 2 hours (0-2 hours from now)
+   * Check for sessions and free assessments in the next 1 hour (0-1 hour from now)
    * and send WhatsApp reminders to both clients and psychologists
-   * Runs every hour to catch all sessions in the upcoming 2-hour window
+   * Runs every hour to catch all sessions in the upcoming 1-hour window
    */
   async checkAndSendReminders() {
     this.isRunning = true;
     console.log('🔍 Checking for sessions and free assessments requiring reminders...');
 
     try {
-      // Get current time and calculate 2 hours from now
+      // Get current time and calculate 1 hour from now
       const now = dayjs().tz('Asia/Kolkata');
-      const endTime = now.add(2, 'hours');
+      const endTime = now.add(1, 'hour');
       
       console.log(`📅 Current time: ${now.format('YYYY-MM-DD HH:mm:ss')}`);
       console.log(`📅 Checking for sessions between: ${now.format('YYYY-MM-DD HH:mm:ss')} and ${endTime.format('YYYY-MM-DD HH:mm:ss')}`);
@@ -132,7 +132,7 @@ class SessionReminderService {
         });
       }
 
-      // Filter sessions that are in the next 2 hours (0 to 2 hours from now) and haven't received reminders yet
+      // Filter sessions that are in the next 1 hour (0 to 1 hour from now) and haven't received reminders yet
       const reminderSessions = (sessions || []).filter(session => {
         if (!session.scheduled_time) return false;
         
@@ -145,11 +145,11 @@ class SessionReminderService {
         const sessionTime = dayjs.tz(`${session.scheduled_date} ${session.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
         const timeDiffMinutes = sessionTime.diff(now, 'minute'); // Difference in minutes
         
-        // Check if session is between 0 and 120 minutes from now (next 2 hours)
-        return timeDiffMinutes >= 0 && timeDiffMinutes <= 120;
+        // Check if session is between 0 and 60 minutes from now (next 1 hour)
+        return timeDiffMinutes >= 0 && timeDiffMinutes <= 60;
       });
 
-      console.log(`🔔 Found ${reminderSessions.length} sessions in the next 2 hours requiring reminders`);
+      console.log(`🔔 Found ${reminderSessions.length} sessions in the next 1 hour requiring reminders`);
       
       // Log details of sessions that will receive reminders
       if (reminderSessions.length > 0) {
@@ -163,7 +163,7 @@ class SessionReminderService {
         });
       }
 
-      // Get free assessments in the next 2 hours
+      // Get free assessments in the next 1 hour
       const { data: freeAssessments, error: freeAssessmentsError } = await supabaseAdmin
         .from('free_assessments')
         .select(`
@@ -205,7 +205,7 @@ class SessionReminderService {
         console.log(`📋 Found ${freeAssessments?.length || 0} free assessments in date range`);
       }
 
-      // Filter free assessments that are in the next 2 hours
+      // Filter free assessments that are in the next 1 hour
       const reminderFreeAssessments = (freeAssessments || []).filter(assessment => {
         if (!assessment.scheduled_time) return false;
         
@@ -213,11 +213,11 @@ class SessionReminderService {
         const assessmentTime = dayjs.tz(`${assessment.scheduled_date} ${assessment.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
         const timeDiffMinutes = assessmentTime.diff(now, 'minute');
         
-        // Check if assessment is between 0 and 120 minutes from now (next 2 hours)
-        return timeDiffMinutes >= 0 && timeDiffMinutes <= 120;
+        // Check if assessment is between 0 and 60 minutes from now (next 1 hour)
+        return timeDiffMinutes >= 0 && timeDiffMinutes <= 60;
       });
 
-      console.log(`🔔 Found ${reminderFreeAssessments.length} free assessments in the next 2 hours requiring reminders`);
+      console.log(`🔔 Found ${reminderFreeAssessments.length} free assessments in the next 1 hour requiring reminders`);
 
       // Process sessions in batches with parallel processing within each batch
       // This balances speed with API rate limiting
@@ -577,15 +577,15 @@ class SessionReminderService {
         }
       } else {
         // If lock wasn't created, try to insert all notifications (may fail if duplicates exist)
-        await supabaseAdmin
+        const { error: insertError } = await supabaseAdmin
           .from('notifications')
-          .insert(notificationsToInsert)
-          .catch(err => {
-            // Ignore duplicate errors - it means another process already created them
-            if (!err.message?.includes('duplicate') && !err.code?.includes('23505')) {
-              console.error(`Error inserting notifications for free assessment ${assessment.id}:`, err);
-            }
-          });
+          .insert(notificationsToInsert);
+        if (insertError) {
+          // Ignore duplicate errors - it means another process already created them
+          if (!insertError.message?.includes('duplicate') && !insertError.code?.includes('23505')) {
+            console.error(`Error inserting notifications for free assessment ${assessment.id}:`, insertError);
+          }
+        }
       }
 
       console.log(`✅ Reminder notifications created for free assessment ${assessment.id}`);
@@ -597,12 +597,12 @@ class SessionReminderService {
   /**
    * Check for any new sessions that were created/rescheduled during the reminder processing
    * This catches edge cases where a booking/reschedule happened while reminders were being sent
-   * Checks for sessions in the next 2 hours (0-2 hours from now)
+   * Checks for sessions in the next 1 hour (0-1 hour from now)
    */
   async checkForNewSessionsDuringProcessing(originalCheckTime) {
     try {
       const now = dayjs().tz('Asia/Kolkata');
-      const endTime = now.add(2, 'hours');
+      const endTime = now.add(1, 'hour');
       const startDate = now.format('YYYY-MM-DD');
       const endDate = endTime.format('YYYY-MM-DD');
       const datesToCheck = [];
@@ -616,7 +616,7 @@ class SessionReminderService {
         currentDate = currentDate.add(1, 'day');
       }
       
-      // Query for sessions in the next 2 hours
+      // Query for sessions in the next 1 hour
       // Check for both newly created sessions AND recently rescheduled sessions
       const checkTimeMinus1Min = originalCheckTime.subtract(1, 'minute').toISOString();
       
@@ -673,7 +673,7 @@ class SessionReminderService {
         return; // No new sessions found
       }
 
-      // Filter for sessions that are in the next 2 hours (0-2 hours from now)
+      // Filter for sessions that are in the next 1 hour (0-1 hour from now)
       const newReminderSessions = newSessions.filter(session => {
         if (!session.scheduled_time) return false;
         
@@ -681,7 +681,7 @@ class SessionReminderService {
         const sessionTime = dayjs.tz(`${session.scheduled_date} ${session.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
         const timeDiffMinutes = sessionTime.diff(now, 'minute');
         
-        return timeDiffMinutes >= 0 && timeDiffMinutes <= 120;
+        return timeDiffMinutes >= 0 && timeDiffMinutes <= 60;
       });
 
       if (newReminderSessions.length > 0) {
@@ -704,7 +704,7 @@ class SessionReminderService {
    * Check and send reminder immediately for a specific session (PRIORITY)
    * This is called when a new booking/reschedule happens to give it immediate priority
    * over the batch reminder processing
-   * Checks if session is in the next 2 hours (0-2 hours from now)
+   * Checks if session is in the next 1 hour (0-1 hour from now)
    * @param {string} sessionId - Session ID to check
    */
   async checkAndSendReminderForSessionId(sessionId) {
@@ -764,7 +764,7 @@ class SessionReminderService {
         return;
       }
 
-      // Check if session is in the next 2 hours
+      // Check if session is in the next 1 hour
       if (!session.scheduled_time) {
         console.log(`ℹ️  [PRIORITY] Session ${sessionId} has no scheduled time`);
         return;
@@ -774,13 +774,13 @@ class SessionReminderService {
       const sessionTime = dayjs.tz(`${session.scheduled_date} ${session.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
       const timeDiffMinutes = sessionTime.diff(now, 'minute');
 
-      // Check if session is between 0 and 120 minutes from now (next 2 hours)
-      if (timeDiffMinutes >= 0 && timeDiffMinutes <= 120) {
-        console.log(`✅ [PRIORITY] Session ${sessionId} is in next 2 hours, sending reminder immediately...`);
+      // Check if session is between 0 and 60 minutes from now (next 1 hour)
+      if (timeDiffMinutes >= 0 && timeDiffMinutes <= 60) {
+        console.log(`✅ [PRIORITY] Session ${sessionId} is in next 1 hour, sending reminder immediately...`);
         await this.sendReminderForSession(session);
         console.log(`✅ [PRIORITY] Reminder sent immediately for session ${sessionId}`);
       } else {
-        console.log(`ℹ️  [PRIORITY] Session ${sessionId} is ${timeDiffMinutes} minutes away (not in next 2 hours)`);
+        console.log(`ℹ️  [PRIORITY] Session ${sessionId} is ${timeDiffMinutes} minutes away (not in next 1 hour)`);
       }
     } catch (error) {
       console.error(`❌ [PRIORITY] Error checking reminder for session ${sessionId}:`, error);

@@ -1,4 +1,4 @@
-// Removed unused supabase import
+const { supabaseAdmin } = require('../config/supabase');
 const { 
   successResponse, 
   errorResponse 
@@ -10,10 +10,8 @@ const getNotifications = async (req, res) => {
     const psychologistId = req.user.id;
     const { page = 1, limit = 20, unread_only = false } = req.query;
 
-    console.log('📄 Fetching notifications for psychologist:', psychologistId);
+    console.log('📄 Fetching notifications for psychologist');
 
-    // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
-    const { supabaseAdmin } = require('../config/supabase');
     let query = supabaseAdmin
       .from('notifications')
       .select('*')
@@ -72,7 +70,7 @@ const markAsRead = async (req, res) => {
     const { notificationId } = req.params;
     const psychologistId = req.user.id;
 
-    console.log('✅ Marking notification as read:', notificationId);
+    console.log('✅ Marking notification as read');
 
     // Verify notification belongs to this psychologist
     // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
@@ -125,7 +123,7 @@ const markAllAsRead = async (req, res) => {
   try {
     const psychologistId = req.user.id;
 
-    console.log('✅ Marking all notifications as read for psychologist:', psychologistId);
+    console.log('✅ Marking all notifications as read for psychologist');
 
     // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
     const { data: updatedNotifications, error } = await supabaseAdmin
@@ -198,7 +196,7 @@ const deleteNotification = async (req, res) => {
     const { notificationId } = req.params;
     const psychologistId = req.user.id;
 
-    console.log('🗑️ Deleting notification:', notificationId);
+    console.log('🗑️ Deleting notification');
 
     // Verify notification belongs to this psychologist and delete
     const { error } = await supabaseAdmin
@@ -232,10 +230,8 @@ const getClientNotifications = async (req, res) => {
     const clientId = req.user.id;
     const { page = 1, limit = 20, unread_only = false } = req.query;
 
-    console.log('📄 Fetching notifications for client:', clientId);
+    console.log('📄 Fetching notifications for client');
 
-    // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
-    const { supabaseAdmin } = require('../config/supabase');
     let query = supabaseAdmin
       .from('notifications')
       .select('*')
@@ -319,7 +315,7 @@ const markClientNotificationAsRead = async (req, res) => {
     const { notificationId } = req.params;
     const clientId = req.user.id;
 
-    console.log('✅ Marking client notification as read:', notificationId);
+    console.log('✅ Marking client notification as read');
 
     // Verify notification belongs to this client
     // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
@@ -372,7 +368,7 @@ const markAllClientNotificationsAsRead = async (req, res) => {
   try {
     const clientId = req.user.id;
 
-    console.log('✅ Marking all client notifications as read:', clientId);
+    console.log('✅ Marking all client notifications as read');
 
     // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
     const { data: updatedNotifications, error } = await supabaseAdmin
@@ -413,7 +409,7 @@ const deleteClientNotification = async (req, res) => {
     const { notificationId } = req.params;
     const clientId = req.user.id;
 
-    console.log('🗑️ Deleting client notification:', notificationId);
+    console.log('🗑️ Deleting client notification');
 
     // Verify notification belongs to this client and delete
     const { error } = await supabaseAdmin

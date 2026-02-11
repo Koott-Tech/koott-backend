@@ -1,5 +1,6 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { successResponse, errorResponse, addMinutesToTime, hashPassword } = require('../utils/helpers');
+const bcrypt = require('bcrypt');
 const { createRealMeetLink } = require('../utils/meetEventHelper'); // Use real Meet link creation
 const meetLinkService = require('../utils/meetLinkService'); // New Meet Link Service
 const emailService = require('../utils/emailService');
@@ -14,31 +15,34 @@ const ensureAssessmentPsychologist = async () => {
   try {
     const { data: existing, error } = await supabaseAdmin
       .from('psychologists')
-      .select('id, email, first_name, last_name')
+      .select('id, email, first_name, last_name, password_hash')
       .eq('email', DEFAULT_ASSESSMENT_DOCTOR.email)
       .single();
 
     if (existing && !error) {
-      // Account exists - update password to match current default
-      try {
-        const passwordHash = await hashPassword(
-          process.env.FREE_ASSESSMENT_PSYCHOLOGIST_PASSWORD || 'koott@123'
-        );
-        
-        const { error: updateError } = await supabaseAdmin
-          .from('psychologists')
-          .update({ password_hash: passwordHash })
-          .eq('id', existing.id);
-        
-        if (updateError) {
-          console.error('⚠️ Failed to update assessment psychologist password:', updateError);
-        } else {
-          console.log('✅ Updated assessment psychologist password');
+      // Account exists - update password only when env is set and hash differs
+      const envPassword = process.env.FREE_ASSESSMENT_PSYCHOLOGIST_PASSWORD;
+      if (envPassword && typeof envPassword === 'string' && envPassword.trim() !== '') {
+        try {
+          // Use bcrypt.compare to check if password actually differs
+          const passwordMatches = await bcrypt.compare(envPassword, existing.password_hash);
+          if (!passwordMatches) {
+            // Password differs, compute new hash and update
+            const newHash = await hashPassword(envPassword);
+            const { error: updateError } = await supabaseAdmin
+              .from('psychologists')
+              .update({ password_hash: newHash })
+              .eq('id', existing.id);
+            if (updateError) {
+              console.error('⚠️ Failed to update assessment psychologist password:', updateError);
+            } else {
+              console.log('✅ Updated assessment psychologist password');
+            }
+          }
+        } catch (pwError) {
+          console.error('⚠️ Error updating password:', pwError);
         }
-      } catch (pwError) {
-        console.error('⚠️ Error updating password:', pwError);
       }
-      
       return existing;
     }
   } catch (lookupError) {
@@ -48,9 +52,17 @@ const ensureAssessmentPsychologist = async () => {
   }
 
   try {
-      const passwordHash = await hashPassword(
-        process.env.FREE_ASSESSMENT_PSYCHOLOGIST_PASSWORD || 'koott@123'
-      );
+      let passwordToUse = process.env.FREE_ASSESSMENT_PSYCHOLOGIST_PASSWORD;
+      if (!passwordToUse || typeof passwordToUse !== 'string' || passwordToUse.trim() === '') {
+        if (process.env.NODE_ENV === 'production') {
+          console.error('FREE_ASSESSMENT_PSYCHOLOGIST_PASSWORD is required in production');
+          throw new Error('Assessment psychologist password not configured');
+        }
+        const crypto = require('crypto');
+        passwordToUse = crypto.randomBytes(32).toString('hex');
+        console.log('Generated secure password for assessment psychologist (non-production)');
+      }
+      const passwordHash = await hashPassword(passwordToUse);
 
     const { data: inserted, error: insertError } = await supabaseAdmin
       .from('psychologists')
@@ -215,7 +227,7 @@ const getFreeAssessmentAvailabilityRange = async (req, res) => {
     // Get date-specific configurations for the range
     const { data: dateConfigs, error: dateConfigsError } = await supabaseAdmin
       .from('free_assessment_date_configs')
-      .select('date, time_slots')
+      .select('date, time_slots, max_bookings_per_slot')
       .gte('date', startDate)
       .lte('date', endDate)
       .eq('is_active', true);
@@ -306,7 +318,7 @@ const getFreeAssessmentAvailabilityRange = async (req, res) => {
               
               // Calculate available slots (subtract booked slots)
               let availableSlots = 0;
-              const maxBookingsPerSlot = 1; // Default max bookings per slot
+              const maxBookingsPerSlot = dateConfig?.max_bookings_per_slot ?? 1; // Use DB value or default to 1
               
               allSlots.forEach(slot => {
                 const time24Hour = toHms24(slot);
@@ -1419,13 +1431,16 @@ const bookFreeAssessment = async (req, res) => {
       })();
     }
 
-    // Update client's free assessment count
-    // Note: Use client.id (from the client record we found) not userId
+    // Update client's free assessment count: atomic increment or recompute from actual assessments
+    const { count: bookedCount } = await supabaseAdmin
+      .from('free_assessments')
+      .select('*', { count: 'exact', head: true })
+      .eq('client_id', client.id)
+      .in('status', ['booked', 'completed', 'scheduled']);
+    const newCount = bookedCount ?? nextAssessmentNumber;
     await supabaseAdmin
       .from('clients')
-      .update({ 
-        free_assessment_count: nextAssessmentNumber
-      })
+      .update({ free_assessment_count: newCount })
       .eq('id', client.id);
 
     await removeTimeSlotFromDateConfig(scheduledDate, scheduledTime);
@@ -1504,22 +1519,21 @@ const cancelFreeAssessment = async (req, res) => {
     }
 
     // Decrease client's free assessment count
-    // client already exists from above (renamed to clientRecord)
-    if (client) {
+    if (clientRecord) {
       const { data: clientData } = await supabaseAdmin
         .from('clients')
         .select('free_assessment_count')
-        .eq('id', client.id)
+        .eq('id', clientRecord.id)
         .single();
       
       if (clientData) {
-        const newCount = Math.max(0, clientData.free_assessment_count - 1);
+        const newCount = Math.max(0, (clientData.free_assessment_count ?? 0) - 1);
         await supabaseAdmin
           .from('clients')
           .update({ 
             free_assessment_count: newCount
           })
-          .eq('id', client.id);
+          .eq('id', clientRecord.id);
       }
     }
 
@@ -1628,10 +1642,17 @@ const deleteFreeAssessment = async (req, res) => {
 
     console.log('🗑️ Admin deleting free assessment:', assessmentId);
 
-    // Get the assessment
+    // Defensive runtime check: ensure user is admin
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'superadmin')) {
+      return res.status(403).json(
+        errorResponse('Access denied. Admin role required.')
+      );
+    }
+
+    // Get the assessment (include client_id for decrementing free_assessment_count)
     const { data: assessment, error: assessmentError } = await supabaseAdmin
       .from('free_assessments')
-      .select('id, session_id, status')
+      .select('id, session_id, status, client_id')
       .eq('id', assessmentId)
       .single();
 
@@ -1641,27 +1662,10 @@ const deleteFreeAssessment = async (req, res) => {
       );
     }
 
-    // Delete the associated session if it exists
-    if (assessment.session_id) {
-      try {
-        const { error: sessionDeleteError } = await supabaseAdmin
-          .from('sessions')
-          .delete()
-          .eq('id', assessment.session_id);
+    const clientId = assessment.client_id;
+    const sessionId = assessment.session_id;
 
-        if (sessionDeleteError) {
-          console.warn('⚠️ Error deleting associated session:', sessionDeleteError);
-          // Continue with assessment deletion even if session deletion fails
-        } else {
-          console.log('✅ Deleted associated session:', assessment.session_id);
-        }
-      } catch (sessionError) {
-        console.warn('⚠️ Error deleting associated session:', sessionError);
-        // Continue with assessment deletion
-      }
-    }
-
-    // Delete the free assessment
+    // Delete the free assessment first (before session to prevent orphaned assessment)
     const { error: deleteError } = await supabaseAdmin
       .from('free_assessments')
       .delete()
@@ -1672,6 +1676,48 @@ const deleteFreeAssessment = async (req, res) => {
       return res.status(500).json(
         errorResponse('Failed to delete free assessment')
       );
+    }
+
+    // Delete the associated session if it exists (after assessment deletion)
+    if (sessionId) {
+      try {
+        const { error: sessionDeleteError } = await supabaseAdmin
+          .from('sessions')
+          .delete()
+          .eq('id', sessionId);
+
+        if (sessionDeleteError) {
+          console.error('⚠️ Error deleting associated session after assessment deletion:', sessionDeleteError);
+          // Assessment already deleted, but session deletion failed
+          // Log error but don't fail the request since assessment deletion succeeded
+          // In production, consider implementing a compensating restore or background cleanup
+        } else {
+          console.log('✅ Deleted associated session:', sessionId);
+        }
+      } catch (sessionError) {
+        console.error('⚠️ Exception deleting associated session:', sessionError);
+        // Assessment already deleted, but session deletion failed
+        // Log error but don't fail the request since assessment deletion succeeded
+      }
+    }
+
+    // Only decrement client's free_assessment_count after successful deletion
+    if (clientId) {
+      const { data: clientRow } = await supabaseAdmin
+        .from('clients')
+        .select('free_assessment_count')
+        .eq('id', clientId)
+        .single();
+      if (clientRow) {
+        const newCount = Math.max(0, (clientRow.free_assessment_count ?? 0) - 1);
+        const { error: updateErr } = await supabaseAdmin
+          .from('clients')
+          .update({ free_assessment_count: newCount })
+          .eq('id', clientId);
+        if (updateErr) {
+          console.warn('⚠️ Failed to decrement free_assessment_count:', updateErr);
+        }
+      }
     }
 
     console.log('✅ Free assessment deleted successfully:', assessmentId);

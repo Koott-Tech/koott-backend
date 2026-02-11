@@ -31,11 +31,14 @@ class AccountLockoutService {
       const normalizedEmail = email.toLowerCase().trim();
       const cacheKey = `failed_attempts:${normalizedEmail}`;
       
-      // Get current attempts from cache
-      let attempts = globalCache.get(cacheKey) || 0;
+      // Get current attempts from cache (only if cache is enabled)
+      let attempts = 0;
+      if (this.useCache) {
+        attempts = globalCache.get(cacheKey) || 0;
+      }
       attempts += 1;
 
-      // Store in cache
+      // Store in cache (only if cache is enabled)
       if (this.useCache) {
         globalCache.set(cacheKey, attempts, this.lockoutDuration);
       }
@@ -61,26 +64,72 @@ class AccountLockoutService {
             };
           }
 
-          // Upsert failed attempt
-          const { error: dbError } = await supabaseAdmin
-            .from('account_lockouts')
-            .upsert({
-              email: normalizedEmail,
-              failed_attempts: attempts,
-              locked_until: attempts >= this.maxAttempts 
-                ? new Date(Date.now() + this.lockoutDuration).toISOString()
-                : null,
-              last_attempt_ip: ip,
-              last_attempt_at: new Date().toISOString()
-            }, {
-              onConflict: 'email'
-            });
+          // Use atomic RPC function for increment (replaces read-then-upsert TOCTOU race)
+          const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('increment_failed_attempts', {
+            p_email: normalizedEmail,
+            p_ip: ip,
+            p_max_attempts: this.maxAttempts,
+            p_lockout_duration_ms: this.lockoutDuration
+          });
 
-          if (dbError && dbError.code !== '42P01') { // Ignore table not found
-            console.error('❌ Error recording failed attempt:', dbError);
+          if (rpcError) {
+            if (rpcError.code === '42883') {
+              // Function doesn't exist - fallback to read-then-upsert
+              console.warn('⚠️ increment_failed_attempts RPC function not found. Using fallback (not atomic).');
+              console.warn('   Create function with: CREATE OR REPLACE FUNCTION increment_failed_attempts(p_email TEXT, p_ip TEXT, p_max_attempts INTEGER, p_lockout_duration_ms BIGINT) RETURNS TABLE(failed_attempts INTEGER, locked_until TIMESTAMP WITH TIME ZONE) AS $$ BEGIN INSERT INTO account_lockouts (email, failed_attempts, last_attempt_ip, last_attempt_at) VALUES (p_email, 1, p_ip, NOW()) ON CONFLICT (email) DO UPDATE SET failed_attempts = account_lockouts.failed_attempts + 1, last_attempt_ip = p_ip, last_attempt_at = NOW(), locked_until = CASE WHEN account_lockouts.failed_attempts + 1 >= p_max_attempts THEN NOW() + (p_lockout_duration_ms || \' milliseconds\')::INTERVAL ELSE NULL END RETURNING failed_attempts, locked_until; END; $$ LANGUAGE plpgsql;');
+              
+              // Fallback: read-then-upsert (not atomic but better than nothing)
+              const { data: existingLockout } = await supabaseAdmin
+                .from('account_lockouts')
+                .select('failed_attempts')
+                .eq('email', normalizedEmail)
+                .maybeSingle();
+
+              const currentFailedAttempts = existingLockout?.failed_attempts || 0;
+              const newFailedAttempts = currentFailedAttempts + 1;
+              const shouldLock = newFailedAttempts >= this.maxAttempts;
+
+              const { error: dbError } = await supabaseAdmin
+                .from('account_lockouts')
+                .upsert({
+                  email: normalizedEmail,
+                  failed_attempts: newFailedAttempts,
+                  locked_until: shouldLock
+                    ? new Date(Date.now() + this.lockoutDuration).toISOString()
+                    : null,
+                  last_attempt_ip: ip,
+                  last_attempt_at: new Date().toISOString()
+                }, {
+                  onConflict: 'email'
+                });
+
+              if (dbError && dbError.code !== '42P01') {
+                console.error('❌ Error recording failed attempt (fallback):', {
+                  code: dbError.code,
+                  message: dbError.message
+                });
+              }
+              
+              attempts = newFailedAttempts;
+            } else {
+              // Other RPC error
+              console.error('❌ Error calling increment_failed_attempts RPC:', {
+                code: rpcError.code,
+                message: rpcError.message
+              });
+            }
+          } else if (rpcResult && rpcResult.length > 0) {
+            // RPC succeeded - extract values
+            attempts = rpcResult[0].failed_attempts || 0;
           }
         } catch (dbError) {
-          console.error('❌ Database error recording failed attempt:', dbError);
+          // Sanitize error logging to avoid PII leakage
+          console.error('❌ Database error recording failed attempt:', {
+            code: dbError?.code,
+            message: dbError?.message,
+            hint: dbError?.hint,
+            details: dbError?.details
+          });
           // Continue with cache-only tracking
         }
       }
@@ -101,8 +150,9 @@ class AccountLockoutService {
         lockoutUntil: null
       };
     } catch (error) {
-      console.error('❌ Error recording failed attempt:', error);
-      return { locked: false, attemptsRemaining: this.maxAttempts };
+      console.error('❌ Error recording failed attempt:', error?.code || error?.name || 'unknown');
+      // Fail-closed: deny login on DB/cache errors
+      return { locked: true, attemptsRemaining: 0 };
     }
   }
 
@@ -120,8 +170,12 @@ class AccountLockoutService {
       const normalizedEmail = email.toLowerCase().trim();
       const cacheKey = `failed_attempts:${normalizedEmail}`;
       
-      // Check cache first
-      const attempts = globalCache.get(cacheKey) || 0;
+      // Check cache first (only if cache is enabled)
+      let attempts = 0;
+      if (this.useCache) {
+        attempts = globalCache.get(cacheKey) || 0;
+      }
+
       if (attempts >= this.maxAttempts) {
         // Check database for lockout expiry
         if (this.useDatabase) {
@@ -138,17 +192,29 @@ class AccountLockoutService {
                 locked: true,
                 lockoutUntil: new Date(lockout.locked_until)
               };
+            } else {
+              // Database has no active lockout - return unlocked and reset cache
+              if (this.useCache) {
+                globalCache.delete(cacheKey);
+              }
+              return {
+                locked: false,
+                lockoutUntil: null
+              };
             }
           } catch (dbError) {
-            if (dbError.code !== '42P01') { // Ignore table not found
-              console.error('❌ Error checking account lockout:', dbError);
+            if (dbError.code !== '42P01') {
+              console.error('❌ Error checking account lockout:', { code: dbError?.code, message: dbError?.message });
             }
           }
         }
-        // If no database or expired, check cache
+        // If no database or expired, but cache shows locked - return unlocked (cache is stale)
+        if (this.useCache) {
+          globalCache.delete(cacheKey);
+        }
         return {
-          locked: true,
-          lockoutUntil: new Date(Date.now() + this.lockoutDuration)
+          locked: false,
+          lockoutUntil: null
         };
       }
 
@@ -170,15 +236,16 @@ class AccountLockoutService {
           }
         } catch (dbError) {
           if (dbError.code !== '42P01') {
-            console.error('❌ Error checking account lockout:', dbError);
+            console.error('❌ Error checking account lockout:', { code: dbError?.code, message: dbError?.message });
           }
         }
       }
 
       return { locked: false, lockoutUntil: null };
     } catch (error) {
-      console.error('❌ Error checking account lockout:', error);
-      return { locked: false, lockoutUntil: null };
+      console.error('❌ Error checking account lockout:', error?.code || error?.name || 'unknown');
+      // Fail-closed: consistent with recordFailedAttempt — deny access when check fails so we do not fail-open on errors
+      return { locked: true, lockoutUntil: null };
     }
   }
 
@@ -203,13 +270,16 @@ class AccountLockoutService {
       // Clear database
       if (this.useDatabase) {
         try {
-          await supabaseAdmin
+          const { error: deleteError } = await supabaseAdmin
             .from('account_lockouts')
             .delete()
             .eq('email', normalizedEmail);
+          if (deleteError && deleteError.code !== '42P01') {
+            console.error('❌ Error clearing failed attempts:', { code: deleteError.code, message: deleteError.message });
+          }
         } catch (dbError) {
           if (dbError.code !== '42P01') {
-            console.error('❌ Error clearing failed attempts:', dbError);
+            console.error('❌ Error clearing failed attempts:', { code: dbError?.code, message: dbError?.message });
           }
         }
       }

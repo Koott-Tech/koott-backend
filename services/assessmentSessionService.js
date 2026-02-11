@@ -177,7 +177,7 @@ async function sendAssessmentWhatsapps({ session, clientName, meetLink }) {
       session.assessment?.seo_title ||
       'Assessment session';
     const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-    const bullet = '•⁠  ⁠';
+    const bullet = '•  '; // Clean bullet with normal spaces
     const formattedDate = formatBookingDateShort(scheduledDate);
     const formattedTime = formatFriendlyTime(scheduledTime);
     

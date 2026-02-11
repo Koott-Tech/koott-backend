@@ -180,16 +180,22 @@ class CalendarSyncService {
         };
         
         // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
-        await supabaseAdmin
+        const { error: updateError } = await supabaseAdmin
           .from('psychologists')
           .update({ 
             google_calendar_credentials: updatedCredentials
           })
           .eq('id', psychologist.id);
         
+        if (updateError) {
+          console.error(`❌ Failed to update credentials for psychologist ${psychologist.id}:`, updateError);
+          throw updateError;
+        }
+        
         // Removed verbose sync logs - only keep summary at the end
       } catch (tokenError) {
         console.error(`⚠️ Failed to store sync token for ${psychologist.first_name} ${psychologist.last_name}:`, tokenError.message);
+        throw tokenError;
       }
     }
 
@@ -204,12 +210,32 @@ class CalendarSyncService {
           delete clearedCredentials.syncToken;
           
           // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
-          await supabaseAdmin
+          const { data: clearData, error: clearError, count } = await supabaseAdmin
             .from('psychologists')
             .update({ google_calendar_credentials: clearedCredentials })
-            .eq('id', psychologist.id);
+            .eq('id', psychologist.id)
+            .select('id');
+          
+          if (clearError) {
+            console.error('❌ Error clearing sync token:', {
+              psychologistId: psychologist.id,
+              error: clearError.message,
+              code: clearError.code,
+              details: clearError
+            });
+            throw clearError; // Re-throw to be caught by outer catch
+          } else if (!clearData || (count !== undefined && count === 0)) {
+            console.warn('⚠️ Clear sync token update returned no rows:', {
+              psychologistId: psychologist.id
+            });
+          }
         } catch (clearError) {
-          console.error('Failed to clear sync token:', clearError);
+          console.error('❌ Failed to clear sync token:', {
+            psychologistId: psychologist.id,
+            error: clearError.message || clearError,
+            code: clearError.code
+          });
+          // Continue with retry even if clearing failed
         }
         
         // Retry with full sync (no sync token)
@@ -229,10 +255,25 @@ class CalendarSyncService {
           };
           
           // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
-          await supabaseAdmin
+          const { data: updateData, error: updateError } = await supabaseAdmin
             .from('psychologists')
             .update({ google_calendar_credentials: updatedCredentials })
-            .eq('id', psychologist.id);
+            .eq('id', psychologist.id)
+            .select('id');
+          
+          if (updateError) {
+            console.error('❌ Error updating sync token:', {
+              psychologistId: psychologist.id,
+              error: updateError.message,
+              code: updateError.code,
+              details: updateError
+            });
+            // Continue processing but log the error
+          } else if (!updateData || updateData.length === 0) {
+            console.warn('⚠️ Sync token update returned no rows:', {
+              psychologistId: psychologist.id
+            });
+          }
         }
         
         // Use retry result
@@ -365,11 +406,9 @@ class CalendarSyncService {
         const eventStartMinutes = eventStartIST.minutesFromMidnight;
         let eventEndMinutes = eventEndIST.minutesFromMidnight;
         
-        // Handle events that span midnight or multiple days
-        const startDate = new Date(event.start);
-        const endDate = new Date(event.end);
-        const startDateStr = startDate.toISOString().split('T')[0];
-        const endDateStr = endDate.toISOString().split('T')[0];
+        // Handle events that span midnight or multiple days (use IST date strings for correct day boundaries)
+        const startDateStr = eventStartIST.dateStr;
+        const endDateStr = eventEndIST.dateStr;
         const isMultiDayEvent = startDateStr !== endDateStr;
         
         if (isMultiDayEvent) {
@@ -410,22 +449,28 @@ class CalendarSyncService {
           }
         } else {
           // Single-day event
+          let normalizedEndMinutes = eventEndMinutes;
+          let spansMidnight = false;
+          
           if (eventEndMinutes < eventStartMinutes) {
             // Event spans midnight on same day (unusual but possible)
-            eventEndMinutes = eventEndMinutes + (24 * 60);
-        }
+            spansMidnight = true;
+            normalizedEndMinutes = eventEndMinutes + (24 * 60);
+          }
         
-        eventDates.add(eventDate);
-        eventData.push({
-          date: eventDate,
-          time: `${String(eventStartIST.hour).padStart(2, '0')}:${String(eventStartIST.minute).padStart(2, '0')}`,
-          title: event.title,
-          startMinutes: eventStartMinutes, // Minutes from midnight (0-1439) in IST
-          endMinutes: eventEndMinutes,
-          startTime: new Date(event.start),
+          eventDates.add(eventDate);
+          eventData.push({
+            date: eventDate,
+            time: `${String(eventStartIST.hour).padStart(2, '0')}:${String(eventStartIST.minute).padStart(2, '0')}`,
+            title: event.title,
+            startMinutes: eventStartMinutes, // Minutes from midnight (0-1439) in IST
+            endMinutes: eventEndMinutes, // Keep original 0-1439 range
+            normalizedEndMinutes: normalizedEndMinutes, // For overlap calculations when spans midnight
+            spansMidnight: spansMidnight,
+            startTime: new Date(event.start),
             endTime: new Date(event.end),
             isMultiDay: false
-        });
+          });
         }
       } catch (error) {
         console.error(`Error processing event "${event.title}":`, error);
@@ -498,19 +543,24 @@ class CalendarSyncService {
           // Slots are typically 1 hour long (60 minutes)
           // We need to check if the slot INTERVAL overlaps with the event INTERVAL
           // Slot: [slotMinutes, slotMinutes + 60)
-          // Event: [eventInfo.startMinutes, eventInfo.endMinutes)
+          // Event: [eventInfo.startMinutes, effectiveEnd)
           // Overlap occurs if: slotStart < eventEnd AND slotEnd > eventStart
           const SLOT_DURATION_MINUTES = 60; // 1-hour slots
           const slotEndMinutes = slotMinutes + SLOT_DURATION_MINUTES;
           
-          const overlaps = slotMinutes < eventInfo.endMinutes && slotEndMinutes > eventInfo.startMinutes;
+          // Use effective end minutes for midnight-spanning events
+          const effectiveEnd = eventInfo.spansMidnight && eventInfo.normalizedEndMinutes !== undefined
+            ? eventInfo.normalizedEndMinutes
+            : eventInfo.endMinutes;
+          
+          const overlaps = slotMinutes < effectiveEnd && slotEndMinutes > eventInfo.startMinutes;
           
           if (overlaps) {
             slotsToBlock.push({
               slot,
               slotMinutes,
               eventStart: eventInfo.startMinutes,
-              eventEnd: eventInfo.endMinutes
+              eventEnd: effectiveEnd
             });
             return false; // Remove this slot
           }
@@ -564,12 +614,7 @@ class CalendarSyncService {
       
       if (blockedSlots.length > 0) {
         // Summary log only (no verbose details)
-        if (blockedSlots.length > 0) {
-          // Summary log only (no verbose details)
-          if (blockedSlots.length > 0) {
-            console.log(`✅ Blocked ${blockedSlots.length} time slot(s) across ${updatesToApply.size} date(s) for ${psychologist.first_name} ${psychologist.last_name}`);
-          }
-        }
+        console.log(`✅ Blocked ${blockedSlots.length} time slot(s) across ${updatesToApply.size} date(s) for ${psychologist.first_name} ${psychologist.last_name}`);
       }
     }
 

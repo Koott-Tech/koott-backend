@@ -1,4 +1,5 @@
 // Blog content processing utilities for backend
+const path = require('path');
 
 /**
  * Process and validate structured content
@@ -110,9 +111,22 @@ const sanitizeUrl = (url) => {
 
   const trimmedUrl = url.trim();
 
-  // If it's a relative path, return as is
+  // If it's a relative path, validate and normalize to prevent path traversal
   if (trimmedUrl.startsWith('/') || trimmedUrl.startsWith('./') || trimmedUrl.startsWith('../')) {
-    return trimmedUrl;
+    // Normalize the path and check for path traversal
+    const normalized = path.posix.normalize(trimmedUrl);
+    const segments = normalized.split('/').filter(Boolean);
+    const hasParent = segments.some(seg => seg === '..') || normalized.startsWith('/../') || normalized.startsWith('/..');
+    if (hasParent || normalized.includes('../') || normalized.startsWith('../')) {
+      console.warn('⚠️ Path traversal detected in image src:', trimmedUrl);
+      return '';
+    }
+    // Reject absolute paths that might escape
+    if (normalized.startsWith('/') && normalized !== '/') {
+      // Allow root-relative paths but validate they don't escape
+      return normalized;
+    }
+    return normalized;
   }
 
   // Normalize URL by adding protocol if missing
@@ -205,13 +219,8 @@ const validateStructuredContent = (structuredContent) => {
         }
         break;
 
-      case 'link':
-        if (!block.href || typeof block.href !== 'string') {
-          errors.push(`Block ${index} (link) is missing href`);
-        }
-        if (!block.text || typeof block.text !== 'string') {
-          errors.push(`Block ${index} (link) is missing text`);
-        }
+      case 'spacer':
+        // Spacer blocks have no required fields
         break;
 
       case 'quote':
@@ -260,10 +269,8 @@ const calculateReadingTime = (structuredContent) => {
         }
         break;
 
-      case 'link':
-        if (block.text) {
-          wordCount += block.text.split(/\s+/).length;
-        }
+      case 'spacer':
+        // Spacer blocks don't contribute to reading time
         break;
     }
   });

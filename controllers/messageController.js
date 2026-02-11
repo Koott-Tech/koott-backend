@@ -1,6 +1,39 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { successResponse, errorResponse } = require('../utils/helpers');
 
+/**
+ * Resolve client ID from request user
+ * @param {Object} req - Express request object
+ * @returns {Promise<string|null>} - Resolved client ID or null if not found
+ */
+async function resolveClientId(req) {
+  const userId = req.user?.id;
+  if (!userId) {
+    return null;
+  }
+
+  // Use client_id if available (new system)
+  let clientId = req.user.client_id || userId;
+
+  // If still not found or equals userId, try to lookup client by user_id
+  if (!clientId || clientId === userId) {
+    const { data: clientData, error: clientDataError } = await supabaseAdmin
+      .from('clients')
+      .select('id')
+      .eq('user_id', userId)
+      .single();
+
+    if (!clientDataError && clientData) {
+      clientId = clientData.id;
+    } else {
+      // Not found or error
+      return null;
+    }
+  }
+
+  return clientId;
+}
+
 // Get user conversations
 const getConversations = async (req, res) => {
   try {
@@ -9,24 +42,14 @@ const getConversations = async (req, res) => {
 
     let conversations;
     if (userRole === 'client') {
-      // Determine client ID: use client_id if available (new system), otherwise use id (old system)
-      let clientId = req.user.client_id || userId;
-      
-      // If still not found, try to lookup client by user_id
-      if (!clientId || clientId === userId) {
-        const { data: clientData, error: clientDataError } = await supabaseAdmin
-          .from('clients')
-          .select('id')
-          .eq('user_id', userId)
-          .single();
-        
-        if (!clientDataError && clientData) {
-          clientId = clientData.id;
-          console.log('🔍 Found client by user_id for conversations:', clientId);
-        }
+      const clientId = await resolveClientId(req);
+      if (!clientId) {
+        return res.status(404).json(errorResponse('Client profile not found'));
       }
       
-      console.log('🔍 Using client ID for conversations:', clientId);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('🔍 Using client ID for conversations:', clientId);
+      }
 
       // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
       const { data, error } = await supabaseAdmin
@@ -90,21 +113,9 @@ const getMessages = async (req, res) => {
 
     // Check if user has access to this conversation
     if (userRole === 'client') {
-      // Determine client ID: use client_id if available (new system), otherwise use id (old system)
-      let clientId = req.user.client_id || userId;
-      
-      // If still not found, try to lookup client by user_id
-      if (!clientId || clientId === userId) {
-        const { data: clientData, error: clientDataError } = await supabaseAdmin
-          .from('clients')
-          .select('id')
-          .eq('user_id', userId)
-          .single();
-        
-        if (!clientDataError && clientData) {
-          clientId = clientData.id;
-          console.log('🔍 Found client by user_id for messages:', clientId);
-        }
+      const clientId = await resolveClientId(req);
+      if (!clientId) {
+        return res.status(404).json(errorResponse('Client profile not found'));
       }
       
       console.log('🔍 Checking access - Conversation client_id:', conversation.client_id, 'User client_id:', clientId);
@@ -162,21 +173,9 @@ const sendMessage = async (req, res) => {
 
     // Check if user has access to this conversation
     if (userRole === 'client') {
-      // Determine client ID: use client_id if available (new system), otherwise use id (old system)
-      let clientId = req.user.client_id || userId;
-      
-      // If still not found, try to lookup client by user_id
-      if (!clientId || clientId === userId) {
-        const { data: clientData, error: clientDataError } = await supabaseAdmin
-          .from('clients')
-          .select('id')
-          .eq('user_id', userId)
-          .single();
-        
-        if (!clientDataError && clientData) {
-          clientId = clientData.id;
-          console.log('🔍 Found client by user_id for sendMessage:', clientId);
-        }
+      const clientId = await resolveClientId(req);
+      if (!clientId) {
+        return res.status(404).json(errorResponse('Client profile not found'));
       }
       
       console.log('🔍 Checking access for sendMessage - Conversation client_id:', conversation.client_id, 'User client_id:', clientId);
@@ -244,21 +243,9 @@ const markAsRead = async (req, res) => {
 
     // Check if user has access to this conversation
     if (userRole === 'client') {
-      // Determine client ID: use client_id if available (new system), otherwise use id (old system)
-      let clientId = req.user.client_id || userId;
-      
-      // If still not found, try to lookup client by user_id
-      if (!clientId || clientId === userId) {
-        const { data: clientData, error: clientDataError } = await supabaseAdmin
-          .from('clients')
-          .select('id')
-          .eq('user_id', userId)
-          .single();
-        
-        if (!clientDataError && clientData) {
-          clientId = clientData.id;
-          console.log('🔍 Found client by user_id for markAsRead:', clientId);
-        }
+      const clientId = await resolveClientId(req);
+      if (!clientId) {
+        return res.status(404).json(errorResponse('Client profile not found'));
       }
       
       console.log('🔍 Checking access for markAsRead - Conversation client_id:', conversation.client_id, 'User client_id:', clientId);
@@ -320,21 +307,9 @@ const createConversation = async (req, res) => {
 
     // Verify user has access to this session
     if (userRole === 'client') {
-      // Determine client ID: use client_id if available (new system), otherwise use id (old system)
-      let clientId = req.user.client_id || userId;
-      
-      // If still not found, try to lookup client by user_id
-      if (!clientId || clientId === userId) {
-        const { data: clientData, error: clientDataError } = await supabaseAdmin
-        .from('clients')
-        .select('id')
-          .eq('user_id', userId)
-        .single();
-
-        if (!clientDataError && clientData) {
-          clientId = clientData.id;
-          console.log('🔍 Found client by user_id:', clientId);
-        }
+      const clientId = await resolveClientId(req);
+      if (!clientId) {
+        return res.status(404).json(errorResponse('Client profile not found'));
       }
       
       console.log('Client lookup - Using client ID:', clientId);

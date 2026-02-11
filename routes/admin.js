@@ -52,9 +52,6 @@ router.get('/stats/dashboard', adminController.getPlatformStats); // Alias for d
 // User search
 router.get('/search/users', adminController.searchUsers);
 
-// Activities
-router.get('/activities', adminController.getRecentActivities);
-
 // Recent data for dashboard
 router.get('/recent-users', adminController.getRecentUsers);
 router.get('/recent-bookings', adminController.getRecentBookings);
@@ -66,28 +63,16 @@ router.put('/psychologists/:psychologistId', adminController.updatePsychologist)
 router.delete('/psychologists/:psychologistId', adminController.deletePsychologist);
 
 // Availability management
-router.post('/availability/add-next-day', adminController.addNextDayAvailability);
 router.post('/availability/update-all', adminController.updateAllPsychologistsAvailability);
-
-// Package management for psychologists
-router.post('/psychologists/:psychologistId/packages', adminController.createPsychologistPackages);
-router.get('/packages/check-missing', adminController.checkMissingPackages);
-router.delete('/packages/:packageId', adminController.deletePackage);
-
-// Debug endpoints
-router.get('/debug/stuck-slot-locks', adminController.getStuckSlotLocks);
 
 // User management
 router.post('/users', requireRequestSignature, adminController.createUser);
-router.put('/users/:userId', adminController.updateUser);
 router.delete('/users/:userId', requireRequestSignature, adminController.deleteUser);
 
 // Session management
 router.get('/sessions/all', sessionController.getAllSessions);
 
 // Session rescheduling
-router.put('/sessions/:sessionId/reschedule', adminController.rescheduleSession);
-router.put('/sessions/:sessionId/payment', adminController.updateSessionPayment);
 router.put('/sessions/:sessionId', adminController.updateSession);
 router.put('/sessions/:sessionId/no-show', sessionController.markSessionAsNoShow);
 router.post('/sessions/:sessionId/complete', sessionController.completeSession); // Allow admins to complete sessions (especially free assessments)
@@ -98,9 +83,7 @@ router.get('/psychologists/:psychologistId/availability', adminController.getPsy
 router.post('/bookings/manual', adminController.createManualBooking);
 
 // Reschedule request handling
-router.put('/reschedule-requests/:notificationId', adminController.handleRescheduleRequest);
 router.get('/reschedule-requests', adminController.getRescheduleRequests);
-router.put('/reschedule-requests/assessment/:notificationId/approve', adminController.approveAssessmentRescheduleRequest);
 
 // Assessment session rescheduling (admin can reschedule directly)
 router.put('/assessment-sessions/:assessmentSessionId/reschedule', assessmentBookingController.rescheduleAssessmentSession);
@@ -108,9 +91,6 @@ router.delete('/assessment-sessions/:assessmentSessionId', assessmentBookingCont
 
 // Psychologist calendar events
 router.get('/psychologists/:psychologistId/calendar-events', adminController.getPsychologistCalendarEvents);
-
-// Check calendar sync status
-router.get('/psychologists/:psychologistId/calendar-sync-status', adminController.checkCalendarSyncStatus);
 
 // Manual trigger for session reminders (admin only, for testing)
 router.post('/trigger-session-reminders', async (req, res) => {
@@ -155,9 +135,9 @@ const upload = multer({
   storage: memoryStorage,
   limits: { fileSize: 15 * 1024 * 1024 }, // 15MB to accommodate high‑res formats
   fileFilter: (req, file, cb) => {
-    // Accept any image/* mimetype (jpg, jpeg, png, webp, gif, heic, heif, bmp, tiff, svg, etc.)
-    if (!file.mimetype || !file.mimetype.startsWith('image/')) {
-      return cb(new Error('Only image files are allowed'));
+    const allowedMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (!file.mimetype || !allowedMimes.includes(file.mimetype)) {
+      return cb(new Error('Only JPEG, PNG, WebP and GIF images are allowed'));
     }
     cb(null, true);
   }
@@ -173,10 +153,10 @@ router.post('/upload/image', upload.single('file'), async (req, res) => {
     // HIGH-RISK FIX: Path traversal protection - generate UUID filename, ignore client-supplied name
     const crypto = require('crypto');
     const uuid = crypto.randomUUID();
+    // Supported image extensions (must match fileFilter mimetypes)
     const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
-    const ext = allowedExtensions.includes(path.extname(req.file.originalname).toLowerCase()) 
-      ? path.extname(req.file.originalname).toLowerCase() 
-      : '.jpg';
+    const rawExt = path.extname(req.file.originalname).toLowerCase();
+    const ext = allowedExtensions.includes(rawExt) ? rawExt : '.jpg';
     const filename = `${uuid}${ext}`;
     const objectPath = `${filename}`; // flat path; change to folders if needed
 
