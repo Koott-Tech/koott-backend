@@ -18,16 +18,36 @@ function getDayOfWeekFromDate(dateStr) {
 }
 
 /**
- * Normalize time slot for comparison (HH:MM or HH:MM:SS -> HH:MM).
+ * Normalize time slot to 24h HH:MM for comparison.
+ * Handles: "08:00", "8:00", "8:00 AM", "1:00 PM", "13:00", "21:00" etc.
+ * Default availability stores 12h ("8:00 AM", "9:00 PM"); recurring blocks store 24h ("08:00", "21:00").
  */
 function normalizeSlotTime(slot) {
   if (!slot) return null;
   const s = String(slot).trim();
-  const match = s.match(/(\d{1,2}):(\d{2})/);
+  const match = s.match(/(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?/i);
   if (!match) return null;
-  const h = match[1].padStart(2, '0');
+  let h = parseInt(match[1], 10);
   const m = match[2];
-  return `${h}:${m}`;
+  const period = (match[3] || '').toUpperCase();
+
+  if (period === 'PM' && h !== 12) h += 12;
+  else if (period === 'AM' && h === 12) h = 0;
+  else if (!period && h >= 0 && h <= 23) { /* already 24h */ }
+  else if (!period && h >= 1 && h <= 12) { /* assume 24h if no AM/PM, leave as-is */ }
+
+  const hStr = String(h).padStart(2, '0');
+  return `${hStr}:${m}`;
+}
+
+/**
+ * Normalize an array of time_slots for storage (24h, two-digit hours).
+ * Use when saving recurring blocks so only intended slots are blocked (e.g. 08:00-16:00, not 20:00).
+ */
+function normalizeTimeSlotsForStorage(slots) {
+  if (!Array.isArray(slots) || slots.length === 0) return null;
+  const out = slots.map(normalizeSlotTime).filter(Boolean);
+  return out.length ? out : null;
 }
 
 /**
@@ -102,6 +122,7 @@ function getDayName(dayOfWeek) {
 module.exports = {
   getDayOfWeekFromDate,
   normalizeSlotTime,
+  normalizeTimeSlotsForStorage,
   isSlotBlockedByRecurring,
   getRecurringBlocksForPsychologist,
   filterSlotsByRecurringBlocks,

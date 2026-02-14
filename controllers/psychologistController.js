@@ -1383,12 +1383,14 @@ const addRecurringBlock = async (req, res) => {
       return res.status(400).json(errorResponse('day_of_week must be 0 (Sunday) through 6 (Saturday)'));
     }
 
+    const { normalizeTimeSlotsForStorage } = require('../utils/recurringBlocksHelper');
     const dayNum = Number(day_of_week);
+    const normalizedSlots = normalizeTimeSlotsForStorage(time_slots);
     const payload = {
       psychologist_id: psychologistId,
       day_of_week: dayNum,
       block_entire_day: !!block_entire_day,
-      time_slots: Array.isArray(time_slots) && time_slots.length > 0 ? time_slots : null
+      time_slots: normalizedSlots
     };
 
     // If updating an existing block, remove old Google Calendar event first
