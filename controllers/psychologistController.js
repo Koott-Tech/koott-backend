@@ -1393,7 +1393,7 @@ const addRecurringBlock = async (req, res) => {
       time_slots: normalizedSlots
     };
 
-    // If updating an existing block, remove old Google Calendar event first
+    // If updating an existing block, remove old Google Calendar event(s) first (may be comma-separated for specific slots)
     const { data: existing } = await supabaseAdmin
       .from('psychologist_recurring_blocks')
       .select('id, google_calendar_event_id')
@@ -1402,18 +1402,25 @@ const addRecurringBlock = async (req, res) => {
       .maybeSingle();
 
     if (existing?.google_calendar_event_id) {
-      await timeBlockingService.deleteRecurringBlockCalendarEvent(psychologistId, existing.google_calendar_event_id);
+      const ids = String(existing.google_calendar_event_id).split(',').map((id) => id.trim()).filter(Boolean);
+      for (const eventId of ids) {
+        await timeBlockingService.deleteRecurringBlockCalendarEvent(psychologistId, eventId);
+      }
     }
 
-    // Create recurring event on Google Calendar (full-day or time range) when GCal connected
+    // Create recurring event(s) on Google Calendar (full-day, range, or one per specific slot) when GCal connected
     if (payload.block_entire_day || (payload.time_slots && payload.time_slots.length > 0)) {
       const gcalResult = await timeBlockingService.createRecurringBlockCalendarEvent(
         psychologistId,
         { day_of_week: dayNum, block_entire_day: payload.block_entire_day, time_slots: payload.time_slots },
         'Recurring block'
       );
-      if (gcalResult.success && gcalResult.eventId) {
-        payload.google_calendar_event_id = gcalResult.eventId;
+      if (gcalResult.success) {
+        if (gcalResult.eventIds && gcalResult.eventIds.length > 0) {
+          payload.google_calendar_event_id = gcalResult.eventIds.join(',');
+        } else if (gcalResult.eventId) {
+          payload.google_calendar_event_id = gcalResult.eventId;
+        }
       }
     }
 
@@ -1452,7 +1459,10 @@ const deleteRecurringBlock = async (req, res) => {
       .single();
 
     if (block?.google_calendar_event_id) {
-      await timeBlockingService.deleteRecurringBlockCalendarEvent(psychologistId, block.google_calendar_event_id);
+      const ids = String(block.google_calendar_event_id).split(',').map((id) => id.trim()).filter(Boolean);
+      for (const eventId of ids) {
+        await timeBlockingService.deleteRecurringBlockCalendarEvent(psychologistId, eventId);
+      }
     }
 
     const { error } = await supabaseAdmin

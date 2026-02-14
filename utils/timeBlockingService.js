@@ -89,43 +89,85 @@ class TimeBlockingService {
           visibility: 'private'
         };
       } else if (timeSlots.length > 0) {
-        // Time range: e.g. 11:00–15:00 (slots 11:00, 12:00, 13:00, 14:00) -> event 11:00 to 15:00
-        const firstSlot = String(timeSlots[0]).trim().substring(0, 5);
-        const lastSlot = String(timeSlots[timeSlots.length - 1]).trim().substring(0, 5);
-        const [lastH, lastM] = lastSlot.split(':').map(Number);
-        const endH = lastH + 1;
-        const endSlot = `${String(endH).padStart(2, '0')}:${String(lastM || 0).padStart(2, '0')}`;
-        const startDateTime = `${startDateStr}T${firstSlot}:00`;
-        const endDateTime = `${startDateStr}T${endSlot}:00`;
-        event = {
-          summary: `🚫 BLOCKED - ${reason}`,
-          description: `Recurring block by psychologist - ${reason}. Synced from Little Care.`,
-          start: {
-            dateTime: startDateTime,
-            timeZone: 'Asia/Kolkata'
-          },
-          end: {
-            dateTime: endDateTime,
-            timeZone: 'Asia/Kolkata'
-          },
-          recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${byDay}`],
-          colorId: '11',
-          transparency: 'opaque',
-          visibility: 'private'
+        // Check if slots form a continuous range (each slot is 1 hour after the previous)
+        const parseMinutes = (s) => {
+          const t = String(s).trim().substring(0, 5);
+          const [h, m] = t.split(':').map(Number);
+          return (h || 0) * 60 + (m || 0);
         };
+        const sorted = [...timeSlots].map(parseMinutes).sort((a, b) => a - b);
+        const isContinuous = sorted.every((m, i) => i === 0 || m - sorted[i - 1] === 60);
+
+        if (isContinuous) {
+          // Single event for continuous range: e.g. 11:00–15:00 (slots 11, 12, 13, 14)
+          const firstSlot = String(timeSlots[0]).trim().substring(0, 5);
+          const lastSlot = String(timeSlots[timeSlots.length - 1]).trim().substring(0, 5);
+          const [lastH, lastM] = lastSlot.split(':').map(Number);
+          const endH = lastH + 1;
+          const endSlot = `${String(endH).padStart(2, '0')}:${String(lastM || 0).padStart(2, '0')}`;
+          const startDateTime = `${startDateStr}T${firstSlot}:00`;
+          const endDateTime = `${startDateStr}T${endSlot}:00`;
+          event = {
+            summary: `🚫 BLOCKED - ${reason}`,
+            description: `Recurring block by psychologist - ${reason}. Synced from Little Care.`,
+            start: { dateTime: startDateTime, timeZone: 'Asia/Kolkata' },
+            end: { dateTime: endDateTime, timeZone: 'Asia/Kolkata' },
+            recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${byDay}`],
+            colorId: '11',
+            transparency: 'opaque',
+            visibility: 'private'
+          };
+          const response = await this.calendar.events.insert({
+            auth: oauth2Client,
+            calendarId: 'primary',
+            resource: event
+          });
+          const eventId = response.data.id;
+          console.log(`✅ Recurring block GCal event created for psychologist ${psychologistId}, day ${dayOfWeek}, eventId=${eventId}`);
+          return { success: true, eventId };
+        }
+
+        // Non-contiguous slots (e.g. 8, 9, 13): create one recurring event per slot so only those hours are blocked
+        const eventIds = [];
+        for (const slot of timeSlots) {
+          const startSlot = String(slot).trim().substring(0, 5);
+          const [h, m] = startSlot.split(':').map(Number);
+          const endH = (h || 0) + 1;
+          const endSlot = `${String(endH).padStart(2, '0')}:${String(m || 0).padStart(2, '0')}`;
+          const slotEvent = {
+            summary: `🚫 BLOCKED - ${reason}`,
+            description: `Recurring block by psychologist - ${reason}. Synced from Little Care.`,
+            start: { dateTime: `${startDateStr}T${startSlot}:00`, timeZone: 'Asia/Kolkata' },
+            end: { dateTime: `${startDateStr}T${endSlot}:00`, timeZone: 'Asia/Kolkata' },
+            recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${byDay}`],
+            colorId: '11',
+            transparency: 'opaque',
+            visibility: 'private'
+          };
+          const response = await this.calendar.events.insert({
+            auth: oauth2Client,
+            calendarId: 'primary',
+            resource: slotEvent
+          });
+          eventIds.push(response.data.id);
+        }
+        console.log(`✅ Recurring block GCal: ${eventIds.length} events for psychologist ${psychologistId}, day ${dayOfWeek}`);
+        return { success: true, eventIds };
       } else {
         return { success: false, error: 'No time range specified for partial-day block' };
       }
 
-      const response = await this.calendar.events.insert({
-        auth: oauth2Client,
-        calendarId: 'primary',
-        resource: event
-      });
-
-      const eventId = response.data.id;
-      console.log(`✅ Recurring block GCal event created for psychologist ${psychologistId}, day ${dayOfWeek}, eventId=${eventId}`);
-      return { success: true, eventId };
+      // Single event path (blockEntireDay or continuous range) already returned above
+      if (event) {
+        const response = await this.calendar.events.insert({
+          auth: oauth2Client,
+          calendarId: 'primary',
+          resource: event
+        });
+        const eventId = response.data.id;
+        console.log(`✅ Recurring block GCal event created for psychologist ${psychologistId}, day ${dayOfWeek}, eventId=${eventId}`);
+        return { success: true, eventId };
+      }
     } catch (error) {
       console.error('Error creating recurring block calendar event:', error);
       return { success: false, error: error.message };
