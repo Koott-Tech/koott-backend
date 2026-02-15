@@ -207,6 +207,12 @@ class TimeBlockingService {
       console.log(`✅ Recurring block GCal event deleted for psychologist ${psychologistId}, eventId=${eventId}`);
       return { success: true };
     } catch (error) {
+      // 410 Gone / 404 Not Found = event already deleted (e.g. user deleted in GCal or previous run) — treat as success
+      const status = error.response?.status ?? error.code ?? error.status;
+      if (status === 410 || status === 404) {
+        console.log(`Recurring block GCal event already gone (${status}) for psychologist ${psychologistId}, eventId=${eventId}`);
+        return { success: true };
+      }
       console.error('Error deleting recurring block calendar event:', error);
       return { success: false, error: error.message };
     }

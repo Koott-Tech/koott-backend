@@ -4,7 +4,11 @@ const { getRecurringBlocksForPsychologist, filterSlotsByRecurringBlocks } = requ
 /**
  * Generate default time slots: continuous 1-hour slots from 8:00 AM to 10:00 PM IST
  * (sessions are 1 hour each, so 8:00 AM means 8:00–9:00, 9:00 AM means 9:00–10:00, etc.)
- * Returns array of time strings in 12-hour format (e.g. "8:00 AM", "1:00 PM")
+ * Returns array of time strings in 12-hour format (e.g. "8:00 AM", "1:00 PM").
+ *
+ * Daily availability (addNextDayAvailability) uses these slots. Exact list added per day:
+ * 8:00 AM, 9:00 AM, 10:00 AM, 11:00 AM, 12:00 PM, 1:00 PM, 2:00 PM, 3:00 PM,
+ * 4:00 PM, 5:00 PM, 6:00 PM, 7:00 PM, 8:00 PM, 9:00 PM (14 slots; last ends at 10:00 PM).
  */
 const generateDefaultTimeSlots = () => {
   const slots = [];
