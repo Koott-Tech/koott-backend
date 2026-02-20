@@ -173,6 +173,8 @@ const createBlog = async (req, res) => {
       author_name,
       status = 'draft',
       tags = [],
+      categories = [],
+      meta_keywords = [],
       read_time_minutes: incomingReadTime
     } = req.body;
 
@@ -246,6 +248,8 @@ const createBlog = async (req, res) => {
         status,
         published_at,
         tags: Array.isArray(tags) ? tags : [],
+        categories: Array.isArray(categories) ? categories : [],
+        meta_keywords: Array.isArray(meta_keywords) ? meta_keywords : [],
         read_time_minutes: computedReadTime || 5,
         view_count: 0
       }])
@@ -281,6 +285,8 @@ const updateBlog = async (req, res) => {
       author_name,
       status,
       tags,
+      categories,
+      meta_keywords,
       read_time_minutes
     } = req.body;
 
@@ -385,6 +391,8 @@ const updateBlog = async (req, res) => {
     if (author_name) updateData.author_name = author_name;
     if (status) updateData.status = status;
     if (tags !== undefined) updateData.tags = Array.isArray(tags) ? tags : [];
+    if (categories !== undefined) updateData.categories = Array.isArray(categories) ? categories : [];
+    if (meta_keywords !== undefined) updateData.meta_keywords = Array.isArray(meta_keywords) ? meta_keywords : [];
     if (read_time_minutes !== undefined) updateData.read_time_minutes = read_time_minutes;
     
     updateData.published_at = published_at;

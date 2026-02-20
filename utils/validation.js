@@ -70,37 +70,98 @@ const validateClientProfile = [
 ];
 
 // Psychologist profile validation
+// Normalize area_of_expertise: frontend may send comma-separated string; we accept string or array
+const normalizeAreaOfExpertise = (value) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    const arr = value.split(',').map(s => s.trim()).filter(Boolean);
+    return arr;
+  }
+  return [];
+};
+
+// Partial update: validate only fields that are present (PUT can send only changed fields)
 const validatePsychologistProfile = [
   body('first_name')
+    .optional()
     .trim()
     .isLength({ min: 2, max: 50 })
     .withMessage('First name must be between 2 and 50 characters'),
   body('last_name')
+    .optional()
     .trim()
     .isLength({ min: 2, max: 50 })
     .withMessage('Last name must be between 2 and 50 characters'),
+  body('phone')
+    .optional()
+    .trim()
+    .notEmpty()
+    .withMessage('Phone is required when provided'),
   body('ug_college')
+    .optional()
     .trim()
     .notEmpty()
-    .withMessage('Undergraduate college is required'),
+    .withMessage('Undergraduate college is required when provided'),
   body('pg_college')
+    .optional()
     .trim()
     .notEmpty()
-    .withMessage('Postgraduate college is required'),
+    .withMessage('Postgraduate college is required when provided'),
+  body('mphil_college')
+    .optional()
+    .trim(),
+  body('phd_college')
+    .optional()
+    .trim(),
   body('designation')
+    .optional()
     .isIn(['fulltime', 'parttime'])
     .withMessage('Designation must be either fulltime or parttime'),
   body('area_of_expertise')
-    .isArray({ min: 1 })
-    .withMessage('At least one area of expertise is required'),
+    .optional()
+    .custom((value) => {
+      const arr = normalizeAreaOfExpertise(value);
+      if (arr.length === 0) throw new Error('At least one area of expertise is required when provided');
+      return true;
+    })
+    .customSanitizer((value) => (value === undefined || value === null ? undefined : normalizeAreaOfExpertise(value))),
   body('area_of_expertise.*')
+    .optional()
     .trim()
     .isLength({ min: 2, max: 100 })
     .withMessage('Each expertise area must be between 2 and 100 characters'),
   body('description')
+    .optional({ checkFalsy: true })
     .trim()
-    .isLength({ min: 50, max: 1000 })
-    .withMessage('Description must be between 50 and 1000 characters'),
+    .isLength({ min: 0, max: 1000 })
+    .withMessage('Description (about) must be at most 1000 characters'),
+  body('experience_years')
+    .optional(),
+  body('cover_image_url')
+    .optional()
+    .trim(),
+  body('personality_traits')
+    .optional(),
+  body('display_order')
+    .optional(),
+  body('faq_question_1')
+    .optional()
+    .trim(),
+  body('faq_answer_1')
+    .optional()
+    .trim(),
+  body('faq_question_2')
+    .optional()
+    .trim(),
+  body('faq_answer_2')
+    .optional()
+    .trim(),
+  body('faq_question_3')
+    .optional()
+    .trim(),
+  body('faq_answer_3')
+    .optional()
+    .trim(),
   handleValidationErrors
 ];
 

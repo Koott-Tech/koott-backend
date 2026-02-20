@@ -65,13 +65,17 @@ app.use(requestIdMiddleware);
 
 // CORS: Handle preflight OPTIONS first so response always has Access-Control-* headers
 // (Other middleware may return errors without CORS headers, causing "No 'Access-Control-Allow-Origin'" in browser)
-const ALLOWED_ORIGINS = [
+// Use same ALLOWED_ORIGINS as CSRF middleware: set in production (e.g. Render) as comma-separated list
+const DEFAULT_ORIGINS = [
   'https://kutikkal-one.vercel.app',
   'https://www.little.care',
   'https://little.care',
   'http://localhost:3000',
   'http://localhost:3001'
 ];
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
+  : DEFAULT_ORIGINS;
 const ALLOWED_HEADERS = [
   'Content-Type', 'Authorization', 'X-Requested-With', 'Origin', 'Accept',
   'x-posthog-distinct-id', 'x-posthog-session-id', 'x-posthog-token', 'x-posthog-window-id',
