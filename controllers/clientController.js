@@ -2077,6 +2077,33 @@ const rescheduleSession = async (req, res) => {
           }
         }
 
+        // Send email to admin and meet.littlecare@gmail.com (same template and style as other admin emails)
+        const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
+        const meetLittleCareEmail = 'meet.littlecare@gmail.com';
+        const adminRecipients = [adminEmail, meetLittleCareEmail].filter(Boolean).join(', ');
+        if (adminRecipients) {
+          try {
+            const emailService = require('../utils/emailService');
+            await emailService.sendRescheduleRequestNotification({
+              to: adminRecipients,
+              clientName,
+              psychologistName,
+              fromDate: session.scheduled_date,
+              fromTime: session.scheduled_time,
+              toDate: new_date,
+              toTime: new_time,
+              sessionId: session.id,
+              clientId: client.id,
+              psychologistId: session.psychologist_id,
+              reasonText: req.body.reason || null
+            });
+            console.log('📧 Reschedule request email sent to admin and meet.littlecare@gmail.com');
+          } catch (emailError) {
+            console.error('Error sending reschedule request email:', emailError);
+            console.warn('⚠️ Reschedule request created but email notification failed');
+          }
+        }
+
         // Also create informational notification for psychologist (not for approval - admin approves)
         // Get psychologist user_id
         const { data: psychologistUser } = await supabaseAdmin
@@ -2326,7 +2353,7 @@ const rescheduleSession = async (req, res) => {
         startTime: newTime24Hour,
         endTime: isFreeAssessment 
           ? addMinutesToTime(newTime24Hour, 20)
-          : addMinutesToTime(newTime24Hour, 60),
+          : addMinutesToTime(newTime24Hour, 50),
         clientEmail: clientDetails?.email,
         psychologistEmail: psychologistDetails?.email,
         attendees: []
@@ -4123,9 +4150,25 @@ const reserveTimeSlot = async (req, res) => {
 
     console.log('✅ Time slot is available');
 
-    // Get package details for pricing
+    // Get psychologist details first (needed for psychiatrist 15/30 min pricing)
+    const { data: psychologistDetails } = await supabaseAdmin
+      .from('psychologists')
+      .select('*')
+      .eq('id', psychologist_id)
+      .single();
+
+    if (!psychologistDetails) {
+      return res.status(404).json(
+        errorResponse('Psychologist not found')
+      );
+    }
+
+    const isPsychiatrist = (psychologistDetails.designation || '').toLowerCase().includes('psychiatrist');
+
+    // Get package details for pricing (skip DB lookup for psychiatrist virtual package IDs)
     let package = null;
-    if (package_id && package_id !== 'individual') {
+    const psychiatristVirtualIds = ['individual-15', 'individual-30'];
+    if (package_id && package_id !== 'individual' && !psychiatristVirtualIds.includes(package_id)) {
       console.log('🔍 Looking up package with ID:', package_id);
       const { data: packageData, error: packageError } = await supabaseAdmin
         .from('packages')
@@ -4162,21 +4205,10 @@ const reserveTimeSlot = async (req, res) => {
           errorResponse('Selected package has an invalid price. Please contact support.')
         );
       }
+    } else if (psychiatristVirtualIds.includes(package_id)) {
+      console.log('ℹ️ Psychiatrist individual session (15 or 30 min) selected');
     } else {
       console.log('ℹ️ Individual session selected');
-    }
-
-    // Get psychologist details
-    const { data: psychologistDetails } = await supabaseAdmin
-      .from('psychologists')
-      .select('*')
-      .eq('id', psychologist_id)
-      .single();
-
-    if (!psychologistDetails) {
-      return res.status(404).json(
-        errorResponse('Psychologist not found')
-      );
     }
 
     // Determine price - no fallback, must be explicit
@@ -4186,25 +4218,35 @@ const reserveTimeSlot = async (req, res) => {
       // Package booking - use package price
       price = package.price;
       console.log('💰 Using package price:', price);
+    } else if (package_id === 'individual-15' && isPsychiatrist) {
+      // Psychiatrist 15 min session
+      const p = psychologistDetails.psychiatrist_15min_price ?? psychologistDetails.price;
+      price = p != null ? parseFloat(p) : null;
+      console.log('💰 Using psychiatrist_15min_price:', price);
+    } else if (package_id === 'individual-30' && isPsychiatrist) {
+      // Psychiatrist 30 min session
+      const p = psychologistDetails.psychiatrist_30min_price ?? psychologistDetails.price;
+      price = p != null ? parseFloat(p) : null;
+      console.log('💰 Using psychiatrist_30min_price:', price);
     } else {
-      // Individual session - use individual_session_price field first, then fallback to description
+      // Individual session (non-psychiatrist or generic individual)
       if (psychologistDetails.individual_session_price) {
-        // Use dedicated individual_session_price field
         price = parseFloat(psychologistDetails.individual_session_price);
         console.log('✅ Using individual_session_price field:', price);
       } else if (psychologistDetails.description) {
-        // Fallback: Try to extract from description
         const priceMatch = psychologistDetails.description.match(/Individual Session Price: [₹\$](\d+(?:\.\d+)?)/);
-      if (priceMatch) {
+        if (priceMatch) {
           price = parseFloat(priceMatch[1]);
           console.log('✅ Extracted individual price from description:', price);
+        }
       }
-    }
 
       // Validate individual session price
       if (!price || price <= 0 || isNaN(price)) {
         console.error('❌ Individual session price is missing or invalid:', {
           individual_session_price: psychologistDetails.individual_session_price,
+          psychiatrist_15min_price: psychologistDetails.psychiatrist_15min_price,
+          psychiatrist_30min_price: psychologistDetails.psychiatrist_30min_price,
           hasDescription: !!psychologistDetails.description
         });
         return res.status(400).json(

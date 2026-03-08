@@ -21,7 +21,7 @@ function generateCalendarInvite(sessionData) {
     clientEmail,
     psychologistEmail,
     price,
-    duration = 60 // Default 60 minutes
+    duration = 50 // Paid session: 50 minutes
   } = sessionData;
 
   // Parse date and time in IST (UTC+5:30)
@@ -44,6 +44,10 @@ function generateCalendarInvite(sessionData) {
   const startDate = formatICalDateIST(sessionDateTime);
   const endDate = formatICalDateIST(endDateTime);
   const createdDate = formatICalDateIST(new Date());
+
+  // When no Meet link yet, avoid showing "undefined" — use a clear placeholder
+  const meetText = meetLink && String(meetLink).trim() ? meetLink : 'Join link will be shared separately';
+  const locationText = meetLink && String(meetLink).trim() ? meetLink : 'Online session - Little Care';
 
   // Generate unique UID
   const uid = `session-${sessionId}-${crypto.randomUUID()}@littlecare.com`;
@@ -74,9 +78,9 @@ function generateCalendarInvite(sessionData) {
     `Client: ${clientName}\\n` +
     `Psychologist: ${psychologistName}\\n` +
     `Session Fee: $${price}\\n\\n` +
-    `Join the session via Google Meet:\\n${meetLink}\\n\\n` +
+    `Join the session via Google Meet:\\n${meetText}\\n\\n` +
     `Please join the meeting 5 minutes before the scheduled time.`,
-    `LOCATION:${meetLink}`,
+    `LOCATION:${locationText}`,
     `ORGANIZER;CN=${psychologistName}:mailto:${psychologistEmail}`,
     `ATTENDEE;CN=${clientName};ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:${clientEmail}`,
     `ATTENDEE;CN=${psychologistName};ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:${psychologistEmail}`,
@@ -142,7 +146,7 @@ function generateGoogleCalendarLink(sessionData) {
     sessionDate,
     sessionTime,
     meetLink,
-    duration = 60
+    duration = 50
   } = sessionData;
 
   // Parse date and time in IST (UTC+5:30)
@@ -157,11 +161,12 @@ function generateGoogleCalendarLink(sessionData) {
   const startDate = formatGoogleDateIST(sessionDateTime);
   const endDate = formatGoogleDateIST(endDateTime);
 
+  const meetText = meetLink && String(meetLink).trim() ? meetLink : 'Join link will be shared separately';
   const title = encodeURIComponent(`Therapy Session - ${clientName} with ${psychologistName}`);
   const details = encodeURIComponent(
-    `Online therapy session\n\nJoin via Google Meet: ${meetLink}\n\nPlease join 5 minutes early.`
+    `Online therapy session\n\nJoin via Google Meet: ${meetText}\n\nPlease join 5 minutes early.`
   );
-  const location = encodeURIComponent(meetLink);
+  const location = encodeURIComponent(meetLink && String(meetLink).trim() ? meetLink : 'Online session - Little Care');
 
   return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${startDate}/${endDate}&details=${details}&location=${location}`;
 }
@@ -178,18 +183,19 @@ function generateOutlookCalendarLink(sessionData) {
     sessionDate,
     sessionTime,
     meetLink,
-    duration = 60
+    duration = 50
   } = sessionData;
 
   // Parse date and time in IST (UTC+5:30)
   const sessionDateTime = new Date(`${sessionDate}T${sessionTime}+05:30`);
   const endDateTime = new Date(sessionDateTime.getTime() + (duration * 60000));
 
+  const meetText = meetLink && String(meetLink).trim() ? meetLink : 'Join link will be shared separately';
   const title = encodeURIComponent(`Therapy Session - ${clientName} with ${psychologistName}`);
   const body = encodeURIComponent(
-    `Online therapy session\n\nJoin via Google Meet: ${meetLink}\n\nPlease join 5 minutes early.`
+    `Online therapy session\n\nJoin via Google Meet: ${meetText}\n\nPlease join 5 minutes early.`
   );
-  const location = encodeURIComponent(meetLink);
+  const location = encodeURIComponent(meetLink && String(meetLink).trim() ? meetLink : 'Online session - Little Care');
 
   // Use IST time for Outlook
   const startDate = sessionDateTime.toISOString();

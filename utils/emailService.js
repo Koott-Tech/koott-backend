@@ -316,18 +316,22 @@ class EmailService {
         console.log('⚠️ Skipping psychologist email (placeholder or missing):', psychologistEmail);
       }
 
-      // Send email to company admin
+      // Send email to company admin and meet.littlecare@gmail.com (same content)
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
-      if (adminEmail) {
+      const meetLittleCareEmail = 'meet.littlecare@gmail.com';
+      const adminRecipients = [adminEmail, meetLittleCareEmail].filter(Boolean).join(', ');
+      if (adminRecipients) {
         await this.sendAdminNotification({
-          to: adminEmail,
+          to: adminRecipients,
           clientName,
           psychologistName,
           scheduledDate: formattedDate,
           scheduledTime: formattedTime,
           sessionId: sessionId || sessionData?.sessionId || sessionData?.id || sessionData?.session_id,
           clientId: clientId || sessionData?.clientId || sessionData?.client_id,
-          packageId: packageInfo?.packageId || packageInfo?.id || sessionData?.packageId || sessionData?.package_id
+          packageId: packageInfo?.packageId || packageInfo?.id || sessionData?.packageId || sessionData?.package_id,
+          packageInfo: packageInfo || null,
+          price: finalPrice ?? sessionData?.price ?? sessionData?.amount
         });
       }
 
@@ -442,6 +446,7 @@ class EmailService {
                         ${packageLine}
                         •⁠  ⁠Date: ${formattedDateShort}<br>
                         •⁠  ⁠Time: ${scheduledTime} (IST)<br>
+                        •⁠  ⁠Duration: 50 min<br>
                         ${formattedPrice ? `•⁠  ⁠Price: ₹${formattedPrice}<br>` : ''}
                       </div>
                       
@@ -459,7 +464,18 @@ class EmailService {
                           </td>
                         </tr>
                       </table>
-                      ` : ''}
+                      ` : `
+                      <!-- Meet link not created - Support message -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 0 0 20px 0; text-align: center; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
+                            <p style="color: #92400e; font-size: 14px; margin: 0; padding: 16px;">
+                              Due to some issue Google Meet didn't get created. Please contact our support.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                      `}
                       
                       ${googleCalendarLink || outlookCalendarLink ? `
                       <!-- Add to Calendar Section -->
@@ -632,6 +648,10 @@ class EmailService {
                                 <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${scheduledTime} (IST)</td>
                               </tr>
                               <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Duration:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">50 min</td>
+                              </tr>
+                              <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client:</strong></td>
                                 <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${clientName}</td>
                               </tr>
@@ -694,7 +714,18 @@ class EmailService {
                           </td>
                         </tr>
                       </table>
-                      ` : ''}
+                      ` : `
+                      <!-- Meet link not created - Support message -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 0 0 20px 0; text-align: center; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
+                            <p style="color: #92400e; font-size: 14px; margin: 0; padding: 16px;">
+                              Due to some issue Google Meet didn't get created. Please contact our support.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                      `}
                       
                       <!-- Important Reminders -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
@@ -752,9 +783,33 @@ class EmailService {
   }
 
   async sendAdminNotification(emailData) {
-    const { to, clientName, psychologistName, scheduledDate, scheduledTime, sessionId, clientId, packageId } = emailData;
+    const { to, clientName, psychologistName, scheduledDate, scheduledTime, sessionId, clientId, packageId, packageInfo, price, isFreeAssessment, assessmentNumber } = emailData;
     const contactEmail = 'hey@little.care';
     const contactPhone = '+91-9539007766';
+
+    // Session type and price for admin (free assessment, single, or package)
+    let sessionTypeLabel;
+    let priceLabel;
+    let subject;
+    let introMessage;
+    if (isFreeAssessment) {
+      sessionTypeLabel = assessmentNumber ? `Free assessment – Assessment ${assessmentNumber} of 3` : 'Free assessment';
+      priceLabel = 'Free';
+      subject = `New Free Assessment Booked - ${scheduledDate} at ${scheduledTime}`;
+      introMessage = 'A new free assessment session has been booked on the platform. Here are the details:';
+    } else {
+      const totalSessions = packageInfo?.totalSessions || 0;
+      const isPackage = totalSessions > 1;
+      const completedSessions = packageInfo?.completedSessions ?? 0;
+      const currentSessionNumber = totalSessions ? Math.min((completedSessions || 0) + 1, totalSessions) : 1;
+      sessionTypeLabel = isPackage
+        ? `Package – Session ${currentSessionNumber} of ${totalSessions}`
+        : 'Single session';
+      const priceNum = price != null && price !== '' ? Number(price) : null;
+      priceLabel = priceNum != null && !Number.isNaN(priceNum) ? `₹${Number(priceNum).toLocaleString('en-IN')}` : '—';
+      subject = `New Session Booked - ${scheduledDate} at ${scheduledTime}`;
+      introMessage = 'A new therapy session has been booked on the platform. Here are the details:';
+    }
 
     const mailOptions = {
       from: {
@@ -764,7 +819,7 @@ class EmailService {
       replyTo: 'noreply@little.care',
       sender: 'noreply@little.care',
       to: to,
-      subject: `New Session Booked - ${scheduledDate} at ${scheduledTime}`,
+      subject,
       html: `
         <!DOCTYPE html>
         <html>
@@ -800,7 +855,7 @@ class EmailService {
                     <td style="padding: 30px 20px;">
                       <h2 style="color: #1a202c; margin: 0 0 20px 0; font-size: 24px; font-weight: 600;">Admin Notification</h2>
                       
-                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">A new therapy session has been booked on the platform. Here are the details:</p>
+                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">${introMessage}</p>
                       
                       <!-- Session Details Card -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
@@ -808,6 +863,14 @@ class EmailService {
                           <td style="padding: 0 0 20px 0;">
                             <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
                             <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Session type:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${sessionTypeLabel}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Price:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${priceLabel}</td>
+                              </tr>
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Date:</strong></td>
                                 <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${scheduledDate}</td>
@@ -864,6 +927,350 @@ class EmailService {
                       
                       <!-- Footer Text -->
                       <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">This session has been automatically added to the Google Calendar and all parties have been notified.</p>
+                      
+                      <p style="color: #2d3748; font-size: 15px; margin: 0;">
+                        Best regards,<br>
+                        <strong style="color: #3f2e73;">Little Care Platform</strong>
+                      </p>
+                    </td>
+                  </tr>
+                  
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
+                      <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
+                        This is an automated notification from the Little Care therapy platform.<br>
+                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+      `
+    };
+
+    return this.transporter.sendMail(mailOptions);
+  }
+
+  /**
+   * Send reschedule request notification to admin and meet.littlecare@gmail.com
+   * Called when a client requests reschedule that requires admin approval (within 24h or 2nd+ reschedule)
+   */
+  async sendRescheduleRequestNotification(emailData) {
+    const {
+      to,
+      clientName,
+      psychologistName,
+      fromDate,
+      fromTime,
+      toDate,
+      toTime,
+      sessionId,
+      clientId,
+      psychologistId,
+      reasonText
+    } = emailData;
+
+    const contactEmail = 'hey@little.care';
+    const contactPhone = '+91-9539007766';
+
+    // Format date for display (e.g. "Mon, 12 Jan 2026")
+    const formatDateShort = (dateStr) => {
+      if (!dateStr) return 'N/A';
+      try {
+        const d = new Date(`${dateStr}T00:00:00+05:30`);
+        return d.toLocaleDateString('en-IN', {
+          weekday: 'short',
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          timeZone: 'Asia/Kolkata'
+        });
+      } catch {
+        return dateStr;
+      }
+    };
+
+    const formattedFromDate = formatDateShort(fromDate);
+    const formattedToDate = formatDateShort(toDate);
+    const formattedFromTime = formatTimeFromString(fromTime);
+    const formattedToTime = formatTimeFromString(toTime);
+
+    const mailOptions = {
+      from: {
+        name: 'LittleCare',
+        address: 'noreply@little.care'
+      },
+      replyTo: 'noreply@little.care',
+      sender: 'noreply@little.care',
+      to: to,
+      subject: `Reschedule Request - ${clientName} (${formattedFromDate} → ${formattedToDate})`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f7fa;">
+          <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f7fa;">
+            <tr>
+              <td style="padding: 20px 10px;">
+                <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                  <!-- Header with Logo -->
+                  <tr>
+                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
+                        <tr>
+                          <td align="center" style="padding-bottom: 15px;">
+                            <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          </td>
+                        </tr>
+                        <tr>
+                          <td align="center">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 600;">Reschedule Request</h1>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  
+                  <!-- Main Content -->
+                  <tr>
+                    <td style="padding: 30px 20px;">
+                      <h2 style="color: #1a202c; margin: 0 0 20px 0; font-size: 24px; font-weight: 600;">Admin Notification</h2>
+                      
+                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">A client has requested to reschedule their session. This request requires admin approval. Please review and take action in the admin dashboard.</p>
+                      
+                      <!-- Reschedule Details Card -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 0 0 20px 0;">
+                            <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Reschedule Details</h3>
+                            <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${clientName}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Therapist:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${psychologistName}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">From:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${formattedFromDate} at ${formattedFromTime}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">To:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${formattedToDate} at ${formattedToTime}</td>
+                              </tr>
+                              ${sessionId ? `
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Session ID:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right; font-family: monospace;">${sessionId}</td>
+                              </tr>
+                              ` : ''}
+                              ${clientId ? `
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client ID:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right; font-family: monospace;">${clientId}</td>
+                              </tr>
+                              ` : ''}
+                              ${psychologistId ? `
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Psychologist ID:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right; font-family: monospace;">${psychologistId}</td>
+                              </tr>
+                              ` : ''}
+                              ${reasonText ? `
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Reason:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${reasonText}</td>
+                              </tr>
+                              ` : ''}
+                            </table>
+                          </td>
+                        </tr>
+                      </table>
+                      
+                      <!-- Action Required -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 0 0 20px 0;">
+                            <h3 style="color: #2d3748; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">Action Required</h3>
+                            <ul style="color: #4a5568; font-size: 14px; line-height: 1.8; margin: 0; padding-left: 20px;">
+                              <li>Log in to the admin dashboard</li>
+                              <li>Go to Rescheduling page to review this request</li>
+                              <li>Approve or decline the reschedule request</li>
+                              <li>Client and therapist will be notified of your decision</li>
+                            </ul>
+                          </td>
+                        </tr>
+                      </table>
+                      
+                      <!-- Footer Text -->
+                      <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">This is an automated notification. Please take action as soon as possible.</p>
+                      
+                      <p style="color: #2d3748; font-size: 15px; margin: 0;">
+                        Best regards,<br>
+                        <strong style="color: #3f2e73;">Little Care Platform</strong>
+                      </p>
+                    </td>
+                  </tr>
+                  
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
+                      <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
+                        This is an automated notification from the Little Care therapy platform.<br>
+                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+      `
+    };
+
+    return this.transporter.sendMail(mailOptions);
+  }
+
+  /**
+   * Send new user registration notification to admin and meet.littlecare@gmail.com
+   * Called when a new user (client or psychologist) creates an account
+   */
+  async sendNewUserRegistrationNotification(emailData) {
+    const {
+      to,
+      email,
+      role,
+      firstName,
+      lastName,
+      phone,
+      childName,
+      childAge,
+      userId,
+      clientId,
+      createdAt
+    } = emailData;
+
+    const contactEmail = 'hey@little.care';
+    const contactPhone = '+91-9539007766';
+
+    const roleLabel = role === 'client' ? 'Client' : role === 'psychologist' ? 'Psychologist' : role || 'User';
+    const fullName = [firstName, lastName].filter(Boolean).join(' ').trim() || '—';
+
+    const mailOptions = {
+      from: {
+        name: 'LittleCare',
+        address: 'noreply@little.care'
+      },
+      replyTo: 'noreply@little.care',
+      sender: 'noreply@little.care',
+      to: to,
+      subject: `New ${roleLabel} Registered - ${fullName || email}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f7fa;">
+          <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f7fa;">
+            <tr>
+              <td style="padding: 20px 10px;">
+                <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                  <!-- Header with Logo -->
+                  <tr>
+                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
+                        <tr>
+                          <td align="center" style="padding-bottom: 15px;">
+                            <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          </td>
+                        </tr>
+                        <tr>
+                          <td align="center">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 600;">New User Registered</h1>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  
+                  <!-- Main Content -->
+                  <tr>
+                    <td style="padding: 30px 20px;">
+                      <h2 style="color: #1a202c; margin: 0 0 20px 0; font-size: 24px; font-weight: 600;">Admin Notification</h2>
+                      
+                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">A new ${roleLabel.toLowerCase()} has created an account on the platform. Here are the details:</p>
+                      
+                      <!-- User Details Card -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 0 0 20px 0;">
+                            <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">User Details</h3>
+                            <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Role:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${roleLabel}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Email:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${email || '—'}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Name:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${fullName}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Phone:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${phone || '—'}</td>
+                              </tr>
+                              ${role === 'client' && (childName || childAge) ? `
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Child Name:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${childName || '—'}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Child Age:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${childAge != null ? childAge + ' years' : '—'}</td>
+                              </tr>
+                              ` : ''}
+                              ${userId ? `
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">User ID:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right; font-family: monospace;">${userId}</td>
+                              </tr>
+                              ` : ''}
+                              ${clientId ? `
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client ID:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right; font-family: monospace;">${clientId}</td>
+                              </tr>
+                              ` : ''}
+                              ${createdAt ? `
+                              <tr>
+                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Registered at:</strong></td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${new Date(createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' })}</td>
+                              </tr>
+                              ` : ''}
+                            </table>
+                          </td>
+                        </tr>
+                      </table>
+                      
+                      <!-- Footer Text -->
+                      <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">You can view and manage users in the admin dashboard.</p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
@@ -958,7 +1365,7 @@ class EmailService {
             sessionDate: scheduledDate,
             sessionTime: scheduledTime,
             meetLink: meetLink,
-            duration: 60 // Default 60 minutes
+            duration: 50 // Paid session: 50 minutes
           };
           googleCalendarLink = generateGoogleCalendarLink(calendarData);
           outlookCalendarLink = generateOutlookCalendarLink(calendarData);
@@ -1136,7 +1543,18 @@ class EmailService {
                           </td>
                         </tr>
                       </table>
-                      ` : ''}
+                      ` : `
+                      <!-- Meet link not created - Support message -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 0 0 20px 0; text-align: center; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
+                            <p style="color: #92400e; font-size: 14px; margin: 0; padding: 16px;">
+                              Due to some issue Google Meet didn't get created. Please contact our support.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                      `}
                       
                       ${googleCalendarLink || outlookCalendarLink ? `
                       <!-- Add to Calendar Section -->
@@ -1206,7 +1624,9 @@ class EmailService {
         assessmentNumber,
         clientEmail,
         psychologistEmail,
-        googleMeetLink
+        googleMeetLink,
+        assessmentId,
+        clientId
       } = assessmentData;
 
       // Parse date and time in IST (UTC+5:30)
@@ -1246,6 +1666,27 @@ class EmailService {
           assessmentTime: formattedTime,
           assessmentNumber,
           googleMeetLink
+        });
+      }
+
+      // Send same admin email to COMPANY_ADMIN_EMAIL and meet.littlecare@gmail.com
+      const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
+      const meetLittleCareEmail = 'meet.littlecare@gmail.com';
+      const adminRecipients = [adminEmail, meetLittleCareEmail].filter(Boolean).join(', ');
+      if (adminRecipients) {
+        await this.sendAdminNotification({
+          to: adminRecipients,
+          clientName,
+          psychologistName,
+          scheduledDate: formattedDate,
+          scheduledTime: formattedTime,
+          sessionId: assessmentId || null,
+          clientId: clientId || null,
+          packageId: null,
+          packageInfo: null,
+          price: null,
+          isFreeAssessment: true,
+          assessmentNumber: assessmentNumber || null
         });
       }
 
@@ -1365,7 +1806,18 @@ class EmailService {
                           </td>
                         </tr>
                       </table>
-                      ` : ''}
+                      ` : `
+                      <!-- Meet link not created - Support message -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 0 0 20px 0; text-align: center; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
+                            <p style="color: #92400e; font-size: 14px; margin: 0; padding: 16px;">
+                              Due to some issue Google Meet didn't get created. Please contact our support.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                      `}
                       
                       <!-- Important Reminders -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
@@ -1551,7 +2003,18 @@ The Little Care Team
                           </td>
                         </tr>
                       </table>
-                      ` : ''}
+                      ` : `
+                      <!-- Meet link not created - Support message -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 0 0 20px 0; text-align: center; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
+                            <p style="color: #92400e; font-size: 14px; margin: 0; padding: 16px;">
+                              Due to some issue Google Meet didn't get created. Please contact our support.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                      `}
                       
                       <!-- Important Reminders -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">

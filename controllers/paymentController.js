@@ -8,7 +8,7 @@ const {
 } = require('../config/razorpay');
 const meetLinkService = require('../utils/meetLinkService');
 const assessmentSessionService = require('../services/assessmentSessionService');
-const { addMinutesToTime, errorResponse } = require('../utils/helpers');
+const { addMinutesToTime, errorResponse, formatTimeForDisplay } = require('../utils/helpers');
 const emailService = require('../utils/emailService');
 const userInteractionLogger = require('../utils/userInteractionLogger');
 const { generateAndStoreReceipt } = require('../services/receiptService');
@@ -92,13 +92,14 @@ const generateReceiptPDF = async (receiptDetails) => {
           form.getTextField('date').setText(new Date(receiptDetails.payment_date || new Date()).toLocaleDateString('en-IN'));
         }
         if (form.getTextField('time')) {
-          form.getTextField('time').setText(new Date(receiptDetails.payment_date || new Date()).toLocaleTimeString('en-IN'));
+          const paymentTime = new Date(receiptDetails.payment_date || new Date());
+          form.getTextField('time').setText(paymentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }));
         }
         if (form.getTextField('session_date')) {
           form.getTextField('session_date').setText(new Date(receiptDetails.session_date).toLocaleDateString('en-IN'));
         }
         if (form.getTextField('session_time')) {
-          form.getTextField('session_time').setText(receiptDetails.session_time);
+          form.getTextField('session_time').setText(formatTimeForDisplay(receiptDetails.session_time));
         }
         if (form.getTextField('psychologist_name')) {
           form.getTextField('psychologist_name').setText(receiptDetails.psychologist_name);
@@ -398,8 +399,8 @@ const generateReceiptPDF = async (receiptDetails) => {
       config.fields.itemDescription.alignment
     );
 
-    // Session Details (date and time, left aligned)
-    const sessionDetails = `${new Date(receiptDetails.session_date).toLocaleDateString('en-IN')} at ${receiptDetails.session_time}`;
+    // Session Details (date and time, left aligned) - time in 12-hour AM/PM, no seconds
+    const sessionDetails = `${new Date(receiptDetails.session_date).toLocaleDateString('en-IN')} at ${formatTimeForDisplay(receiptDetails.session_time)}`;
     drawText(
       sessionDetails, 
       config.fields.sessionDetails.x, 
@@ -537,14 +538,14 @@ const generateReceiptPDFFallback = async (receiptDetails) => {
       // Receipt number
       doc.text(`Receipt Number: ${receiptDetails.receipt_number}`);
       doc.text(`Date: ${new Date(receiptDetails.payment_date || new Date()).toLocaleDateString('en-IN')}`);
-      doc.text(`Time: ${new Date(receiptDetails.payment_date || new Date()).toLocaleTimeString('en-IN')}`);
+      doc.text(`Time: ${new Date(receiptDetails.payment_date || new Date()).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}`);
       doc.moveDown();
 
       // Session details
       doc.fontSize(12).font('Helvetica-Bold').text('Session Details:');
       doc.fontSize(10).font('Helvetica');
       doc.text(`Date: ${new Date(receiptDetails.session_date).toLocaleDateString('en-IN')}`);
-      doc.text(`Time: ${receiptDetails.session_time}`);
+      doc.text(`Time: ${formatTimeForDisplay(receiptDetails.session_time)}`);
       doc.text(`Status: ${receiptDetails.session_status || 'booked'}`);
       doc.moveDown();
 

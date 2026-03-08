@@ -160,15 +160,9 @@ const register = async (req, res) => {
 
       console.log('✅ User created successfully:', { id: newUser.id, email: newUser.email });
 
-      const childName = req.body.child_name?.trim();
-      if (!childName) {
-        await supabaseAdmin.from('users').delete().eq('id', newUser.id);
-        return res.status(400).json(
-          errorResponse('Child name is required for client registration')
-        );
-      }
+      const childName = req.body.child_name?.trim() || null;
 
-      // Then create client record with user_id reference
+      // Then create client record with user_id reference (child_name is optional; use placeholder if DB requires NOT NULL)
       const { data: client, error: clientError } = await supabaseAdmin
         .from('clients')
         .insert({
@@ -176,7 +170,7 @@ const register = async (req, res) => {
           first_name: req.body.first_name || 'Pending',
           last_name: req.body.last_name || '', // Use empty string instead of 'Update' since we only use full name as first_name
           phone_number: req.body.phone_number || '+91',
-          child_name: childName,
+          child_name: childName || 'Pending',
           child_age: req.body.child_age || 1,
           client_message: req.body.client_message?.trim() || null,
           terms_accepted: req.body.terms_accepted || false,
@@ -273,6 +267,34 @@ const register = async (req, res) => {
 
       user = newUser;
       profileData = newUser; // Admin users don't have separate profile tables
+    }
+
+    // Send new user notification to admin and meet.littlecare@gmail.com (client and psychologist only)
+    if (role === 'client' || role === 'psychologist') {
+      const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
+      const meetLittleCareEmail = 'meet.littlecare@gmail.com';
+      const adminRecipients = [adminEmail, meetLittleCareEmail].filter(Boolean).join(', ');
+      if (adminRecipients) {
+        try {
+          const emailService = require('../utils/emailService');
+          await emailService.sendNewUserRegistrationNotification({
+            to: adminRecipients,
+            email: user.email,
+            role: user.role,
+            firstName: profileData.first_name || req.body.first_name,
+            lastName: profileData.last_name || req.body.last_name,
+            phone: profileData.phone_number || profileData.phone || req.body.phone_number || req.body.phone,
+            childName: profileData.child_name || req.body.child_name,
+            childAge: profileData.child_age ?? req.body.child_age,
+            userId: user.id,
+            clientId: role === 'client' ? (user.client_id || profileData.id) : null,
+            createdAt: user.created_at || profileData.created_at
+          });
+          console.log('📧 New user registration email sent to admin and meet.littlecare@gmail.com');
+        } catch (emailErr) {
+          console.error('Error sending new user registration email:', emailErr);
+        }
+      }
     }
 
     // Generate JWT token

@@ -6,7 +6,8 @@ const { getRecurringBlocksForPsychologist, filterSlotsByRecurringBlocks } = requ
  * (sessions are 1 hour each, so 8:00 AM means 8:00–9:00, 9:00 AM means 9:00–10:00, etc.)
  * Returns array of time strings in 12-hour format (e.g. "8:00 AM", "1:00 PM").
  *
- * Daily availability (addNextDayAvailability) uses these slots. Exact list added per day:
+ * Daily availability (addNextDayAvailability) uses these slots for regular psychologists.
+ * Exact list added per day:
  * 8:00 AM, 9:00 AM, 10:00 AM, 11:00 AM, 12:00 PM, 1:00 PM, 2:00 PM, 3:00 PM,
  * 4:00 PM, 5:00 PM, 6:00 PM, 7:00 PM, 8:00 PM, 9:00 PM (14 slots; last ends at 10:00 PM).
  */
@@ -28,15 +29,51 @@ const generateDefaultTimeSlots = () => {
 };
 
 /**
+ * Generate psychiatrist time slots: 15-minute grid from 8:00 AM to 10:00 PM IST.
+ * This gives finer-grained availability for psychiatrists only.
+ */
+const generatePsychiatristTimeSlots = () => {
+  const slots = [];
+
+  // Start at 08:00 (480 minutes) and go up to but not including 22:00 (1320 minutes)
+  for (let minutes = 8 * 60; minutes < 22 * 60; minutes += 15) {
+    const hours24 = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+
+    const period = hours24 < 12 ? 'AM' : 'PM';
+    let displayHour = hours24 % 12;
+    if (displayHour === 0) displayHour = 12;
+
+    const label = `${displayHour}:${String(mins).padStart(2, '0')} ${period}`;
+    slots.push(label);
+  }
+
+  return slots;
+};
+
+/**
+ * Helper to choose the right default slots for a psychologist
+ * - Psychiatrists: 15-minute grid
+ * - Everyone else: 1-hour grid
+ */
+const getDefaultSlotsForPsychologist = (psychologist) => {
+  const designation = (psychologist?.designation || '').toLowerCase();
+  if (designation.includes('psychiatrist')) {
+    return generatePsychiatristTimeSlots();
+  }
+  return generateDefaultTimeSlots();
+};
+
+/**
  * Generate availability records for a date range
  * @param {string} psychologistId - The psychologist ID
  * @param {Date} startDate - Start date (inclusive)
  * @param {Date} endDate - End date (inclusive)
  * @returns {Array} Array of availability records
  */
-const generateAvailabilityRecords = (psychologistId, startDate, endDate) => {
+const generateAvailabilityRecords = (psychologistId, startDate, endDate, timeSlotsOverride = null) => {
   const records = [];
-  const timeSlots = generateDefaultTimeSlots();
+  const timeSlots = timeSlotsOverride || generateDefaultTimeSlots();
   const currentDate = new Date(startDate);
   
   while (currentDate <= endDate) {
@@ -67,6 +104,18 @@ const generateAvailabilityRecords = (psychologistId, startDate, endDate) => {
  */
 const setDefaultAvailability = async (psychologistId) => {
   try {
+    // Fetch psychologist to determine designation (psychiatrist vs others)
+    const { data: psych, error: psychError } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, designation')
+      .eq('id', psychologistId)
+      .single();
+
+    if (psychError || !psych) {
+      console.error('Error fetching psychologist for default availability:', psychError);
+      return { success: false, message: 'Psychologist not found for default availability' };
+    }
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
@@ -74,8 +123,9 @@ const setDefaultAvailability = async (psychologistId) => {
     const endDate = new Date(today);
     endDate.setDate(endDate.getDate() + 21); // 3 weeks = 21 days
     
-    // Generate availability records
-    let availabilityRecords = generateAvailabilityRecords(psychologistId, today, endDate);
+    // Generate availability records using appropriate default slots
+    const baseSlots = getDefaultSlotsForPsychologist(psych);
+    let availabilityRecords = generateAvailabilityRecords(psychologistId, today, endDate, baseSlots);
     
     if (availabilityRecords.length === 0) {
       return { success: false, message: 'No availability records to create' };
@@ -142,7 +192,7 @@ const addNextDayAvailability = async () => {
     // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
     const { data: psychologists, error: psychError } = await supabaseAdmin
       .from('psychologists')
-      .select('id');
+      .select('id, designation');
     
     if (psychError) {
       console.error('Error fetching psychologists:', psychError);
@@ -163,7 +213,6 @@ const addNextDayAvailability = async () => {
     const day = String(targetDate.getDate()).padStart(2, '0');
     const dateString = `${year}-${month}-${day}`;
     
-    const defaultTimeSlots = generateDefaultTimeSlots();
     let successCount = 0;
     let skipCount = 0;
     
@@ -184,7 +233,8 @@ const addNextDayAvailability = async () => {
       
       // Apply recurring blocks: full-day block -> empty slots; partial block -> filtered slots; no block -> full default
       const recurringBlocks = await getRecurringBlocksForPsychologist(psych.id);
-      const timeSlotsToInsert = filterSlotsByRecurringBlocks([...defaultTimeSlots], dateString, recurringBlocks);
+      const baseSlots = getDefaultSlotsForPsychologist(psych);
+      const timeSlotsToInsert = filterSlotsByRecurringBlocks([...baseSlots], dateString, recurringBlocks);
       
       const { error: insertError } = await supabaseAdmin
         .from('availability')
@@ -388,7 +438,20 @@ const syncFutureAvailabilityForRecurringBlockDay = async (psychologistId, dayOfW
     today.setHours(0, 0, 0, 0);
     const todayStr = today.toISOString().split('T')[0];
     const recurringBlocks = await getRecurringBlocksForPsychologist(psychologistId);
-    const defaultSlots = generateDefaultTimeSlots();
+
+    // Fetch psychologist once to decide which default grid to use
+    const { data: psych, error: psychError } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, designation')
+      .eq('id', psychologistId)
+      .single();
+
+    if (psychError || !psych) {
+      console.error('Error fetching psychologist for recurring block sync:', psychError);
+      return { updated: 0 };
+    }
+
+    const defaultSlots = getDefaultSlotsForPsychologist(psych);
     const { data: rows, error } = await supabaseAdmin
       .from('availability')
       .select('id, date, time_slots')

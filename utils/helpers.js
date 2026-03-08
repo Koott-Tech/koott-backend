@@ -48,6 +48,19 @@ const formatTime = (time) => {
   return time.toTimeString().slice(0, 8); // Include seconds (HH:MM:SS)
 };
 
+// Format time for display: 12-hour with AM/PM, no seconds (e.g. "10:00 AM")
+const formatTimeForDisplay = (timeStr) => {
+  if (!timeStr) return '';
+  const str = String(timeStr).trim();
+  const match = str.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return str;
+  const hour = parseInt(match[1], 10);
+  const minute = match[2];
+  const period = hour >= 12 ? 'PM' : 'AM';
+  const hour12 = hour % 12 || 12;
+  return `${hour12}:${minute} ${period}`;
+};
+
 // Check if date is in the future
 const isFutureDate = (date) => {
   const inputDate = new Date(date);
@@ -201,6 +214,7 @@ module.exports = {
   generateUUID,
   formatDate,
   formatTime,
+  formatTimeForDisplay,
   isFutureDate,
   isTimeSlotAvailable,
   calculateSessionPrice,

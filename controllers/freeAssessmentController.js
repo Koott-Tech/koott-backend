@@ -1383,7 +1383,9 @@ const bookFreeAssessment = async (req, res) => {
               assessmentNumber: nextAssessmentNumber,
               clientEmail: userRowForEmail?.email,
               psychologistEmail: assessmentPsychologistPayload?.email || null,
-              googleMeetLink: finalMeetLink // Use the real Meet link that was just created
+              googleMeetLink: finalMeetLink, // Use the real Meet link that was just created
+              assessmentId: assessment.id,
+              clientId: client.id
             });
             console.log('✅ Free assessment confirmation email sent with Meet link');
           } catch (emailError) {
@@ -1422,7 +1424,9 @@ const bookFreeAssessment = async (req, res) => {
         assessmentNumber: nextAssessmentNumber,
         clientEmail: userRowForEmail?.email,
         psychologistEmail: assessmentPsychologistPayload?.email || null,
-              googleMeetLink: fallbackLink
+        googleMeetLink: fallbackLink,
+        assessmentId: assessment.id,
+        clientId: client.id
       });
     } catch (emailError) {
             console.error('❌ Error sending fallback email:', emailError);

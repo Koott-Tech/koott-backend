@@ -71,6 +71,7 @@ router.delete('/users/:userId', requireRequestSignature, adminController.deleteU
 
 // Session management
 router.get('/sessions/all', sessionController.getAllSessions);
+router.get('/sessions/:sessionId', sessionController.getSessionById);
 
 // Session rescheduling
 router.put('/sessions/:sessionId', adminController.updateSession);
@@ -81,6 +82,12 @@ router.get('/psychologists/:psychologistId/availability', adminController.getPsy
 
 // Manual booking (admin only - for edge cases)
 router.post('/bookings/manual', adminController.createManualBooking);
+
+// Book next package session (admin only - for clients who prefer admin to book remaining sessions)
+router.post('/bookings/book-package-next-session', adminController.bookPackageNextSession);
+
+// Packages with remaining sessions (admin only - for Packages tab)
+router.get('/bookings/packages-with-remaining', adminController.getPackagesWithRemainingSessions);
 
 // Reschedule request handling
 router.get('/reschedule-requests', adminController.getRescheduleRequests);

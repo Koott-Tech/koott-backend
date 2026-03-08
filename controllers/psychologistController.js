@@ -248,6 +248,60 @@ const getSessions = async (req, res) => {
 
       const { data: sessions, error, count } = await query;
 
+      // Attach package info and session index (e.g. "2/3") for package sessions
+      if (sessions && sessions.length > 0) {
+        const packageIds = [...new Set(sessions.map(s => s.package_id).filter(Boolean))];
+        if (packageIds.length > 0) {
+          const { data: packages } = await supabaseAdmin
+            .from('packages')
+            .select('id, package_type, session_count')
+            .in('id', packageIds);
+          const packagesMap = (packages || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
+
+          const { data: allPackageSessions } = await supabaseAdmin
+            .from('sessions')
+            .select('id, client_id, package_id, scheduled_date')
+            .eq('psychologist_id', psychologistId)
+            .in('package_id', packageIds)
+            .order('scheduled_date', { ascending: true, nullsFirst: false });
+
+          const sessionToPackageInfo = {};
+          if (allPackageSessions && allPackageSessions.length > 0) {
+            const byKey = {};
+            allPackageSessions.forEach(s => {
+              const key = `${s.client_id}_${s.package_id}`;
+              if (!byKey[key]) byKey[key] = [];
+              byKey[key].push(s);
+            });
+            Object.values(byKey).forEach(arr => {
+              const pkg = arr[0] && packagesMap[arr[0].package_id];
+              const totalFromPackage = pkg?.session_count || 0;
+              const totalSessions = totalFromPackage > 0 ? totalFromPackage : arr.length;
+              arr.forEach((s, i) => {
+                const p = packagesMap[s.package_id];
+                sessionToPackageInfo[s.id] = {
+                  package_type: p?.package_type || 'Package',
+                  session_count: p?.session_count || totalSessions,
+                  session_index: i + 1,
+                  total_sessions: totalSessions
+                };
+              });
+            });
+          }
+          sessions.forEach(s => {
+            if (s.package_id && sessionToPackageInfo[s.id]) {
+              const info = sessionToPackageInfo[s.id];
+              s.package = {
+                package_type: info.package_type,
+                session_count: info.session_count,
+                session_index: info.session_index,
+                total_sessions: info.total_sessions
+              };
+            }
+          });
+        }
+      }
+
       // Also fetch assessment sessions assigned to this psychologist OR unassigned pending sessions
       // Unassigned pending sessions (psychologist_id = null) can be scheduled by any psychologist
       let assessmentSessions = [];
@@ -1553,6 +1607,9 @@ const completeSession = async (req, res) => {
       .single();
 
     if (regularSession) {
+      // Normalize client (Supabase PostgREST can return FK relation as object or array)
+      const client = Array.isArray(regularSession.client) ? regularSession.client[0] : regularSession.client;
+
       // Update regular session
       const { data: updatedSession, error } = await supabaseAdmin
         .from('sessions')
@@ -1571,19 +1628,19 @@ const completeSession = async (req, res) => {
 
       console.log(`📋 Session ${sessionId} updated successfully, proceeding to send notifications...`);
       console.log(`📋 Session client data available:`, {
-        hasClient: !!regularSession.client,
-        clientId: regularSession.client?.id,
-        userId: regularSession.client?.user_id,
-        hasPhoneNumber: !!regularSession.client?.phone_number
+        hasClient: !!client,
+        clientId: client?.id,
+        userId: client?.user_id,
+        hasPhoneNumber: !!(client?.phone_number)
       });
 
       // Send completion notification to client
       console.log(`🔔 Starting completion notification process for session ${sessionId}...`);
       try {
         // Create in-app notification
-        if (regularSession.client?.user_id) {
+        if (client?.user_id) {
           const clientNotificationData = {
-            user_id: regularSession.client.user_id,
+            user_id: client.user_id,
             title: 'Session Completed',
             message: `Your session has been completed. You can now view the summary and report.`,
             type: 'success',
@@ -1591,7 +1648,7 @@ const completeSession = async (req, res) => {
             related_type: 'session'
           };
 
-          console.log(`📬 Creating in-app notification for user ${regularSession.client.user_id}...`);
+          console.log(`📬 Creating in-app notification for user ${client.user_id}...`);
           await supabaseAdmin
             .from('notifications')
             .insert([clientNotificationData]);
@@ -1601,13 +1658,13 @@ const completeSession = async (req, res) => {
         // Send WhatsApp notification to client
         try {
           const { sendSessionCompletionNotification } = require('../utils/whatsappService');
-          const clientPhone = regularSession.client?.phone_number || null;
+          const clientPhone = client?.phone_number || null;
           
           console.log(`📱 WhatsApp sending attempt for session ${sessionId} (package: ${regularSession.package_id || 'none'})`);
           console.log(`📱 Client data:`, {
-            hasClient: !!regularSession.client,
-            clientId: regularSession.client?.id,
-            phoneNumber: clientPhone ? `${clientPhone.substring(0, 3)}***` : 'NOT FOUND',
+            hasClient: !!client,
+            clientId: client?.id,
+            phoneNumber: clientPhone ? `${String(clientPhone).substring(0, 3)}***` : 'NOT FOUND',
             sessionType: regularSession.session_type,
             isPackage: !!regularSession.package_id
           });
@@ -1687,7 +1744,7 @@ const completeSession = async (req, res) => {
             }
           } else {
             console.warn(`⚠️ Skipping WhatsApp completion for session ${sessionId} (${regularSession.package_id ? 'package session' : 'regular session'}): Client phone number not found.`);
-            console.warn(`⚠️ Session client data:`, regularSession.client ? { id: regularSession.client.id, hasPhone: !!regularSession.client.phone_number } : 'No client data');
+            console.warn(`⚠️ Session client data:`, client ? { id: client.id, hasPhone: !!client.phone_number } : 'No client data');
           }
         } catch (waError) {
           console.error(`❌ Error sending session completion WhatsApp for session ${sessionId}:`, waError);
@@ -2054,6 +2111,94 @@ const getMonthlyStats = async (req, res) => {
   }
 };
 
+// Get client's completed session history (for any psychologist viewing a session with this client)
+// Private notes (summary_notes) are only included when the session was conducted by the current psychologist
+const getClientSessionHistory = async (req, res) => {
+  try {
+    const currentPsychologistId = req.user.id;
+    const { clientId } = req.params;
+
+    if (!clientId) {
+      return res.status(400).json(errorResponse('Client ID is required'));
+    }
+
+    const { data: sessions, error } = await supabaseAdmin
+      .from('sessions')
+      .select(`
+        id,
+        client_id,
+        psychologist_id,
+        scheduled_date,
+        scheduled_time,
+        status,
+        session_summary,
+        session_notes,
+        summary,
+        report,
+        summary_notes,
+        psychologist:psychologists(
+          id,
+          first_name,
+          last_name
+        )
+      `)
+      .eq('client_id', clientId)
+      .eq('status', 'completed')
+      .order('scheduled_date', { ascending: false })
+      .order('scheduled_time', { ascending: false });
+
+    if (error) {
+      console.error('getClientSessionHistory error:', error);
+      return res.status(500).json(errorResponse('Failed to fetch session history'));
+    }
+
+    const REPORT_SEP = '\n\n--- Report ---\n';
+
+    const list = (sessions || []).map((s) => {
+      const isOwnSession = s.psychologist_id === currentPsychologistId;
+      let summary = s.summary ?? s.session_summary ?? null;
+      let report = s.report ?? null;
+      let privateNotes = s.summary_notes ?? null;
+      const combinedNotes = s.session_notes?.trim() || null;
+
+      if (combinedNotes && (report == null || privateNotes == null)) {
+        const idx = combinedNotes.indexOf(REPORT_SEP);
+        if (idx >= 0) {
+          const before = combinedNotes.slice(0, idx).trim();
+          const after = combinedNotes.slice(idx + REPORT_SEP.length).trim();
+          if (privateNotes == null && before) privateNotes = before;
+          if (report == null && after) report = after;
+        } else if (privateNotes == null) {
+          privateNotes = combinedNotes;
+        }
+      }
+
+      const psychologistName = s.psychologist
+        ? [s.psychologist.first_name, s.psychologist.last_name].filter(Boolean).join(' ').trim()
+        : 'Psychologist';
+
+      return {
+        id: s.id,
+        client_id: s.client_id,
+        psychologist_id: s.psychologist_id,
+        scheduled_date: s.scheduled_date,
+        scheduled_time: s.scheduled_time,
+        status: s.status,
+        summary: summary && summary.trim() ? summary.trim() : null,
+        report: report && report.trim() ? report.trim() : null,
+        summary_notes: isOwnSession && privateNotes && privateNotes.trim() ? privateNotes.trim() : null,
+        psychologist_name: psychologistName,
+        psychologist: s.psychologist
+      };
+    });
+
+    res.json(successResponse({ sessions: list }, 'Session history retrieved'));
+  } catch (err) {
+    console.error('getClientSessionHistory error:', err);
+    res.status(500).json(errorResponse('Internal server error while fetching session history'));
+  }
+};
+
 module.exports = {
   getProfile,
   updateProfile,
@@ -2070,5 +2215,6 @@ module.exports = {
   deleteRecurringBlock,
   deleteSession,
   deleteAssessmentSession,
-  getMonthlyStats
+  getMonthlyStats,
+  getClientSessionHistory
 };

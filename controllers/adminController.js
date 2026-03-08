@@ -9,6 +9,8 @@ const {
 } = require('../utils/helpers');
 const { validatePassword } = require('../utils/passwordPolicy');
 const { formatFriendlyTime } = require('../utils/whatsappService');
+const { deriveSessionCount } = require('../services/packageService');
+const availabilityService = require('../utils/availabilityCalendarService');
 
 // Helper function to get availability dates for a day of the week
 const getAvailabilityDatesForDay = (dayName, numOccurrences = 1) => {
@@ -1102,18 +1104,50 @@ const deactivateUser = async (req, res) => {
 
 const getPlatformStats = async (req, res) => {
   try {
-    // Count only clients (users with role 'client' or users that exist in clients table)
+    // Today in YYYY-MM-DD (UTC) for upcoming filter
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Count clients, psychologists, total sessions
     const [clientsCount, psychologistsCount, sessionsCount] = await Promise.all([
       supabaseAdmin.from('clients').select('id', { count: 'exact', head: true }),
       supabaseAdmin.from('psychologists').select('id', { count: 'exact', head: true }),
-      supabaseAdmin.from('sessions').select('id', { count: 'exact', head: true })
+      supabaseAdmin.from('sessions').select('id', { count: 'exact', head: true }).neq('session_type', 'free_assessment')
     ]);
-    
+
+    // Booking status counts (therapy sessions only, exclude free_assessment)
+    const sessionsBase = () => supabaseAdmin.from('sessions').select('id', { count: 'exact', head: true }).neq('session_type', 'free_assessment');
+
+    const [
+      completedCount,
+      rescheduledCount,
+      rescheduleRequestedCount,
+      noShowCount,
+      upcomingCount
+    ] = await Promise.all([
+      sessionsBase().eq('status', 'completed'),
+      sessionsBase().eq('status', 'rescheduled'),
+      sessionsBase().eq('status', 'reschedule_requested'),
+      sessionsBase().in('status', ['no_show', 'noshow']),
+      sessionsBase().in('status', ['booked', 'rescheduled']).gte('scheduled_date', today)
+    ]);
+
+    const bookingStatuses = {
+      upcoming: upcomingCount.count ?? 0,
+      rescheduled: rescheduledCount.count ?? 0,
+      rescheduleRequested: rescheduleRequestedCount.count ?? 0,
+      completed: completedCount.count ?? 0,
+      noShow: noShowCount.count ?? 0,
+      cancelled: 0 // optional; add count if needed
+    };
+
     return res.json(successResponse({
-      totalUsers: clientsCount.count || 0, // Changed to count only clients
-      totalClients: clientsCount.count || 0, // Added explicit totalClients field
+      totalUsers: clientsCount.count || 0,
+      totalClients: clientsCount.count || 0,
       totalPsychologists: psychologistsCount.count || 0,
-      totalSessions: sessionsCount.count || 0
+      totalDoctors: psychologistsCount.count || 0,
+      totalSessions: sessionsCount.count || 0,
+      totalBookings: sessionsCount.count || 0,
+      bookingStatuses
     }));
   } catch (error) {
     console.error('Error getting platform stats:', error);
@@ -1280,7 +1314,9 @@ const createPsychologist = async (req, res) => {
       faq_question_2,
       faq_answer_2,
       faq_question_3,
-      faq_answer_3
+      faq_answer_3,
+      psychiatrist_15min_price,
+      psychiatrist_30min_price
     } = req.body;
 
     // Keep email as-is (don't normalize dots away)
@@ -1341,6 +1377,8 @@ const createPsychologist = async (req, res) => {
         description,
         experience_years: experience_years || 0,
         individual_session_price: individualSessionPrice,
+        psychiatrist_15min_price: psychiatrist_15min_price ? parseInt(psychiatrist_15min_price) : null,
+        psychiatrist_30min_price: psychiatrist_30min_price ? parseInt(psychiatrist_30min_price) : null,
         cover_image_url: cover_image_url || null,
         display_order: display_order ? parseInt(display_order) : null,
         faq_question_1: faq_question_1 || null,
@@ -2018,7 +2056,15 @@ const updateAllPsychologistsAvailability = async (req, res) => {
 
 const createUser = async (req, res) => {
   try {
-    const { email, password, first_name, last_name, phone_number, child_name, child_age } = req.body;
+    const body = req.body || {};
+    // Accept both camelCase (frontend) and snake_case
+    const email = body.email;
+    const password = body.password;
+    const first_name = body.first_name ?? body.firstName ?? null;
+    const last_name = body.last_name ?? body.lastName ?? null;
+    const phone_number = body.phone_number ?? body.phone ?? null;
+    const child_name = body.child_name ?? body.childName ?? null;
+    const child_age = body.child_age ?? body.childAge ?? null;
 
     if (!password || typeof password !== 'string' || password.trim() === '') {
       return res.status(400).json(errorResponse('Password is required'));
@@ -2065,6 +2111,9 @@ const createUser = async (req, res) => {
     }
 
     // Create client profile (use admin client to bypass RLS)
+    // first_name and last_name are NOT NULL in DB; use fallbacks when missing
+    const firstNameForDb = (first_name != null && String(first_name).trim()) ? String(first_name).trim() : (email ? (email.split('@')[0] || 'Client') : 'Client');
+    const lastNameForDb = (last_name != null && String(last_name).trim()) ? String(last_name).trim() : '';
     // child_name and child_age are NOT NULL in DB; use placeholders when admin leaves them blank (e.g. manual booking)
     const childNameForDb = (child_name && String(child_name).trim()) ? String(child_name).trim() : 'Not provided';
     const childAgeForDb = (child_age != null && child_age !== '') ? Number(child_age) : 0;
@@ -2072,9 +2121,9 @@ const createUser = async (req, res) => {
       .from('clients')
       .insert([{
         user_id: user.id,
-        first_name,
-        last_name,
-        phone_number,
+        first_name: firstNameForDb,
+        last_name: lastNameForDb,
+        phone_number: phone_number || null,
         child_name: childNameForDb,
         child_age: childAgeForDb
       }])
@@ -2205,7 +2254,9 @@ const deleteUser = async (req, res) => {
       }
       console.log(`   ✅ Deleted conversations`);
 
-      // 3. Delete receipts (via sessions)
+      // 3. Delete receipts (via sessions) and then sessions + payments.
+      // IMPORTANT: sessions has a foreign key to payments (sessions.payment_id → payments.id),
+      // so we must delete sessions BEFORE deleting payments to avoid FK violations.
       const { data: sessions, error: sessFetchErr } = await supabaseAdmin
         .from('sessions')
         .select('id')
@@ -2227,9 +2278,20 @@ const deleteUser = async (req, res) => {
           throw new Error(`Failed to delete receipts: ${recDelErr.message}`);
         }
         console.log(`   ✅ Deleted receipts for ${sessions.length} session(s)`);
+
+        // 4. Delete sessions (must happen before deleting payments due to FK constraint)
+        const { error: sessDelErr } = await supabaseAdmin
+          .from('sessions')
+          .delete()
+          .eq('client_id', clientId);
+        if (sessDelErr) {
+          console.error('Delete client cascade: delete sessions error:', sessDelErr);
+          throw new Error(`Failed to delete sessions: ${sessDelErr.message}`);
+        }
+        console.log(`   ✅ Deleted sessions`);
       }
 
-      // 4. Delete payments
+      // 5. Delete payments (after sessions so FK sessions_payment_id_fkey is not violated)
       const { error: payDelErr } = await supabaseAdmin
         .from('payments')
         .delete()
@@ -2239,17 +2301,6 @@ const deleteUser = async (req, res) => {
         throw new Error(`Failed to delete payments: ${payDelErr.message}`);
       }
       console.log(`   ✅ Deleted payments`);
-
-      // 5. Delete sessions
-      const { error: sessDelErr } = await supabaseAdmin
-        .from('sessions')
-        .delete()
-        .eq('client_id', clientId);
-      if (sessDelErr) {
-        console.error('Delete client cascade: delete sessions error:', sessDelErr);
-        throw new Error(`Failed to delete sessions: ${sessDelErr.message}`);
-      }
-      console.log(`   ✅ Deleted sessions`);
 
       // 6. Delete assessment sessions
       const { error: assSessDelErr } = await supabaseAdmin
@@ -2285,25 +2336,18 @@ const deleteUser = async (req, res) => {
       console.log(`   ✅ Deleted client packages`);
 
       // 9. Delete client profile
-      // Validate and coerce IDs to integers to prevent SQL injection
-      const clientIdInt = Number(clientId);
-      const userIdInt = Number(userId);
-      if (!Number.isInteger(clientIdInt) || !Number.isInteger(userIdInt)) {
-        console.error('Delete client cascade: Invalid ID format', { clientId, userId });
-        throw new Error('Invalid client or user ID format');
-      }
-      // Use safe parameterized queries instead of string interpolation
+      // IDs are UUIDs; use them directly in parameterized filters.
       const { error: deleteProfileError1 } = await supabaseAdmin
         .from('clients')
         .delete()
-        .eq('id', clientIdInt);
+        .eq('id', clientId);
       
       // Also try deleting by user_id if different from id
-      if (clientIdInt !== userIdInt) {
+      if (clientId !== userId) {
         const { error: deleteProfileError2 } = await supabaseAdmin
           .from('clients')
           .delete()
-          .eq('user_id', userIdInt);
+          .eq('user_id', userId);
         
         const deleteProfileError = deleteProfileError1 || deleteProfileError2;
 
@@ -2862,6 +2906,466 @@ const getPsychologistCalendarEvents = async (req, res) => {
   }
 };
 
+// Book next package session (admin only) - for clients who prefer admin to book remaining sessions
+const bookPackageNextSession = async (req, res) => {
+  try {
+    const { client_id, package_id, scheduled_date, scheduled_time } = req.body;
+
+    if (!client_id || !package_id || !scheduled_date || !scheduled_time) {
+      return res.status(400).json(
+        errorResponse('Missing required fields: client_id, package_id, scheduled_date, scheduled_time')
+      );
+    }
+
+    // Look up client_packages by client_id and package_id (packages.id)
+    let { data: clientPackage, error: packageError } = await supabaseAdmin
+      .from('client_packages')
+      .select(`
+        id,
+        client_id,
+        package_id,
+        remaining_sessions,
+        package:packages(id, package_type, session_count, psychologist_id)
+      `)
+      .eq('client_id', client_id)
+      .eq('package_id', package_id)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    // Fallback: if no active client_packages, try without status filter (legacy/inconsistent data)
+    if (!clientPackage) {
+      const { data: fallback } = await supabaseAdmin
+        .from('client_packages')
+        .select(`
+          id,
+          client_id,
+          package_id,
+          remaining_sessions,
+          package:packages(id, package_type, session_count, psychologist_id)
+        `)
+        .eq('client_id', client_id)
+        .eq('package_id', package_id)
+        .maybeSingle();
+      if (fallback) clientPackage = fallback;
+    }
+
+    // Fallback: if still no client_packages, derive from packages + sessions and create record
+    if (!clientPackage) {
+      const { data: pkgRow, error: pkgErr } = await supabaseAdmin
+        .from('packages')
+        .select('id, package_type, session_count, psychologist_id')
+        .eq('id', package_id)
+        .single();
+
+      if (pkgErr || !pkgRow) {
+        return res.status(404).json(
+          errorResponse('Package not found')
+        );
+      }
+
+      const { data: packageSessionsCheck } = await supabaseAdmin
+        .from('sessions')
+        .select('id, status')
+        .eq('package_id', package_id)
+        .eq('client_id', client_id);
+
+      let completedCheck = 0;
+      let bookedCheck = 0;
+      (packageSessionsCheck || []).forEach(s => {
+        if (s.status === 'completed') completedCheck++;
+        else if (s.status !== 'cancelled' && s.status !== 'no_show' && s.status !== 'noshow') bookedCheck++;
+      });
+      const totalCheck = deriveSessionCount(pkgRow);
+      const remainingCheck = Math.max(totalCheck - completedCheck - bookedCheck, 0);
+
+      if (remainingCheck <= 0 || completedCheck === 0) {
+        return res.status(404).json(
+          errorResponse('No active package found for this client and package')
+        );
+      }
+
+      const consumedSessions = completedCheck + bookedCheck;
+      const remainingSessions = Math.max(totalCheck - consumedSessions, 0);
+      const clientPackagePayload = {
+        client_id,
+        psychologist_id: pkgRow.psychologist_id,
+        package_id,
+        package_type: pkgRow.package_type,
+        total_sessions: totalCheck,
+        remaining_sessions: remainingSessions,
+        total_amount: 0,
+        amount_paid: 0,
+        status: remainingSessions > 0 ? 'active' : 'completed',
+        purchased_at: new Date().toISOString(),
+        first_session_id: null
+      };
+
+      const { data: inserted, error: insertErr } = await supabaseAdmin
+        .from('client_packages')
+        .insert([clientPackagePayload])
+        .select('*')
+        .single();
+
+      if (insertErr) {
+        if (insertErr.code === '23505' || insertErr.message?.includes('unique') || insertErr.message?.includes('duplicate')) {
+          const { data: existingRow } = await supabaseAdmin
+            .from('client_packages')
+            .select(`
+              id,
+              client_id,
+              package_id,
+              remaining_sessions,
+              package:packages(id, package_type, session_count, psychologist_id)
+            `)
+            .eq('client_id', client_id)
+            .eq('package_id', package_id)
+            .maybeSingle();
+          if (existingRow) clientPackage = existingRow;
+        }
+        if (!clientPackage) {
+          return res.status(500).json(
+            errorResponse('Failed to create package record', { error: insertErr?.message })
+          );
+        }
+      } else {
+        clientPackage = { ...inserted, package: pkgRow };
+      }
+    }
+
+    const totalSessionsCount = deriveSessionCount(clientPackage);
+    const psychologistId = clientPackage.package?.psychologist_id;
+    if (!psychologistId) {
+      return res.status(400).json(errorResponse('Package has no psychologist'));
+    }
+
+    // Compute remaining sessions to book (same logic as client bookRemainingSession)
+    const { data: packageSessions } = await supabaseAdmin
+      .from('sessions')
+      .select('id, status')
+      .eq('package_id', clientPackage.package.id)
+      .eq('client_id', client_id);
+
+    let completedCount = 0;
+    let bookedCount = 0;
+    if (Array.isArray(packageSessions)) {
+      packageSessions.forEach(s => {
+        if (s.status === 'completed') completedCount++;
+        else if (s.status !== 'cancelled' && s.status !== 'no_show' && s.status !== 'noshow') bookedCount++;
+      });
+    }
+    const remainingToBook = Math.max(totalSessionsCount - completedCount - bookedCount, 0);
+    if (remainingToBook <= 0) {
+      return res.status(400).json(
+        errorResponse('No remaining sessions in this package')
+      );
+    }
+
+    const isAvailable = await availabilityService.isTimeSlotAvailable(
+      psychologistId,
+      scheduled_date,
+      scheduled_time
+    );
+    if (!isAvailable) {
+      return res.status(400).json(
+        errorResponse('This time slot is not available. Please select another time.')
+      );
+    }
+
+    const formattedDate = formatDate(scheduled_date);
+    const formattedTime = formatTime(scheduled_time);
+    const { data: existingSession } = await supabaseAdmin
+      .from('sessions')
+      .select('id')
+      .eq('psychologist_id', psychologistId)
+      .eq('scheduled_date', formattedDate)
+      .eq('scheduled_time', formattedTime)
+      .in('status', ['booked', 'scheduled', 'reschedule_requested', 'rescheduled'])
+      .maybeSingle();
+
+    if (existingSession) {
+      return res.status(409).json(
+        errorResponse('This time slot was just booked by another user. Please select another time.')
+      );
+    }
+
+    const fallbackMeetLink = 'https://meet.google.com/new?hs=122&authuser=0';
+    const sessionData = {
+      client_id,
+      psychologist_id: psychologistId,
+      package_id: clientPackage.package.id,
+      scheduled_date: formattedDate,
+      scheduled_time: formattedTime,
+      status: 'booked',
+      google_calendar_event_id: null,
+      google_meet_link: fallbackMeetLink,
+      google_calendar_link: null,
+      price: 0,
+      original_scheduled_date: formattedDate
+    };
+
+    const { data: session, error: sessionError } = await supabaseAdmin
+      .from('sessions')
+      .insert([sessionData])
+      .select('*')
+      .single();
+
+    if (sessionError) {
+      if (sessionError.code === '23505' || sessionError.message?.includes('unique') || sessionError.message?.includes('duplicate')) {
+        return res.status(409).json(
+          errorResponse('This time slot was just booked by another user. Please select another time.')
+        );
+      }
+      return res.status(500).json(
+        errorResponse('Failed to create session', { error: sessionError.message })
+      );
+    }
+
+    const totalSessions = deriveSessionCount(clientPackage);
+    const currentRemaining = Number.isFinite(clientPackage.remaining_sessions)
+      ? clientPackage.remaining_sessions
+      : Math.max(totalSessions - 1, 0);
+    const updatedRemaining = Math.max(currentRemaining - 1, 0);
+
+    await supabaseAdmin
+      .from('client_packages')
+      .update({
+        remaining_sessions: updatedRemaining,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', clientPackage.id);
+
+    res.json(
+      successResponse({
+        session,
+        message: 'Next package session booked successfully',
+        packageInfo: {
+          totalSessions,
+          completedSessions: completedCount,
+          remainingSessions: updatedRemaining
+        }
+      })
+    );
+
+    setImmediate(async () => {
+      try {
+        const meetLinkService = require('../utils/meetLinkService');
+        const { data: clientDetails } = await supabaseAdmin
+          .from('clients')
+          .select('first_name, last_name, child_name, phone_number, user:users(email)')
+          .eq('id', client_id)
+          .single();
+        const { data: psychologistDetails } = await supabaseAdmin
+          .from('psychologists')
+          .select('first_name, last_name, email, phone')
+          .eq('id', psychologistId)
+          .single();
+
+        const clientEmail = Array.isArray(clientDetails?.user) ? clientDetails?.user?.[0]?.email : clientDetails?.user?.email;
+        const meetSessionData = {
+          summary: `Therapy Session - ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
+          description: `Therapy session between ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'} ${psychologistDetails?.last_name || ''}`,
+          startDate: scheduled_date,
+          startTime: scheduled_time,
+          endTime: addMinutesToTime(scheduled_time, 50),
+          clientEmail: clientEmail || undefined,
+          psychologistEmail: psychologistDetails?.email || undefined
+        };
+        let userAuth = null;
+        const { data: psychAuth } = await supabaseAdmin
+          .from('psychologists')
+          .select('google_calendar_credentials')
+          .eq('id', psychologistId)
+          .single();
+        if (psychAuth?.google_calendar_credentials) {
+          const c = psychAuth.google_calendar_credentials;
+          userAuth = { access_token: c.access_token, refresh_token: c.refresh_token, expiry_date: c.expiry_date };
+        }
+        const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
+        // Only use real Meet link in email/WhatsApp — never send fallback link to avoid confusion
+        const effectiveMeetLink = (meetResult.success && meetResult.meetLink && !meetResult.meetLink.includes('meet.google.com/new'))
+          ? meetResult.meetLink
+          : null;
+
+        if (meetResult.success && meetResult.meetLink && !meetResult.meetLink.includes('meet.google.com/new')) {
+          await supabaseAdmin
+            .from('sessions')
+            .update({
+              google_calendar_event_id: meetResult.eventId,
+              google_meet_link: meetResult.meetLink,
+              google_meet_join_url: meetResult.meetLink,
+              google_meet_start_url: meetResult.meetLink,
+              google_calendar_link: meetResult.eventLink || null,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', session.id);
+        }
+
+        const packageInfo = {
+          totalSessions,
+          completedSessions: completedCount,
+          remainingSessions: updatedRemaining,
+          packageType: clientPackage.package?.package_type || null
+        };
+        const clientName = clientDetails?.child_name || `${clientDetails?.first_name || ''} ${clientDetails?.last_name || ''}`.trim();
+        const psychologistName = `${psychologistDetails?.first_name || ''} ${psychologistDetails?.last_name || ''}`.trim();
+
+        try {
+          const emailService = require('../utils/emailService');
+          await emailService.sendSessionConfirmation({
+            clientEmail: clientDetails?.user?.email || 'client@placeholder.com',
+            psychologistEmail: psychologistDetails?.email || 'psychologist@placeholder.com',
+            clientName,
+            psychologistName,
+            sessionId: session.id,
+            scheduledDate: scheduled_date,
+            scheduledTime: scheduled_time,
+            meetLink: effectiveMeetLink || undefined,
+            price: null,
+            status: 'booked',
+            psychologistId,
+            clientId: client_id,
+            packageInfo
+          });
+        } catch (e) {
+          console.error('Book package next session email error:', e);
+        }
+
+        try {
+          const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
+          if (clientDetails?.phone_number) {
+            const childName = clientDetails.child_name && clientDetails.child_name.trim() && clientDetails.child_name.toLowerCase() !== 'pending'
+              ? clientDetails.child_name : null;
+            await sendBookingConfirmation(clientDetails.phone_number, {
+              childName,
+              date: scheduled_date,
+              time: scheduled_time,
+              meetLink: effectiveMeetLink || undefined,
+              psychologistName,
+              packageInfo
+            });
+          }
+          if (psychologistDetails?.phone) {
+            const formatBookingDateShort = (dateStr) => {
+              try {
+                const d = new Date(`${dateStr}T00:00:00+05:30`);
+                return d.toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+              } catch {
+                return dateStr;
+              }
+            };
+            const bullet = '•⁠  ⁠';
+            const linkLine = effectiveMeetLink
+              ? `\n\nJoin link:\n${effectiveMeetLink}\n\n`
+              : '\n\nDue to some issue Google Meet didn\'t get created. Please contact our support.\n\n';
+            const msg = `Hey 👋\n\nNew session booked with Little Care.\n\n${bullet}Client: ${clientName}\n${bullet}Package: ${completedCount}/${totalSessions} sessions completed, ${updatedRemaining} remaining\n${bullet}Date: ${formatBookingDateShort(scheduled_date)}\n${bullet}Time: ${formatFriendlyTime(scheduled_time)} (IST)${linkLine}Please be ready 5 mins early.\n\n— Little Care 💜`;
+            await sendWhatsAppTextWithRetry(psychologistDetails.phone, msg);
+          }
+        } catch (waErr) {
+          console.error('Book package next session WhatsApp error:', waErr);
+        }
+
+        try {
+          const sessionReminderService = require('../services/sessionReminderService');
+          sessionReminderService.checkAndSendReminderForSessionId(session.id).catch(err =>
+            console.error('Priority reminder check error:', err)
+          );
+        } catch (_) {}
+      } catch (asyncErr) {
+        console.error('Book package next session async error:', asyncErr);
+      }
+    });
+  } catch (error) {
+    console.error('bookPackageNextSession error:', error);
+    res.status(500).json(
+      errorResponse(error.message || 'Failed to book next package session')
+    );
+  }
+};
+
+// Get packages with remaining sessions to book (admin only) - for Packages tab
+const getPackagesWithRemainingSessions = async (req, res) => {
+  try {
+    const { data: sessions } = await supabaseAdmin
+      .from('sessions')
+      .select('id, client_id, psychologist_id, package_id, status')
+      .not('package_id', 'is', null)
+      .neq('session_type', 'free_assessment');
+
+    if (!sessions || sessions.length === 0) {
+      return res.json(successResponse({ packages: [] }));
+    }
+
+    const byKey = {};
+    sessions.forEach(s => {
+      if (!s.client_id || !s.package_id) return;
+      const key = `${s.client_id}_${s.package_id}`;
+      if (!byKey[key]) byKey[key] = { client_id: s.client_id, package_id: s.package_id, psychologist_id: s.psychologist_id, sessions: [] };
+      byKey[key].sessions.push(s);
+    });
+
+    const packageIds = [...new Set(Object.values(byKey).map(p => p.package_id))];
+    const { data: packages } = await supabaseAdmin
+      .from('packages')
+      .select('id, package_type, session_count, psychologist_id')
+      .in('id', packageIds);
+    const packagesMap = (packages || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
+
+    const clientIds = [...new Set(Object.values(byKey).map(p => p.client_id))];
+    const { data: clients } = await supabaseAdmin
+      .from('clients')
+      .select('id, first_name, last_name, child_name')
+      .in('id', clientIds);
+    const clientsMap = (clients || []).reduce((acc, c) => { acc[c.id] = c; return acc; }, {});
+
+    const psychIds = [...new Set([...Object.values(byKey).map(p => p.psychologist_id), ...(packages || []).map(p => p.psychologist_id)].filter(Boolean))];
+    const { data: psychologists } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, first_name, last_name')
+      .in('id', psychIds);
+    const psychologistsMap = (psychologists || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
+
+    const result = [];
+    Object.values(byKey).forEach(entry => {
+      const pkg = packagesMap[entry.package_id];
+      if (!pkg) return;
+      const total = pkg.session_count || 0;
+      let completed = 0;
+      let booked = 0;
+      entry.sessions.forEach(s => {
+        if (s.status === 'completed') completed++;
+        else if (s.status !== 'cancelled' && s.status !== 'no_show' && s.status !== 'noshow') booked++;
+      });
+      const remaining = Math.max(total - completed - booked, 0);
+      if (completed > 0 && remaining > 0) {
+        const client = clientsMap[entry.client_id];
+        const psychologist = psychologistsMap[entry.psychologist_id] || psychologistsMap[pkg.psychologist_id];
+        result.push({
+          client_id: entry.client_id,
+          psychologist_id: psychologist?.id || pkg.psychologist_id,
+          package_id: entry.package_id,
+          client: client || { id: entry.client_id, first_name: '', last_name: '' },
+          psychologist: psychologist || { id: pkg.psychologist_id, first_name: '', last_name: '' },
+          package: {
+            id: pkg.id,
+            package_type: pkg.package_type,
+            session_count: total,
+            total_sessions: total,
+            completed_sessions: completed,
+            remaining_sessions: remaining
+          }
+        });
+      }
+    });
+
+    return res.json(successResponse({ packages: result }));
+  } catch (error) {
+    console.error('getPackagesWithRemainingSessions error:', error);
+    res.status(500).json(
+      errorResponse(error.message || 'Failed to fetch packages with remaining sessions')
+    );
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserDetails,
@@ -2881,6 +3385,8 @@ module.exports = {
   updateSession,
   getPsychologistAvailabilityForReschedule,
   createManualBooking,
+  bookPackageNextSession,
+  getPackagesWithRemainingSessions,
   getRescheduleRequests,
   getPsychologistCalendarEvents
 };

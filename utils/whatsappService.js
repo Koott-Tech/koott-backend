@@ -370,12 +370,17 @@ async function sendBookingConfirmation(toPhoneE164, details) {
     packageLine = `${bullet}Package: ${booked} of ${total} sessions booked, ${left} left\n`;
   }
 
-  const joinBlock = meetLink ? `Join link:\n${meetLink}\n\n` : '';
+  const joinBlock = meetLink
+    ? `Join link:\n${meetLink}\n\n`
+    : `Due to some issue Google Meet didn't get created. Please contact our support.\n\n`;
   const receiptBlock = `For receipt: Click here\n${receiptLink}\n\n`;
 
   const specialistLine = isFreeAssessment
     ? `${bullet}Little Care Specialist\n`
     : `${bullet}Specialist: ${specialist}\n`;
+
+  // Duration line: 50 min for paid sessions, not shown for free assessment
+  const durationLine = !isFreeAssessment ? `${bullet}Duration: 50 min\n` : '';
 
   // Format message - same structure for all session types
   const message =
@@ -384,7 +389,9 @@ async function sendBookingConfirmation(toPhoneE164, details) {
     specialistLine +
     packageLine +
     `${bullet}Date: ${formattedDate}\n` +
-    `${bullet}Time: ${formattedTime} (IST)\n\n` +
+    `${bullet}Time: ${formattedTime} (IST)\n` +
+    durationLine +
+    `\n` +
     joinBlock +
     `Please be ready 10 mins early with good internet, a quiet space, and a charged device.\n\n` +
     `For help: +91 95390 07766\n` +

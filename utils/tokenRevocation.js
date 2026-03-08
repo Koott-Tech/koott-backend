@@ -133,9 +133,11 @@ class TokenRevocationService {
               return false;
             }
             
-            // Check if it's a timeout/connection error (Cloudflare 522, network issues)
+            // Check if it's a timeout/connection/network error (Cloudflare 522, fetch failed, etc.)
             const errorMessage = error.message || '';
-            const isTimeoutError = errorMessage.includes('522') || 
+            const isTimeoutError = errorMessage.includes('522') ||
+                                  errorMessage.includes('fetch failed') ||
+                                  errorMessage.includes('TypeError: fetch failed') ||
                                   errorMessage.includes('Connection timed out') ||
                                   errorMessage.includes('timeout') ||
                                   errorMessage.includes('ETIMEDOUT') ||
@@ -144,11 +146,9 @@ class TokenRevocationService {
                                   errorMessage.includes('<!DOCTYPE html>'); // HTML error page (Cloudflare)
             
             if (isTimeoutError) {
-              // Network/timeout error - fail-open (allow token) for availability
-              // Cache/memory checks above provide protection if available
-              console.warn('⚠️ Database timeout checking token revocation (allowing token):', 
-                errorMessage.substring(0, 100) + (errorMessage.length > 100 ? '...' : ''));
-              return false; // Fail-open: Allow token if database check fails due to timeout
+              // Network/unreachable - fail-open (allow token). One-line warning to avoid log spam.
+              console.warn('⚠️ Supabase unreachable when checking token revocation (allowing token). Check SUPABASE_URL and network.');
+              return false; // Fail-open: Allow token if database check fails due to network
             }
             
             // For other database errors, log cleanly and fail-open (consistent with try-path)
@@ -175,24 +175,24 @@ class TokenRevocationService {
             return true;
           }
         } catch (dbError) {
-          // Check if it's a timeout/connection error
+          // Check if it's a timeout/connection/network error (including fetch failed = Supabase unreachable)
           const errorMessage = dbError.message || String(dbError);
-          const isTimeoutError = errorMessage.includes('522') || 
+          const isNetworkError = errorMessage.includes('522') ||
+                                errorMessage.includes('fetch failed') ||
+                                errorMessage.includes('TypeError: fetch failed') ||
                                 errorMessage.includes('Connection timed out') ||
                                 errorMessage.includes('timeout') ||
                                 errorMessage.includes('ETIMEDOUT') ||
                                 errorMessage.includes('ECONNREFUSED') ||
                                 errorMessage.includes('ENOTFOUND') ||
-                                errorMessage.includes('<!DOCTYPE html>'); // HTML error page (Cloudflare)
-          
-          if (isTimeoutError) {
-            // Network/timeout error - fail-open (allow token) for availability
-            console.warn('⚠️ Database timeout checking token revocation (allowing token):', 
-              errorMessage.substring(0, 100) + (errorMessage.length > 100 ? '...' : ''));
-            return false; // Fail-open for timeout errors
+                                errorMessage.includes('<!DOCTYPE html>');
+
+          if (isNetworkError) {
+            // Network error - fail-open (allow token). Log once at debug level to avoid spam.
+            console.warn('⚠️ Supabase unreachable when checking token revocation (allowing token). Check SUPABASE_URL and network.');
+            return false;
           } else {
-            // Other errors - fail-open for consistency with API error path above
-            console.error('❌ Error checking token revocation in database (allowing token):', 
+            console.error('❌ Database error checking token revocation (allowing token):', 
               errorMessage.substring(0, 200) + (errorMessage.length > 200 ? '...' : ''));
             return false;
           }
@@ -297,15 +297,14 @@ class TokenRevocationService {
               console.warn('⚠️ revoked_users table not found. User revocation check skipped.');
               return false; // Table doesn't exist, assume not revoked
             }
-            // For database errors (not network), log but allow (fail-open for availability)
-            console.error('❌ Database error checking user revocation:', {
-              message: error.message,
-              code: error.code,
-              details: error.details,
-              hint: error.hint
-            });
-            // Fail-open: Allow request if database check fails (availability over security for this check)
-            // The cache check above will still catch revoked users if available
+            // Treat fetch failed / network errors as single warning (Supabase unreachable)
+            const errMsg = error.message || '';
+            const isNetworkError = errMsg.includes('fetch failed') || errMsg.includes('TypeError: fetch failed');
+            if (isNetworkError) {
+              console.warn('⚠️ Supabase unreachable when checking user revocation (allowing request). Check SUPABASE_URL and network.');
+            } else {
+              console.error('❌ Database error checking user revocation:', { message: error.message, code: error.code, hint: error.hint });
+            }
             return false;
           }
 
@@ -321,21 +320,19 @@ class TokenRevocationService {
             return true;
           }
         } catch (dbError) {
-          // Network/timeout errors - fail-open (allow request) for availability
-          // Cache check above provides protection if available
-          const isNetworkError = dbError.message?.includes('fetch failed') || 
-                                 dbError.message?.includes('timeout') ||
-                                 dbError.message?.includes('ECONNREFUSED') ||
-                                 dbError.message?.includes('ENOTFOUND') ||
-                                 dbError.code === 'ETIMEDOUT' ||
-                                 dbError.code === 'ECONNREFUSED';
-          
+          const errMsg = dbError.message || String(dbError);
+          const isNetworkError = errMsg.includes('fetch failed') ||
+                                errMsg.includes('TypeError: fetch failed') ||
+                                errMsg.includes('timeout') ||
+                                errMsg.includes('ECONNREFUSED') ||
+                                errMsg.includes('ENOTFOUND') ||
+                                dbError.code === 'ETIMEDOUT' ||
+                                dbError.code === 'ECONNREFUSED';
           if (isNetworkError) {
-            console.warn('⚠️ Network error checking user revocation (allowing request):', dbError.message);
+            console.warn('⚠️ Supabase unreachable when checking user revocation (allowing request). Check SUPABASE_URL and network.');
           } else {
-            console.error('❌ Error checking user revocation in database (allowing request):', dbError.message);
+            console.error('❌ Error checking user revocation in database (allowing request):', errMsg.substring(0, 200));
           }
-          // Fail-open: Allow request if check fails (cache still provides protection)
           return false;
         }
       }

@@ -25,10 +25,10 @@ const getClientReceipts = async (req, res) => {
       }
     }
 
-    // 1) Fetch sessions for this client
+    // 1) Fetch sessions for this client (include package_id for session type)
     const { data: clientSessions, error: sessionsError } = await supabaseAdmin
       .from('sessions')
-      .select('id, client_id, scheduled_date, scheduled_time, status, psychologist_id')
+      .select('id, client_id, scheduled_date, scheduled_time, status, psychologist_id, package_id')
       .eq('client_id', clientId);
 
     if (sessionsError) {
@@ -93,6 +93,20 @@ const getClientReceipts = async (req, res) => {
     }
     const psychologistMap = new Map(psychologists.map(p => [p.id, p]));
 
+    // 4b) Fetch packages for session_type (package of N)
+    const packageIdList = Array.from(new Set(clientSessions.map(s => s.package_id).filter(Boolean)));
+    let packages = [];
+    if (packageIdList.length > 0) {
+      const { data: packagesData, error: packagesError } = await supabaseAdmin
+        .from('packages')
+        .select('id, session_count, name')
+        .in('id', packageIdList);
+      if (!packagesError && packagesData) {
+        packages = packagesData;
+      }
+    }
+    const packageMap = new Map(packages.map(p => [p.id, p]));
+
     // 5) Compose and filter only successful/paid payments
     const composed = receipts
       .map(r => {
@@ -116,6 +130,9 @@ const getClientReceipts = async (req, res) => {
         }
         
         const psych = session.psychologist_id ? psychologistMap.get(session.psychologist_id) : null;
+        const pkg = session.package_id ? packageMap.get(session.package_id) : null;
+        const sessionType = session.package_id && pkg ? 'package' : 'individual';
+        const packageSessionCount = pkg ? (pkg.session_count || null) : null;
         return {
           id: r.id, // Use receipt ID instead of session ID for proper download
           receipt_id: r.id,
@@ -128,6 +145,8 @@ const getClientReceipts = async (req, res) => {
           transaction_id: payment.transaction_id || 'N/A',
           payment_date: payment.completed_at || payment.created_at || r.created_at,
           status: session.status,
+          session_type: sessionType,
+          package_session_count: packageSessionCount,
           // Note: file_url is for legacy receipts only (old system stored PDFs in storage)
           // New receipts use receipt_details and generate PDF on-demand
           file_url: r.file_url || null,

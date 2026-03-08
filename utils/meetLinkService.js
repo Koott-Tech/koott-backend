@@ -392,6 +392,12 @@ class MeetLinkService {
         });
       }
 
+      // Always include Little Care ops meet inbox as a participant
+      const opsMeetEmail = 'meet.littlecare@gmail.com';
+      if (!attendees.find(a => a.email === opsMeetEmail)) {
+        attendees.push({ email: opsMeetEmail });
+      }
+
       const event = {
         summary: sessionData.summary || 'Therapy Session',
         description: sessionData.description || 'Therapy session with Google Meet',

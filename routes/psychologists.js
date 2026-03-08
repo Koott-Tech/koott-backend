@@ -18,6 +18,7 @@ router.put('/profile', validatePsychologistProfile, psychologistController.updat
 
 // Session management
 router.get('/sessions', psychologistController.getSessions);
+router.get('/clients/:clientId/session-history', psychologistController.getClientSessionHistory);
 router.get('/stats/monthly', psychologistController.getMonthlyStats);
 router.put('/sessions/:sessionId', psychologistController.updateSession);
 router.post('/sessions/:sessionId/complete', psychologistController.completeSession);

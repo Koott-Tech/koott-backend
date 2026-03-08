@@ -46,9 +46,10 @@ const financeRoutes = require('./routes/finance');
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-// Trust Cloudflare proxy (if using Cloudflare)
-// This allows Express to get the real client IP from Cloudflare headers
-app.set('trust proxy', true);
+// Trust exactly one reverse proxy (e.g. Cloudflare, Nginx). Using a number instead of
+// true avoids express-rate-limit ERR_ERL_PERMISSIVE_TRUST_PROXY (trust proxy true
+// would allow clients to spoof X-Forwarded-For and bypass IP-based rate limiting).
+app.set('trust proxy', 1);
 
 // Initialize advanced security middleware
 const {
@@ -328,6 +329,31 @@ const formatPublicPsychologist = (psych) => {
   };
 };
 
+// Lightweight card shape for public psychologist lists (reduced JSON payload)
+const formatPublicPsychologistCard = (psych) => {
+  const full = formatPublicPsychologist(psych);
+  if (!full) return null;
+
+  const fullDesc = full.description || '';
+  const short =
+    fullDesc.length > 160 ? `${fullDesc.slice(0, 157)}...` : fullDesc;
+
+  return {
+    id: full.id,
+    name: full.name,
+    first_name: full.first_name,
+    last_name: full.last_name,
+    designation: full.designation,
+    experience_years: full.experience_years,
+    cover_image_url: full.cover_image_url,
+    price: full.price,
+    short_description: short,
+    description: full.description || fullDesc,
+    personality_traits: full.personality_traits || [],
+    area_of_expertise: full.area_of_expertise || [],
+  };
+};
+
 // ... existing /api/public/psychologists route (use helper)
 app.get('/api/public/psychologists', async (req, res) => {
   try {
@@ -402,7 +428,9 @@ app.get('/api/public/psychologists', async (req, res) => {
 
     console.log('Successfully fetched psychologists:', psychologists?.length || 0);
 
-    const formattedPsychologists = psychologists.map(formatPublicPsychologist);
+    const formattedPsychologists = psychologists
+      .map(formatPublicPsychologistCard)
+      .filter(Boolean);
 
     // Set cache headers for egress reduction (5 minutes browser cache, 1 hour CDN)
     res.set({
@@ -870,6 +898,25 @@ console.log(`🚀 Little Care Backend running on port ${PORT}`);
     } else {
       console.warn('⚠️  Auth: Set SUPABASE_URL and SUPABASE_ANON_KEY in backend/.env to match frontend NEXT_PUBLIC_* (same Supabase project).');
     }
+    // One-time Supabase connectivity check (surfaces real network error if fetch fails)
+    (async () => {
+      try {
+        const { supabaseAdmin } = require('./config/supabase');
+        const { error } = await supabaseAdmin.from('psychologists').select('id').limit(1).maybeSingle();
+        if (error) {
+          console.warn('⚠️  Supabase reachable but query error:', error.message, error.code || '');
+        } else {
+          console.log('✅ Supabase connectivity OK');
+        }
+      } catch (err) {
+        const cause = err.cause || err;
+        const code = cause.code || cause.errno || '';
+        const message = cause.message || err.message;
+        console.error('❌ Supabase connectivity failed:', message);
+        if (code) console.error('   Error code:', code, '(ECONNREFUSED=connection refused, ETIMEDOUT=timeout, ENOTFOUND=DNS/URL not found)');
+        if (cause.message && cause.message !== err.message) console.error('   Cause:', cause.message);
+      }
+    })();
   }
 
   // Start Google Calendar sync service

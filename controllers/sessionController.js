@@ -97,7 +97,7 @@ const bookSession = async (req, res) => {
         description: `Online therapy session between ${clientDetails.child_name || clientDetails.first_name} and ${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
         startDate: scheduled_date,
         startTime: scheduled_time,
-        endTime: addMinutesToTime(scheduled_time, 60) // 60-minute session
+        endTime: addMinutesToTime(scheduled_time, 50) // 50-minute session
       };
       
       // Use the new Meet Link Service for real Meet link creation
@@ -442,37 +442,32 @@ const getAllSessions = async (req, res) => {
             return acc;
           }, {});
 
-          // Calculate completed sessions for each package
-          // Need to count ALL completed sessions for each package, not just the ones on current page
-          // Query all sessions with these package_ids to get accurate counts
+          // Count completed sessions per (client_id, package_id) so each client's package progress is correct
           const { data: allPackageSessions, error: allPackageSessionsError } = await supabaseAdmin
             .from('sessions')
-            .select('id, package_id, status')
+            .select('id, package_id, client_id, status')
             .in('package_id', packageIds)
             .eq('status', 'completed');
 
-          const completedCounts = {};
+          const completedCountsByClientPackage = {};
           if (!allPackageSessionsError && allPackageSessions) {
             allPackageSessions.forEach(s => {
-              if (s.package_id) {
-                completedCounts[s.package_id] = (completedCounts[s.package_id] || 0) + 1;
+              if (s.package_id && s.client_id) {
+                const key = `${s.client_id}_${s.package_id}`;
+                completedCountsByClientPackage[key] = (completedCountsByClientPackage[key] || 0) + 1;
               }
             });
           }
 
-          // Add progress info to each package
-          Object.keys(packagesMap).forEach(pkgId => {
-            const pkg = packagesMap[pkgId];
-            const totalSessions = pkg.session_count || 0;
-            const completedSessions = completedCounts[pkgId] || 0;
-            pkg.completed_sessions = completedSessions;
-            pkg.total_sessions = totalSessions;
-          });
-
-          // Attach package data to sessions
+          // Attach package data to each session with correct completed_sessions for this client's package
           sessions.forEach(session => {
             if (session.package_id && packagesMap[session.package_id]) {
-              session.package = packagesMap[session.package_id];
+              const pkg = { ...packagesMap[session.package_id] };
+              const totalSessions = pkg.session_count || 0;
+              const key = `${session.client_id}_${session.package_id}`;
+              pkg.completed_sessions = completedCountsByClientPackage[key] || 0;
+              pkg.total_sessions = totalSessions;
+              session.package = pkg;
             }
           });
         }
@@ -779,10 +774,19 @@ const getPsychologistSessions = async (req, res) => {
   }
 };
 
-// Get session by ID
+// Get session by ID (admin only). Tries sessions table first, then assessment_sessions.
 const getSessionById = async (req, res) => {
   try {
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'superadmin')) {
+      return res.status(403).json(
+        errorResponse('Access denied. Admin or Superadmin role required.')
+      );
+    }
+
     const { sessionId } = req.params;
+    if (!sessionId) {
+      return res.status(400).json(errorResponse('Session ID is required'));
+    }
 
     const { data: session, error } = await supabaseAdmin
       .from('sessions')
@@ -794,7 +798,10 @@ const getSessionById = async (req, res) => {
           last_name,
           child_name,
           child_age,
-          phone_number
+          phone_number,
+          user:users(
+            email
+          )
         ),
         psychologist:psychologists(
           id,
@@ -803,23 +810,55 @@ const getSessionById = async (req, res) => {
           area_of_expertise,
           description,
           email
-        ),
-        package:packages(
-          id,
-          package_type,
-          price,
-          description,
-          session_count
         )
       `)
       .eq('id', sessionId)
-      .single();
+      .neq('session_type', 'free_assessment')
+      .maybeSingle();
 
     if (error) {
       console.error('Get session error:', error);
-      return res.status(404).json(
-        errorResponse('Session not found')
-      );
+      return res.status(500).json(errorResponse('Failed to fetch session'));
+    }
+
+    if (!session) {
+      // Not in sessions table — try assessment_sessions
+      const { data: assessSession, error: assessError } = await supabaseAdmin
+        .from('assessment_sessions')
+        .select(`
+          *,
+          client:clients(
+            id,
+            first_name,
+            last_name,
+            child_name,
+            child_age,
+            phone_number,
+            user:users(
+              email
+            )
+          ),
+          psychologist:psychologists(
+            id,
+            first_name,
+            last_name,
+            area_of_expertise,
+            email
+          )
+        `)
+        .eq('id', sessionId)
+        .maybeSingle();
+
+      if (assessError || !assessSession) {
+        return res.status(404).json(errorResponse('Session not found'));
+      }
+
+      const normalized = {
+        ...assessSession,
+        session_type: 'assessment',
+        type: 'assessment'
+      };
+      return res.json(successResponse({ session: normalized }));
     }
 
     // Debug: Log session data
@@ -912,7 +951,7 @@ const getSessionById = async (req, res) => {
     });
 
     res.json(
-      successResponse(session)
+      successResponse({ session })
     );
 
   } catch (error) {
@@ -987,38 +1026,7 @@ const updateSessionStatus = async (req, res) => {
       );
     }
 
-    // Handle no-show status - send WhatsApp with reason request
-    if (status === 'noshow' || status === 'no_show') {
-      try {
-        console.log('📱 Handling no-show - sending WhatsApp notifications...');
-        const whatsappService = require('../utils/whatsappService');
-        
-        const client = updatedSession.client;
-        const psychologist = updatedSession.psychologist;
-        
-        if (client?.phone_number) {
-          const psychologistName = `${psychologist?.first_name || ''} ${psychologist?.last_name || ''}`.trim() || 'our specialist';
-          const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-
-          const clientResult = await whatsappService.sendNoShowNotification(client.phone_number, {
-            psychologistName: psychologistName,
-            date: updatedSession.scheduled_date,
-            time: updatedSession.scheduled_time,
-            supportPhone: supportPhone
-          });
-          if (clientResult?.success) {
-            console.log('✅ No-show WhatsApp sent to client');
-          } else {
-            console.warn('⚠️ Failed to send no-show WhatsApp to client');
-          }
-        }
-
-        // NO EMAIL for no-show (WhatsApp only)
-      } catch (waError) {
-        console.error('❌ Error handling no-show notifications:', waError);
-        // Continue even if notifications fail
-      }
-    }
+    // No WhatsApp, email, or in-app notification for no-show (per product requirement)
 
     res.json(
       successResponse(updatedSession, 'Session status updated successfully')
@@ -1122,7 +1130,7 @@ const rescheduleSession = async (req, res) => {
             psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
             scheduledDate: new_date,
             scheduledTime: new_time,
-            duration: 60
+            duration: 50
           });
         }
     */
@@ -1809,19 +1817,18 @@ const completeSession = async (req, res) => {
 
     const isFreeAssessment = session.session_type === 'free_assessment';
 
-    // Validate required fields
-    // For free assessments, report is optional (they don't have reports)
-    // For regular sessions, all fields are required
-    if (!summary || !summary_notes) {
-      return res.status(400).json(
-        errorResponse('Summary and summary notes are required')
-      );
-    }
-
-    if (!isFreeAssessment && !report) {
-      return res.status(400).json(
-        errorResponse('Report is required for regular sessions')
-      );
+    // Validate required fields: for admin, summary / report / summary_notes are all optional
+    if (!isAdmin) {
+      if (!summary || !summary_notes) {
+        return res.status(400).json(
+          errorResponse('Summary and summary notes are required')
+        );
+      }
+      if (!isFreeAssessment && !report) {
+        return res.status(400).json(
+          errorResponse('Report is required for regular sessions')
+        );
+      }
     }
 
     // Check if session is already completed
@@ -1831,11 +1838,11 @@ const completeSession = async (req, res) => {
       );
     }
 
-    // Prepare update data
+    // Prepare update data (admin may leave summary/report/summary_notes empty)
     const updateData = {
       status: 'completed',
-      summary: summary.trim(),
-      summary_notes: summary_notes.trim(),
+      summary: (summary && summary.trim()) || '',
+      summary_notes: (summary_notes && summary_notes.trim()) || '',
       updated_at: new Date().toISOString()
     };
 
@@ -1848,9 +1855,9 @@ const completeSession = async (req, res) => {
       updateData.completion_date = session.scheduled_date || session.original_scheduled_date;
     }
 
-    // Only add report for non-free-assessment sessions
-    if (!isFreeAssessment && report) {
-      updateData.report = report.trim();
+    // Report: for non-free-assessment, set to trimmed value or empty (optional for admin)
+    if (!isFreeAssessment) {
+      updateData.report = (report && report.trim()) || '';
     }
 
     // Update session with completion data
@@ -1910,43 +1917,48 @@ const completeSession = async (req, res) => {
       // Don't fail the request if commission calculation fails
     }
 
+    // Normalize client (Supabase PostgREST can return FK relation as object or array)
+    const client = Array.isArray(session.client) ? session.client[0] : session.client;
+
     console.log(`📋 Session ${sessionId} updated successfully, proceeding to send notifications...`);
     console.log(`📋 Session client data available:`, {
-      hasClient: !!session.client,
-      clientId: session.client?.id,
-      userId: session.client?.user_id,
-      hasPhoneNumber: !!session.client?.phone_number
+      hasClient: !!client,
+      clientId: client?.id,
+      userId: client?.user_id,
+      hasPhoneNumber: !!(client?.phone_number)
     });
 
     // Send completion notification to client
     console.log(`🔔 Starting completion notification process for session ${sessionId}...`);
     try {
-      const clientNotificationData = {
-        user_id: session.client.user_id,
-        title: 'Session Completed',
-        message: `Your session with ${req.user.first_name || 'your psychologist'} has been completed. You can now view the summary and report.`,
-        type: 'success',
-        related_id: sessionId,
-        related_type: 'session'
-      };
+      if (client?.user_id) {
+        const clientNotificationData = {
+          user_id: client.user_id,
+          title: 'Session Completed',
+          message: `Your session with ${req.user.first_name || 'your psychologist'} has been completed. You can now view the summary and report.`,
+          type: 'success',
+          related_id: sessionId,
+          related_type: 'session'
+        };
 
-      console.log(`📬 Creating in-app notification for user ${session.client.user_id}...`);
-      await supabaseAdmin
-        .from('notifications')
-        .insert([clientNotificationData]);
-      console.log(`✅ In-app notification created successfully`);
+        console.log(`📬 Creating in-app notification for user ${client.user_id}...`);
+        await supabaseAdmin
+          .from('notifications')
+          .insert([clientNotificationData]);
+        console.log(`✅ In-app notification created successfully`);
+      }
 
       // Send WhatsApp notification to client (NO EMAIL for session completion)
       // This applies to ALL sessions including package sessions
       try {
         const { sendSessionCompletionNotification } = require('../utils/whatsappService');
-        const clientPhone = session.client?.phone_number || null;
+        const clientPhone = client?.phone_number || null;
         
         console.log(`📱 WhatsApp sending attempt for session ${sessionId} (package: ${session.package_id || 'none'})`);
         console.log(`📱 Client data:`, {
-          hasClient: !!session.client,
-          clientId: session.client?.id,
-          phoneNumber: clientPhone ? `${clientPhone.substring(0, 3)}***` : 'NOT FOUND',
+          hasClient: !!client,
+          clientId: client?.id,
+          phoneNumber: clientPhone ? `${String(clientPhone).substring(0, 3)}***` : 'NOT FOUND',
           sessionType: session.session_type,
           isPackage: !!session.package_id
         });
@@ -2030,7 +2042,7 @@ const completeSession = async (req, res) => {
           }
         } else {
           console.warn(`⚠️ Skipping WhatsApp completion for session ${sessionId} (${session.package_id ? 'package session' : 'regular session'}): Client phone number not found.`);
-          console.warn(`⚠️ Session client data:`, session.client ? { id: session.client.id, hasPhone: !!session.client.phone_number } : 'No client data');
+          console.warn(`⚠️ Session client data:`, client ? { id: client.id, hasPhone: !!client.phone_number } : 'No client data');
         }
       } catch (waError) {
         console.error(`❌ Error sending session completion WhatsApp for session ${sessionId}${session.package_id ? ' (package session)' : ''}:`, waError);
@@ -2057,7 +2069,9 @@ const completeSession = async (req, res) => {
   }
 };
 
-// Mark session as no-show (psychologist or admin)
+// Mark session as no-show (psychologist or admin only — never automatic).
+// When session time passes, the session remains booked/pending until psychologist or admin
+// explicitly marks it as no-show or completed.
 const markSessionAsNoShow = async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -2158,55 +2172,7 @@ const markSessionAsNoShow = async (req, res) => {
       );
     }
 
-    // Send no-show notification to client
-    try {
-      const emailService = require('../utils/emailService');
-
-      // Create notification
-      if (session.client?.user_id) {
-        const notificationData = {
-          user_id: session.client.user_id,
-          title: 'Session No-Show',
-          message: `Your session scheduled for ${session.scheduled_date} at ${session.scheduled_time} has been marked as no-show.${reason ? ` Reason: ${reason}` : ''}`,
-          type: 'warning',
-          related_id: sessionId,
-          related_type: 'session'
-        };
-
-        await supabaseAdmin
-          .from('notifications')
-          .insert([notificationData]);
-      }
-
-      // Send WhatsApp notification
-      if (session.client?.phone_number) {
-        const clientPhone = session.client.phone_number;
-        const psychologistName = `${session.psychologist?.first_name || ''} ${session.psychologist?.last_name || ''}`.trim() || 'our specialist';
-        const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-
-        try {
-          const { sendNoShowNotification } = require('../utils/whatsappService');
-          const clientResult = await sendNoShowNotification(clientPhone, {
-            psychologistName: psychologistName,
-            date: session.scheduled_date,
-            time: session.scheduled_time,
-            supportPhone: supportPhone
-          });
-          if (clientResult?.success) {
-            console.log('✅ No-show WhatsApp sent to client');
-          } else {
-            console.warn('⚠️ Failed to send no-show WhatsApp to client');
-          }
-        } catch (waError) {
-          console.warn('⚠️ Failed to send no-show WhatsApp to client:', waError);
-        }
-      }
-
-      // NO EMAIL for no-show (WhatsApp only)
-    } catch (notificationError) {
-      console.error('Error sending no-show notification:', notificationError);
-      // Don't fail the request if notification fails
-    }
+    // No WhatsApp, email, or in-app notification for no-show (per product requirement)
 
     console.log(`✅ Session ${sessionId} marked as no-show by ${userRole} ${userId}`);
     
@@ -2302,6 +2268,7 @@ module.exports = {
   getClientSessions,
   getPsychologistSessions,
   getAllSessions,
+  getSessionById,
   updateSessionStatus,
   deleteSession,
   handleRescheduleRequest,
