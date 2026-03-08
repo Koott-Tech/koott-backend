@@ -1819,7 +1819,7 @@ const updatePsychologist = async (req, res) => {
 
           const packageData = {
             psychologist_id: psychologistId,
-            package_type: pkg.sessions > 1 ? 'multi_session' : 'individual',
+            package_type: pkg.sessions > 1 ? `package_${pkg.sessions}` : 'individual',
             session_count: pkg.sessions,
             price: parseFloat(pkg.price),
             name: pkg.name,
@@ -3411,12 +3411,14 @@ const bookPackageNextSession = async (req, res) => {
   }
 };
 
-// Get packages with remaining sessions to book (admin only) - for Packages tab
+// Get packages with remaining sessions (admin only) - for Packages tab.
+// Returns all client+package combinations that have package sessions, with upcoming booked sessions
+// and can_book_next true only when at least one session is completed and there are remaining to book.
 const getPackagesWithRemainingSessions = async (req, res) => {
   try {
     const { data: sessions } = await supabaseAdmin
       .from('sessions')
-      .select('id, client_id, psychologist_id, package_id, status')
+      .select('id, client_id, psychologist_id, package_id, status, scheduled_date, scheduled_time')
       .not('package_id', 'is', null)
       .neq('session_type', 'free_assessment');
 
@@ -3453,6 +3455,8 @@ const getPackagesWithRemainingSessions = async (req, res) => {
       .in('id', psychIds);
     const psychologistsMap = (psychologists || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
 
+    const bookedStatuses = ['booked', 'scheduled', 'reschedule_requested', 'rescheduled'];
+
     const result = [];
     Object.values(byKey).forEach(entry => {
       const pkg = packagesMap[entry.package_id];
@@ -3460,30 +3464,45 @@ const getPackagesWithRemainingSessions = async (req, res) => {
       const total = pkg.session_count || 0;
       let completed = 0;
       let booked = 0;
+      const upcomingSessions = [];
       entry.sessions.forEach(s => {
         if (s.status === 'completed') completed++;
         else if (s.status !== 'cancelled' && s.status !== 'no_show' && s.status !== 'noshow') booked++;
+        if (bookedStatuses.includes(s.status) && s.scheduled_date && s.scheduled_time) {
+          upcomingSessions.push({
+            id: s.id,
+            scheduled_date: s.scheduled_date,
+            scheduled_time: s.scheduled_time,
+            status: s.status
+          });
+        }
+      });
+      upcomingSessions.sort((a, b) => {
+        const d = (a.scheduled_date || '').localeCompare(b.scheduled_date || '');
+        return d !== 0 ? d : (a.scheduled_time || '').localeCompare(b.scheduled_time || '');
       });
       const remaining = Math.max(total - completed - booked, 0);
-      if (completed > 0 && remaining > 0) {
-        const client = clientsMap[entry.client_id];
-        const psychologist = psychologistsMap[entry.psychologist_id] || psychologistsMap[pkg.psychologist_id];
-        result.push({
-          client_id: entry.client_id,
-          psychologist_id: psychologist?.id || pkg.psychologist_id,
-          package_id: entry.package_id,
-          client: client || { id: entry.client_id, first_name: '', last_name: '' },
-          psychologist: psychologist || { id: pkg.psychologist_id, first_name: '', last_name: '' },
-          package: {
-            id: pkg.id,
-            package_type: pkg.package_type,
-            session_count: total,
-            total_sessions: total,
-            completed_sessions: completed,
-            remaining_sessions: remaining
-          }
-        });
-      }
+      const canBookNext = completed > 0 && remaining > 0;
+
+      const client = clientsMap[entry.client_id];
+      const psychologist = psychologistsMap[entry.psychologist_id] || psychologistsMap[pkg.psychologist_id];
+      result.push({
+        client_id: entry.client_id,
+        psychologist_id: psychologist?.id || pkg.psychologist_id,
+        package_id: entry.package_id,
+        client: client || { id: entry.client_id, first_name: '', last_name: '' },
+        psychologist: psychologist || { id: pkg.psychologist_id, first_name: '', last_name: '' },
+        package: {
+          id: pkg.id,
+          package_type: pkg.package_type,
+          session_count: total,
+          total_sessions: total,
+          completed_sessions: completed,
+          remaining_sessions: remaining,
+          can_book_next: canBookNext
+        },
+        upcoming_sessions: upcomingSessions
+      });
     });
 
     return res.json(successResponse({ packages: result }));
