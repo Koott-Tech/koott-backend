@@ -4735,7 +4735,7 @@ const bookSessionWithCredit = async (req, res) => {
       console.log('✅ Email notifications sent for credit booking');
 
       try {
-        const { sendBookingConfirmation } = require('../utils/whatsappService');
+        const { sendBookingConfirmation, sendWhatsAppTextWithRetry, formatFriendlyTime } = require('../utils/whatsappService');
         const clientPhone = clientDetails.phone_number || null;
         if (clientPhone && meetData?.meetLink) {
           const childName = clientDetails.child_name &&
@@ -4750,6 +4750,42 @@ const bookSessionWithCredit = async (req, res) => {
             meetLink: meetData.meetLink,
             psychologistName
           });
+          console.log('✅ WhatsApp confirmation sent to client (credit booking)');
+        }
+        // Send WhatsApp to psychologist (same as other booking flows)
+        const psychologistPhone = psychologistDetails.phone || null;
+        if (psychologistPhone && meetData?.meetLink) {
+          const formatBookingDateShort = (dateStr) => {
+            if (!dateStr) return '';
+            try {
+              const d = new Date(`${dateStr}T00:00:00+05:30`);
+              return d.toLocaleDateString('en-IN', {
+                weekday: 'short',
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric',
+                timeZone: 'Asia/Kolkata'
+              });
+            } catch {
+              return dateStr;
+            }
+          };
+          const bullet = '•⁠  ⁠';
+          const formattedDateShort = formatBookingDateShort(formattedDate);
+          const formattedTimeFriendly = formatFriendlyTime(formattedTime);
+          const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
+          const psychologistMessage =
+            `Hey 👋\n\n` +
+            `New session booked with Little Care.\n\n` +
+            `${bullet}Client: ${clientName}\n` +
+            `${bullet}Date: ${formattedDateShort}\n` +
+            `${bullet}Time: ${formattedTimeFriendly} (IST)\n\n` +
+            `Join link:\n${meetData.meetLink}\n\n` +
+            `Please be ready 5 mins early.\n\n` +
+            `For help: ${supportPhone}\n\n` +
+            `— Little Care 💜`;
+          await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
+          console.log('✅ WhatsApp notification sent to psychologist (credit booking)');
         }
       } catch (waErr) {
         console.warn('⚠️ WhatsApp notification skipped for credit booking:', waErr?.message);

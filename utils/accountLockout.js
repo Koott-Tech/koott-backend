@@ -73,44 +73,42 @@ class AccountLockoutService {
           });
 
           if (rpcError) {
-            if (rpcError.code === '42883') {
-              // Function doesn't exist - fallback to read-then-upsert
-              console.warn('⚠️ increment_failed_attempts RPC function not found. Using fallback (not atomic).');
-              console.warn('   Create function with: CREATE OR REPLACE FUNCTION increment_failed_attempts(p_email TEXT, p_ip TEXT, p_max_attempts INTEGER, p_lockout_duration_ms BIGINT) RETURNS TABLE(failed_attempts INTEGER, locked_until TIMESTAMP WITH TIME ZONE) AS $$ BEGIN INSERT INTO account_lockouts (email, failed_attempts, last_attempt_ip, last_attempt_at) VALUES (p_email, 1, p_ip, NOW()) ON CONFLICT (email) DO UPDATE SET failed_attempts = account_lockouts.failed_attempts + 1, last_attempt_ip = p_ip, last_attempt_at = NOW(), locked_until = CASE WHEN account_lockouts.failed_attempts + 1 >= p_max_attempts THEN NOW() + (p_lockout_duration_ms || \' milliseconds\')::INTERVAL ELSE NULL END RETURNING failed_attempts, locked_until; END; $$ LANGUAGE plpgsql;');
-              
-              // Fallback: read-then-upsert (not atomic but better than nothing)
-              const { data: existingLockout } = await supabaseAdmin
-                .from('account_lockouts')
-                .select('failed_attempts')
-                .eq('email', normalizedEmail)
-                .maybeSingle();
+            const functionNotFound = rpcError.code === '42883' || rpcError.code === 'PGRST202';
+            if (functionNotFound) {
+              // RPC function or table not in schema - use fallback or cache-only (no log spam)
+              try {
+                const { data: existingLockout } = await supabaseAdmin
+                  .from('account_lockouts')
+                  .select('failed_attempts')
+                  .eq('email', normalizedEmail)
+                  .maybeSingle();
 
-              const currentFailedAttempts = existingLockout?.failed_attempts || 0;
-              const newFailedAttempts = currentFailedAttempts + 1;
-              const shouldLock = newFailedAttempts >= this.maxAttempts;
+                const currentFailedAttempts = existingLockout?.failed_attempts || 0;
+                const newFailedAttempts = currentFailedAttempts + 1;
+                const shouldLock = newFailedAttempts >= this.maxAttempts;
 
-              const { error: dbError } = await supabaseAdmin
-                .from('account_lockouts')
-                .upsert({
-                  email: normalizedEmail,
-                  failed_attempts: newFailedAttempts,
-                  locked_until: shouldLock
-                    ? new Date(Date.now() + this.lockoutDuration).toISOString()
-                    : null,
-                  last_attempt_ip: ip,
-                  last_attempt_at: new Date().toISOString()
-                }, {
-                  onConflict: 'email'
-                });
+                const { error: dbError } = await supabaseAdmin
+                  .from('account_lockouts')
+                  .upsert({
+                    email: normalizedEmail,
+                    failed_attempts: newFailedAttempts,
+                    locked_until: shouldLock
+                      ? new Date(Date.now() + this.lockoutDuration).toISOString()
+                      : null,
+                    last_attempt_ip: ip,
+                    last_attempt_at: new Date().toISOString()
+                  }, {
+                    onConflict: 'email'
+                  });
 
-              if (dbError && dbError.code !== '42P01') {
-                console.error('❌ Error recording failed attempt (fallback):', {
-                  code: dbError.code,
-                  message: dbError.message
-                });
+                if (dbError && dbError.code !== '42P01' && dbError.code !== 'PGRST204') {
+                  console.warn('⚠️ account_lockouts table missing or error. Using cache-only for lockout.');
+                }
+                attempts = newFailedAttempts;
+              } catch (fallbackErr) {
+                // Table may not exist (42P01) - rely on cache only
+                attempts = globalCache.get(cacheKey) || attempts;
               }
-              
-              attempts = newFailedAttempts;
             } else {
               // Other RPC error
               console.error('❌ Error calling increment_failed_attempts RPC:', {

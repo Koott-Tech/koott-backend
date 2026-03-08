@@ -1506,6 +1506,35 @@ const deleteSession = async (req, res) => {
     */
     console.log('ℹ️  Google Calendar sync disabled - skipping calendar event deletion');
 
+    // Clear client_packages.first_session_id if this session is referenced (avoids FK violation on delete)
+    const { data: refs } = await supabaseAdmin
+      .from('client_packages')
+      .select('id, client_id, package_id')
+      .eq('first_session_id', sessionId);
+
+    if (refs && refs.length > 0) {
+      for (const cp of refs) {
+        // Try setting to another session in the same package (if any), else null
+        const { data: otherSession } = await supabaseAdmin
+          .from('sessions')
+          .select('id')
+          .eq('client_id', cp.client_id)
+          .eq('package_id', cp.package_id)
+          .neq('id', sessionId)
+          .limit(1)
+          .maybeSingle();
+
+        const { error: unlinkError } = await supabaseAdmin
+          .from('client_packages')
+          .update({ first_session_id: otherSession?.id ?? null })
+          .eq('id', cp.id);
+
+        if (unlinkError) {
+          console.warn('Unlink client_packages first_session_id:', unlinkError?.message);
+        }
+      }
+    }
+
     // Delete session
     const { error: deleteError } = await supabaseAdmin
       .from('sessions')
@@ -1514,6 +1543,11 @@ const deleteSession = async (req, res) => {
 
     if (deleteError) {
       console.error('Delete session error:', deleteError);
+      if (deleteError.code === '23503') {
+        return res.status(400).json(
+          errorResponse('Cannot delete session: it is still linked to a package. Unlink it first or try again.')
+        );
+      }
       return res.status(500).json(
         errorResponse('Failed to delete session')
       );

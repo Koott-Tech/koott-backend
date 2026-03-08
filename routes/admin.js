@@ -67,6 +67,7 @@ router.post('/availability/update-all', adminController.updateAllPsychologistsAv
 
 // User management
 router.post('/users', requireRequestSignature, adminController.createUser);
+router.put('/users/:userId', adminController.updateUser);
 router.delete('/users/:userId', requireRequestSignature, adminController.deleteUser);
 
 // Session management
