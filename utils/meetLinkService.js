@@ -446,10 +446,8 @@ class MeetLinkService {
         calendarId: 'primary',
         resource: event,
         conferenceDataVersion: 1,
-        // Important: we do NOT want Google to email attendees
-        // (those mails come from assessment.koott@gmail.com).
-        // Our own Nodemailer emails already go out from the Little Care address.
-        sendUpdates: 'none'
+        // Send calendar invites to all attendees so they get the event and notifications (client, psychologist, admin, meet.littlecare)
+        sendUpdates: 'all'
       });
 
       log('✅ Real Meet link created with OAuth via Calendar API');
