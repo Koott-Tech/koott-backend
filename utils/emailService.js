@@ -1166,7 +1166,10 @@ class EmailService {
     const contactPhone = '+91-9539007766';
 
     const roleLabel = role === 'client' ? 'Client' : role === 'psychologist' ? 'Psychologist' : role || 'User';
-    const fullName = [firstName, lastName].filter(Boolean).join(' ').trim() || '—';
+    // Build display name: first+last, then child name (for client), then email so admin always sees an identifier
+    let fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+    if (!fullName && role === 'client' && childName) fullName = `Child: ${childName}`;
+    if (!fullName) fullName = email || '—';
 
     const mailOptions = {
       from: {

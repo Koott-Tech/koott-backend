@@ -392,6 +392,12 @@ class MeetLinkService {
         });
       }
 
+      // Add admin email (company admin) as participant
+      const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
+      if (adminEmail && !attendees.find(a => a.email === adminEmail)) {
+        attendees.push({ email: adminEmail });
+      }
+
       // Always include Little Care ops meet inbox as a participant
       const opsMeetEmail = 'meet.littlecare@gmail.com';
       if (!attendees.find(a => a.email === opsMeetEmail)) {
@@ -588,6 +594,12 @@ class MeetLinkService {
             attendeeEmails.push(email);
           }
         });
+      }
+
+      // Add admin email (company admin) for reference (service account cannot send invites)
+      const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
+      if (adminEmail && !attendeeEmails.includes(adminEmail)) {
+        attendeeEmails.push(adminEmail);
       }
 
       // Service accounts CANNOT use attendees field - detect upfront and skip it

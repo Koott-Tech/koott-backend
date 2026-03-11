@@ -277,17 +277,20 @@ const register = async (req, res) => {
       if (adminRecipients) {
         try {
           const emailService = require('../utils/emailService');
+          // Use created client/psychologist record for name so admin email always has the correct client name
+          const firstName = (role === 'client' ? client?.first_name : profileData?.first_name) || req.body.first_name || '';
+          const lastName = (role === 'client' ? client?.last_name : profileData?.last_name) || req.body.last_name || '';
           await emailService.sendNewUserRegistrationNotification({
             to: adminRecipients,
             email: user.email,
             role: user.role,
-            firstName: profileData.first_name || req.body.first_name,
-            lastName: profileData.last_name || req.body.last_name,
+            firstName: firstName.trim(),
+            lastName: lastName.trim(),
             phone: profileData.phone_number || profileData.phone || req.body.phone_number || req.body.phone,
             childName: profileData.child_name || req.body.child_name,
             childAge: profileData.child_age ?? req.body.child_age,
             userId: user.id,
-            clientId: role === 'client' ? (user.client_id || profileData.id) : null,
+            clientId: role === 'client' ? (user.client_id || client?.id) : null,
             createdAt: user.created_at || profileData.created_at
           });
           console.log('📧 New user registration email sent to admin and meet.littlecare@gmail.com');
