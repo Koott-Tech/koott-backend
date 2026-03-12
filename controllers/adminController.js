@@ -2563,10 +2563,126 @@ const updateSession = async (req, res) => {
     }
 
     const originalPsychId = currentSession.psychologist_id;
-    const doctorChanged = notify_doctor && psychologist_id && psychologist_id !== originalPsychId;
+    const doctorChanged = psychologist_id && psychologist_id !== originalPsychId;
+    const effectiveDate = scheduled_date || currentSession.scheduled_date;
+    const effectiveTime = scheduled_time || currentSession.scheduled_time;
+    const isSessionWithMeet = ['booked', 'rescheduled', 'reschedule_requested', 'scheduled', 'confirmed'].includes(
+      (status || currentSession.status)?.toLowerCase?.() || status || currentSession.status
+    );
 
-    // Prepare update data
     const updateData = {};
+
+    // When psychologist is changed: remove old Meet from old doc's calendar and create new Meet for new doc
+    if (doctorChanged && isSessionWithMeet && effectiveDate && effectiveTime) {
+      const meetLinkService = require('../utils/meetLinkService');
+
+      // 1) Delete old calendar event from old psychologist's calendar (best effort)
+      const oldEventId = currentSession.google_calendar_event_id;
+      if (oldEventId && originalPsychId) {
+        try {
+          const { data: oldPsych } = await supabaseAdmin
+            .from('psychologists')
+            .select('id, google_calendar_credentials')
+            .eq('id', originalPsychId)
+            .single();
+          if (oldPsych?.google_calendar_credentials) {
+            const creds = oldPsych.google_calendar_credentials;
+            const oldAuth = {
+              access_token: creds.access_token,
+              refresh_token: creds.refresh_token,
+              expiry_date: creds.expiry_date
+            };
+            const eventIds = String(oldEventId).split(',').map((id) => id.trim()).filter(Boolean);
+            for (const eid of eventIds) {
+              const delResult = await meetLinkService.deleteCalendarEvent(eid, oldAuth);
+              if (delResult.success) {
+                console.log('✅ [Admin] Removed old calendar event from previous psychologist:', eid);
+              } else {
+                console.warn('⚠️ [Admin] Could not delete old calendar event:', eid, delResult.error);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('⚠️ [Admin] Error removing old psychologist calendar event:', err.message);
+        }
+      }
+
+      // 1b) Restore the time slot in the old psychologist's availability so it shows again on their frontend
+      if (originalPsychId && effectiveDate && effectiveTime) {
+        try {
+          const restored = await availabilityService.restoreAvailabilitySlot(originalPsychId, effectiveDate, effectiveTime);
+          if (restored) {
+            console.log('✅ [Admin] Restored availability slot for previous psychologist:', effectiveDate, effectiveTime);
+          }
+        } catch (err) {
+          console.warn('⚠️ [Admin] Error restoring availability slot for previous psychologist:', err.message);
+        }
+      }
+
+      // 2) Fetch new psychologist and client (with user email) for new Meet
+      const { data: newPsych } = await supabaseAdmin
+        .from('psychologists')
+        .select('id, first_name, last_name, email, google_calendar_credentials')
+        .eq('id', psychologist_id)
+        .single();
+
+      const clientIdForMeet = client_id || currentSession.client_id;
+      const { data: clientForMeet } = await supabaseAdmin
+        .from('clients')
+        .select(`
+          id,
+          first_name,
+          last_name,
+          child_name,
+          user:users(email)
+        `)
+        .eq('id', clientIdForMeet)
+        .single();
+
+      if (newPsych && clientForMeet) {
+        const clientEmail = Array.isArray(clientForMeet.user)
+          ? clientForMeet.user?.[0]?.email
+          : clientForMeet.user?.email;
+        let clientName = clientForMeet.child_name;
+        if (!clientName || clientName.trim() === '' || String(clientName).toLowerCase() === 'pending') {
+          clientName = `${clientForMeet.first_name || ''} ${clientForMeet.last_name || ''}`.trim() || 'Client';
+        }
+        const endTime = addMinutesToTime(effectiveTime, 50);
+        const meetSessionData = {
+          summary: `Therapy Session - ${clientName} with ${newPsych.first_name}`,
+          description: `Online therapy session between ${clientName} and ${newPsych.first_name} ${newPsych.last_name}`,
+          startDate: effectiveDate,
+          startTime: effectiveTime,
+          endTime,
+          clientEmail: clientEmail || null,
+          psychologistEmail: newPsych.email || null
+        };
+        let userAuth = null;
+        if (newPsych.google_calendar_credentials) {
+          const c = newPsych.google_calendar_credentials;
+          userAuth = {
+            access_token: c.access_token,
+            refresh_token: c.refresh_token,
+            expiry_date: c.expiry_date
+          };
+        }
+        const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
+        if (meetResult.success && meetResult.meetLink) {
+          updateData.google_meet_link = meetResult.meetLink;
+          updateData.google_meet_join_url = meetResult.meetLink;
+          updateData.google_meet_start_url = meetResult.meetLink;
+          updateData.google_calendar_event_id = meetResult.eventId || null;
+          console.log('✅ [Admin] New Meet link created for reassigned psychologist, session:', sessionId);
+        } else {
+          updateData.google_meet_link = null;
+          updateData.google_meet_join_url = null;
+          updateData.google_meet_start_url = null;
+          updateData.google_calendar_event_id = null;
+          console.warn('⚠️ [Admin] New Meet link generation failed for reassigned session:', meetResult?.error);
+        }
+      }
+    }
+
     if (psychologist_id) updateData.psychologist_id = psychologist_id;
     if (client_id) updateData.client_id = client_id; // Keep original client (read-only on frontend)
     if (scheduled_date) updateData.scheduled_date = scheduled_date;
@@ -2626,78 +2742,163 @@ const updateSession = async (req, res) => {
       }
     }
 
-    // If doctor was changed, send notification to new doctor (async, don't wait)
-    if (doctorChanged && updatedSession.psychologist) {
+    // When psychologist was changed: send full regular notifications (email + WhatsApp to client and new psychologist)
+    if (doctorChanged && updatedSession.psychologist && updatedSession.client) {
       (async () => {
         try {
-          const { sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-          
-          // Get meeting link from session
-          const meetLink = updatedSession.google_meet_link || 
-                          updatedSession.google_meet_join_url || 
-                          updatedSession.google_calendar_link || 
-                          null;
+          const emailService = require('../utils/emailService');
+          const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
 
-          // Get client name
-          const clientName = updatedSession.client?.child_name || 
-                            `${updatedSession.client?.first_name || ''} ${updatedSession.client?.last_name || ''}`.trim() ||
-                            'Client';
+          const meetLink = updatedSession.google_meet_link ||
+            updatedSession.google_meet_join_url ||
+            updatedSession.google_calendar_link ||
+            null;
 
-          // Format date and time
-          const formatBookingDateShort = (dateStr) => {
-            if (!dateStr) return '';
-            try {
-              const d = new Date(`${dateStr}T00:00:00+05:30`);
-              return d.toLocaleDateString('en-IN', {
-                weekday: 'short',
-                day: '2-digit',
-                month: 'short',
-                year: 'numeric',
-                timeZone: 'Asia/Kolkata'
-              });
-            } catch {
-              return dateStr;
+          const clientName = updatedSession.client?.child_name ||
+            `${updatedSession.client?.first_name || ''} ${updatedSession.client?.last_name || ''}`.trim() ||
+            'Client';
+          const psychologistName = `${updatedSession.psychologist?.first_name || ''} ${updatedSession.psychologist?.last_name || ''}`.trim() || 'Psychologist';
+
+          // Client email for confirmation email
+          const { data: clientWithUser } = await supabaseAdmin
+            .from('clients')
+            .select('id, user:users(email)')
+            .eq('id', updatedSession.client_id)
+            .single();
+          const clientEmail = clientWithUser?.user && (Array.isArray(clientWithUser.user) ? clientWithUser.user?.[0]?.email : clientWithUser.user?.email);
+
+          // Payment amount and package info for email
+          const { data: paymentRow } = await supabaseAdmin
+            .from('payments')
+            .select('id, amount, package_id')
+            .eq('session_id', sessionId)
+            .maybeSingle();
+          let packageInfo = null;
+          if (paymentRow?.package_id) {
+            const { data: pkg } = await supabaseAdmin.from('packages').select('id, package_type, session_count').eq('id', paymentRow.package_id).single();
+            if (pkg) {
+              const { data: pkgSessions } = await supabaseAdmin
+                .from('sessions')
+                .select('id')
+                .eq('package_id', paymentRow.package_id)
+                .eq('client_id', updatedSession.client_id)
+                .eq('status', 'completed');
+              const completed = (pkgSessions || []).length;
+              packageInfo = {
+                totalSessions: pkg.session_count || 0,
+                completedSessions: completed,
+                remainingSessions: Math.max((pkg.session_count || 0) - completed, 0),
+                packageType: pkg.package_type || 'Package'
+              };
             }
-          };
+          }
 
-          const formatFriendlyTime = (timeStr) => {
-            if (!timeStr) return '';
-            try {
-              const [hours, minutes] = timeStr.split(':');
-              const hour24 = parseInt(hours, 10);
-              const hour12 = hour24 === 0 ? 12 : hour24 > 12 ? hour24 - 12 : hour24;
-              const ampm = hour24 >= 12 ? 'PM' : 'AM';
-              return `${hour12}:${minutes} ${ampm}`;
-            } catch {
-              return timeStr;
+          // 1) Session confirmation emails (client + psychologist + admin)
+          await emailService.sendSessionConfirmation({
+            clientName,
+            psychologistName,
+            clientEmail: clientEmail || 'client@placeholder.com',
+            psychologistEmail: updatedSession.psychologist?.email || 'psychologist@placeholder.com',
+            scheduledDate: updatedSession.scheduled_date,
+            scheduledTime: updatedSession.scheduled_time,
+            sessionDate: updatedSession.scheduled_date,
+            sessionTime: updatedSession.scheduled_time,
+            googleMeetLink: meetLink,
+            meetLink,
+            sessionId: updatedSession.id,
+            price: updatedSession.price ?? paymentRow?.amount ?? 0,
+            amount: updatedSession.price ?? paymentRow?.amount ?? 0,
+            status: updatedSession.status || 'booked',
+            psychologistId: updatedSession.psychologist_id,
+            clientId: updatedSession.client_id,
+            packageInfo,
+            receiptId: null,
+            receiptNumber: null,
+            receiptPdfBuffer: null
+          });
+          console.log('✅ [Admin] Session confirmation emails sent (reassigned session)');
+
+          // 2) WhatsApp to client (booking confirmation)
+          const clientPhone = updatedSession.client?.phone_number || null;
+          if (clientPhone && meetLink) {
+            const childName = updatedSession.client?.child_name &&
+              updatedSession.client.child_name.trim() !== '' &&
+              String(updatedSession.client.child_name).toLowerCase() !== 'pending'
+              ? updatedSession.client.child_name
+              : null;
+            const receiptClientName = `${updatedSession.client?.first_name || ''} ${updatedSession.client?.last_name || ''}`.trim() || null;
+            await sendBookingConfirmation(clientPhone, {
+              childName,
+              date: updatedSession.scheduled_date,
+              time: updatedSession.scheduled_time,
+              meetLink,
+              psychologistName,
+              packageInfo,
+              receiptPdfBuffer: null,
+              receiptNumber: null,
+              clientName: receiptClientName
+            });
+            console.log('✅ [Admin] WhatsApp booking confirmation sent to client');
+          }
+
+          // 3) WhatsApp to new psychologist (same as regular booking)
+          const psychologistPhone = updatedSession.psychologist?.phone || null;
+          if (psychologistPhone && meetLink) {
+            const formatBookingDateShort = (dateStr) => {
+              if (!dateStr) return '';
+              try {
+                const d = new Date(`${dateStr}T00:00:00+05:30`);
+                return d.toLocaleDateString('en-IN', {
+                  weekday: 'short',
+                  day: '2-digit',
+                  month: 'short',
+                  year: 'numeric',
+                  timeZone: 'Asia/Kolkata'
+                });
+              } catch {
+                return dateStr;
+              }
+            };
+            const formatFriendlyTime = (timeStr) => {
+              if (!timeStr) return '';
+              try {
+                const [h, m] = (timeStr || '').split(':');
+                const hours = parseInt(h, 10);
+                const minutes = parseInt(m || '0', 10);
+                const period = hours >= 12 ? 'PM' : 'AM';
+                const displayHours = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
+                return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`;
+              } catch {
+                return timeStr;
+              }
+            };
+            const bullet = '•⁠  ⁠';
+            const formattedDate = formatBookingDateShort(updatedSession.scheduled_date);
+            const formattedTime = formatFriendlyTime(updatedSession.scheduled_time);
+            let packageLine = '';
+            if (packageInfo && packageInfo.totalSessions) {
+              const total = packageInfo.totalSessions || 0;
+              const completed = packageInfo.completedSessions || 0;
+              const remaining = packageInfo.remainingSessions || 0;
+              packageLine = `${bullet}Package: ${completed}/${total} sessions completed, ${remaining} remaining\n`;
             }
-          };
-
-          const bullet = '•⁠  ⁠';
-          const formattedDate = formatBookingDateShort(updatedSession.scheduled_date);
-          const formattedTime = formatFriendlyTime(updatedSession.scheduled_time);
-          const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-
-          const psychologistMessage =
-            `Hey 👋\n\n` +
-            `You have been assigned to a session with Little Care.\n\n` +
-            `${bullet}Client: ${clientName}\n` +
-            `${bullet}Date: ${formattedDate}\n` +
-            `${bullet}Time: ${formattedTime} (IST)\n\n` +
-            (meetLink ? `Join link:\n${meetLink}\n\n` : '') +
-            `Please be ready 5 mins early.\n\n` +
-            `For help: ${supportPhone}\n\n`;
-
-          const psychologistPhone = updatedSession.psychologist?.phone;
-          if (psychologistPhone) {
+            const psychologistMessage =
+              `Hey 👋\n\n` +
+              `New session booked with Little Care.\n\n` +
+              `${bullet}Client: ${clientName}\n` +
+              packageLine +
+              `${bullet}Date: ${formattedDate}\n` +
+              `${bullet}Time: ${formattedTime} (IST)\n\n` +
+              `Join link:\n${meetLink}\n\n` +
+              `Please be ready 5 mins early.\n\n` +
+              `For help: +91 95390 07766\n\n` +
+              `— Little Care 💜`;
             await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
-            console.log('✅ Notification sent to new psychologist:', updatedSession.psychologist.email);
-          } else {
-            console.log('ℹ️ No phone number found for psychologist, skipping WhatsApp notification');
+            console.log('✅ [Admin] WhatsApp notification sent to new psychologist');
           }
         } catch (notifError) {
-          console.error('❌ Error sending notification to new psychologist:', notifError);
-          // Don't fail the request if notification fails
+          console.error('❌ [Admin] Error sending reassignment notifications:', notifError);
+          // Don't fail the request if notifications fail
         }
       })();
     }

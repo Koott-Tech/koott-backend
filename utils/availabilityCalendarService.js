@@ -725,6 +725,74 @@ class AvailabilityCalendarService {
   }
 
   /**
+   * Restore a time slot to psychologist's availability (e.g. when a session is reassigned to another psychologist).
+   * Adds the slot back to the availability record for that date so the slot shows as available again.
+   */
+  async restoreAvailabilitySlot(psychologistId, date, time) {
+    try {
+      console.log(`🔄 Restoring availability slot for psychologist ${psychologistId} on ${date} at ${time}`);
+
+      const { data: availabilityRecords, error: availabilityError } = await supabaseAdmin
+        .from('availability')
+        .select('*')
+        .eq('psychologist_id', psychologistId)
+        .eq('date', date)
+        .limit(1);
+
+      if (availabilityError) {
+        console.error('Error fetching availability for restore:', availabilityError);
+        return false;
+      }
+
+      const availabilityData = availabilityRecords && availabilityRecords.length > 0 ? availabilityRecords[0] : null;
+      if (!availabilityData) {
+        console.log('No availability record found for this date - nothing to restore');
+        return false;
+      }
+
+      const currentTimeSlots = availabilityData.time_slots || [];
+      const timeStr = typeof time === 'string' ? time.trim() : String(time).trim();
+      const timeNorm = timeStr.substring(0, 5); // "18:00" from "18:00:00"
+
+      const slotAlreadyPresent = currentTimeSlots.some(slot => {
+        const s = (typeof slot === 'string' ? slot : String(slot)).trim();
+        const sNorm = s.substring(0, 5);
+        if (sNorm === timeNorm) return true;
+        const [h, m] = timeNorm.split(':').map(Number);
+        const [sh, sm] = s.includes(':') ? s.split(':').map(Number) : [null, null];
+        if (sh != null && sm != null && sh === h && sm === m) return true;
+        return false;
+      });
+
+      if (slotAlreadyPresent) {
+        console.log('Slot already in availability, no change needed');
+        return true;
+      }
+
+      const updatedTimeSlots = [...currentTimeSlots, timeStr].sort();
+      const { error: updateError } = await supabaseAdmin
+        .from('availability')
+        .update({
+          time_slots: updatedTimeSlots,
+          is_available: true,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', availabilityData.id);
+
+      if (updateError) {
+        console.error('Error restoring availability slot:', updateError);
+        return false;
+      }
+
+      console.log(`✅ Availability slot restored for psychologist ${psychologistId} on ${date} at ${time}`);
+      return true;
+    } catch (error) {
+      console.error('Error restoring availability slot:', error);
+      return false;
+    }
+  }
+
+  /**
    * Get psychologist's working hours and preferences
    */
   async getPsychologistWorkingHours(psychologistId) {
