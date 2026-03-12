@@ -2,6 +2,9 @@ const https = require('https');
 const { URL } = require('url');
 const { supabaseAdmin } = require('../config/supabase');
 
+// Always use production site in WhatsApp links (never localhost)
+const PRODUCTION_SITE_URL = 'https://www.little.care';
+
 /**
  * WhatsApp messaging via WASenderApi
  * Requires env vars:
@@ -323,14 +326,7 @@ async function sendBookingConfirmation(toPhoneE164, details) {
   // NOTE: childName is intentionally not used in this WhatsApp template (per request).
   void childName;
 
-  // Receipt link requirement: always send users to the production receipts page
-  // (no expiring signed links in WhatsApp).
-  const frontendUrl = (
-    process.env.FRONTEND_URL ||
-    process.env.RAZORPAY_SUCCESS_URL?.replace(/\/payment-success.*$/, '') ||
-    'https://www.little.care'
-  ).replace(/\/$/, '');
-  const receiptLink = `${frontendUrl}/profile/receipts`;
+  const receiptLink = `${PRODUCTION_SITE_URL}/profile/receipts`;
 
   // Keep these for backwards compatibility (not used in this template now)
   void receiptUrl;
@@ -575,8 +571,8 @@ async function sendSessionCompletionNotification(toPhoneE164, details) {
     ? psychologistName.trim() 
     : 'our specialist';
 
-  const bookingLinkText = bookingLink || 'https://www.little.care/psychologists';
-  const feedbackLinkText = feedbackLink || 'https://www.little.care/profile/reports';
+  const bookingLinkText = bookingLink || `${PRODUCTION_SITE_URL}/psychologists`;
+  const feedbackLinkText = feedbackLink || `${PRODUCTION_SITE_URL}/profile/reports`;
 
   // Check if this is a package session and use appropriate template
   if (packageInfo && packageInfo.totalSessions && packageInfo.completedSessions !== undefined) {

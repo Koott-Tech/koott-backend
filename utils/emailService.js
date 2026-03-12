@@ -1,5 +1,8 @@
 const nodemailer = require('nodemailer');
 
+// Always use production site in emails/links (never localhost)
+const PRODUCTION_SITE_URL = 'https://www.little.care';
+
 // Shared helper: Format time string (HH:MM:SS or HH:MM) to 12-hour format (h:mm AM/PM IST)
 // Time is already stored in IST format, so no timezone conversion needed
 function formatTimeFromString(timeStr) {
@@ -360,9 +363,8 @@ class EmailService {
     } = emailData;
 
     // Get logo URL - use favicon for email compatibility
-    // Use www.little.care as the base URL for logo (publicly accessible)
-    const frontendUrl = process.env.FRONTEND_URL || process.env.RAZORPAY_SUCCESS_URL?.replace(/\/payment-success.*$/, '') || 'https://www.little.care';
-    const logoUrl = `https://www.little.care/favicon.png`;
+    const frontendUrl = PRODUCTION_SITE_URL;
+    const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
     
     // Contact information
     const contactEmail = 'hey@little.care';
@@ -1431,8 +1433,8 @@ class EmailService {
     const contactPhone = '+91-9539007766';
 
     // Get logo URL - use favicon for email compatibility
-    const frontendUrl = process.env.FRONTEND_URL || process.env.RAZORPAY_SUCCESS_URL?.replace(/\/payment-success.*$/, '') || 'https://www.little.care';
-    const logoUrl = `https://www.little.care/favicon.png`;
+    const frontendUrl = PRODUCTION_SITE_URL;
+    const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
 
     // Extract first name from name
     const firstName = name ? name.split(' ')[0] : 'there';
@@ -2203,7 +2205,7 @@ The Little Care Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0; text-align: center;">
-                              <a href="${process.env.FRONTEND_URL || 'https://littlecare.vercel.app'}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
                                 Book New Session
                               </a>
                             </td>
@@ -2358,7 +2360,7 @@ The Little Care Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0; text-align: center;">
-                              <a href="${process.env.FRONTEND_URL || 'https://littlecare.vercel.app'}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
                                 Reschedule Session
                               </a>
                             </td>
@@ -2494,7 +2496,7 @@ The Little Care Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0; text-align: center;">
-                              <a href="${process.env.FRONTEND_URL || 'https://littlecare.vercel.app'}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
                                 View Session Summary & Report
                               </a>
                             </td>

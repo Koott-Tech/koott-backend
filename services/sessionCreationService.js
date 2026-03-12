@@ -441,15 +441,20 @@ class MeetLinkCreationQueue {
       }
     }
     const psychologistName = `${psychologistDetails.first_name} ${psychologistDetails.last_name}`;
-    
+
+    // Normalize client email: Supabase can return user relation as object or array
+    const clientEmail = Array.isArray(clientDetails.user)
+      ? clientDetails.user?.[0]?.email
+      : clientDetails.user?.email;
+
     const meetSessionData = {
       summary: `Therapy Session - ${clientName} with ${psychologistDetails.first_name}`,
       description: `Online therapy session between ${clientName} and ${psychologistName}`,
       startDate: slotLock.scheduled_date,
       startTime: slotLock.scheduled_time,
       endTime: endTime,
-      clientEmail: clientDetails.user?.email,
-      psychologistEmail: psychologistDetails.email
+      clientEmail: clientEmail || null,
+      psychologistEmail: psychologistDetails.email || null
     };
 
     // Get psychologist OAuth tokens if available
@@ -561,7 +566,7 @@ class MeetLinkCreationQueue {
       const emailResult = await emailService.sendSessionConfirmation({
         clientName: emailClientName,
         psychologistName: psychologistName,
-        clientEmail: clientDetails.user?.email,
+        clientEmail: clientEmail || clientDetails.user?.email,
         psychologistEmail: psychologistDetails.email,
         scheduledDate: slotLock.scheduled_date,
         scheduledTime: slotLock.scheduled_time,

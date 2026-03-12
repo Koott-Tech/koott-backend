@@ -2002,26 +2002,12 @@ const completeSession = async (req, res) => {
           const psychologistName = isFreeAssessment 
             ? 'our specialist'
             : `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim() || 'our specialist';
-          // Get frontend URL - never use localhost in production
-          let frontendUrl = process.env.FRONTEND_URL;
-          if (!frontendUrl && process.env.RAZORPAY_SUCCESS_URL) {
-            const extractedUrl = process.env.RAZORPAY_SUCCESS_URL.replace(/\/payment-success.*$/, '');
-            // Only use extracted URL if it's not localhost
-            if (!extractedUrl.includes('localhost') && !extractedUrl.includes('127.0.0.1')) {
-              frontendUrl = extractedUrl;
-            }
-          }
-          // Fallback to production URL
-          if (!frontendUrl || frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1')) {
-            frontendUrl = 'https://www.little.care';
-          }
-          frontendUrl = frontendUrl.replace(/\/$/, '');
-          const bookingLink = `${frontendUrl}/psychologists`;
-          // For free assessments, use sessions page (they don't have reports)
-          // For regular sessions (including package sessions), use reports page
+          // Always use production URL in WhatsApp/email links (never localhost)
+          const PRODUCTION_SITE_URL = 'https://www.little.care';
+          const bookingLink = `${PRODUCTION_SITE_URL}/psychologists`;
           const feedbackLink = isFreeAssessment 
-            ? `${frontendUrl}/profile/sessions?tab=completed`
-            : `${frontendUrl}/profile/reports`;
+            ? `${PRODUCTION_SITE_URL}/profile/sessions?tab=completed`
+            : `${PRODUCTION_SITE_URL}/profile/reports`;
 
           const sessionTypeLabel = session.package_id ? 'package session' : (isFreeAssessment ? 'free assessment' : 'therapy session');
           console.log(`📱 Attempting to send WhatsApp completion for ${sessionTypeLabel} (Session ID: ${sessionId}) to client: ${clientPhone.substring(0, 3)}***`);
