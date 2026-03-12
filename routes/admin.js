@@ -5,7 +5,6 @@ const assessmentBookingController = require('../controllers/assessmentBookingCon
 const sessionController = require('../controllers/sessionController');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const { createRateLimiters } = require('../middleware/security');
-const { requireRequestSignature } = require('../middleware/requestSigning');
 const multer = require('multer');
 const path = require('path');
 const { supabaseAdmin } = require('../config/supabase');
@@ -41,9 +40,8 @@ router.use(requireAdmin);
 // User management
 router.get('/users', adminController.getAllUsers);
 router.get('/users/:userId', adminController.getUserDetails);
-// Critical operations require request signing
-router.put('/users/:userId/role', requireRequestSignature, adminController.updateUserRole);
-router.put('/users/:userId/deactivate', requireRequestSignature, adminController.deactivateUser);
+router.put('/users/:userId/role', adminController.updateUserRole);
+router.put('/users/:userId/deactivate', adminController.deactivateUser);
 
 // Platform statistics
 router.get('/stats/platform', adminController.getPlatformStats);
@@ -66,9 +64,9 @@ router.delete('/psychologists/:psychologistId', adminController.deletePsychologi
 router.post('/availability/update-all', adminController.updateAllPsychologistsAvailability);
 
 // User management
-router.post('/users', requireRequestSignature, adminController.createUser);
+router.post('/users', adminController.createUser);
 router.put('/users/:userId', adminController.updateUser);
-router.delete('/users/:userId', requireRequestSignature, adminController.deleteUser);
+router.delete('/users/:userId', adminController.deleteUser);
 
 // Session management
 router.get('/sessions/all', sessionController.getAllSessions);
