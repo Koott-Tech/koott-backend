@@ -442,24 +442,29 @@ const getAllSessions = async (req, res) => {
             return acc;
           }, {});
 
-          // Count completed sessions per (client_id, package_id) so each client's package progress is correct
+          // Fetch ALL sessions per package to determine session numbers and completed counts
           const { data: allPackageSessions, error: allPackageSessionsError } = await supabaseAdmin
             .from('sessions')
-            .select('id, package_id, client_id, status')
+            .select('id, package_id, client_id, status, created_at')
             .in('package_id', packageIds)
-            .eq('status', 'completed');
+            .order('created_at', { ascending: true });
 
           const completedCountsByClientPackage = {};
+          const sessionNumberMap = {};
           if (!allPackageSessionsError && allPackageSessions) {
+            const counterByClientPackage = {};
             allPackageSessions.forEach(s => {
               if (s.package_id && s.client_id) {
                 const key = `${s.client_id}_${s.package_id}`;
-                completedCountsByClientPackage[key] = (completedCountsByClientPackage[key] || 0) + 1;
+                if (s.status === 'completed') {
+                  completedCountsByClientPackage[key] = (completedCountsByClientPackage[key] || 0) + 1;
+                }
+                counterByClientPackage[key] = (counterByClientPackage[key] || 0) + 1;
+                sessionNumberMap[s.id] = counterByClientPackage[key];
               }
             });
           }
 
-          // Attach package data to each session with correct completed_sessions for this client's package
           sessions.forEach(session => {
             if (session.package_id && packagesMap[session.package_id]) {
               const pkg = { ...packagesMap[session.package_id] };
@@ -467,6 +472,7 @@ const getAllSessions = async (req, res) => {
               const key = `${session.client_id}_${session.package_id}`;
               pkg.completed_sessions = completedCountsByClientPackage[key] || 0;
               pkg.total_sessions = totalSessions;
+              pkg.session_number = sessionNumberMap[session.id] || null;
               session.package = pkg;
             }
           });

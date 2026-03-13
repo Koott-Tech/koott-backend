@@ -178,7 +178,7 @@ const getDashboard = async (req, res) => {
     try {
       const { data: sessions, error: sessionsError } = await supabaseAdmin
         .from('sessions')
-        .select('id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type')
+        .select('id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, package_id')
         .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled'])
         .neq('session_type', 'free_assessment');
 
@@ -488,7 +488,7 @@ const getDashboard = async (req, res) => {
       };
     }
 
-    // Get top 5 doctors by revenue (filtered by date range)
+    // Get top 3 doctors by revenue (filtered by date range)
     const doctorRevenue = {};
     filteredSessionsForDisplay.filter(shouldIncludeInRevenue).forEach(s => {
       if (s.psychologist_id) {
@@ -502,18 +502,18 @@ const getDashboard = async (req, res) => {
 
     const topDoctors = Object.entries(doctorRevenue)
       .sort((a, b) => b[1].revenue - a[1].revenue)
-      .slice(0, 5)
+      .slice(0, 3)
       .map(([id, data]) => ({ psychologist_id: id, total_commission: data.revenue, session_count: data.session_count }));
 
-    // Get recent sessions (filtered by date range, sorted by scheduled_date descending)
+    // Get recent bookings: latest 3 by created_at (when session was booked)
     const recentSessionsFiltered = filteredSessionsForDisplay
       .filter(shouldIncludeInRevenue)
       .sort((a, b) => {
-        const dateA = new Date(a.scheduled_date || 0);
-        const dateB = new Date(b.scheduled_date || 0);
-        return dateB - dateA; // Most recent first
+        const createdA = new Date(a.created_at || 0).getTime();
+        const createdB = new Date(b.created_at || 0).getTime();
+        return createdB - createdA; // Latest booked first
       })
-      .slice(0, 10);
+      .slice(0, 3);
 
     // Get all unique psychologist IDs for both top doctors and recent sessions
     const allPsychologistIds = [...new Set([
@@ -541,6 +541,33 @@ const getDashboard = async (req, res) => {
         .select('id, first_name, last_name')
         .in('id', allClientIds);
       allClients = clients || [];
+    }
+
+    // Package progress for recent bookings: total from packages, session number per session
+    const recentPackageIds = [...new Set(recentSessionsFiltered.map(s => s?.package_id).filter(Boolean))];
+    let packageTotalById = {};
+    let sessionNumberMap = {}; // key: session.id -> position number in package
+    if (recentPackageIds.length > 0) {
+      const { data: packagesList } = await supabaseAdmin
+        .from('packages')
+        .select('id, session_count')
+        .in('id', recentPackageIds);
+      (packagesList || []).forEach(p => {
+        packageTotalById[p.id] = p.session_count ?? 0;
+      });
+      const { data: allPkgSessions } = await supabaseAdmin
+        .from('sessions')
+        .select('id, client_id, package_id, created_at')
+        .in('package_id', recentPackageIds)
+        .order('created_at', { ascending: true });
+      const counterByClientPackage = {};
+      (allPkgSessions || []).forEach(s => {
+        if (s.client_id && s.package_id) {
+          const key = `${s.client_id}:${s.package_id}`;
+          counterByClientPackage[key] = (counterByClientPackage[key] || 0) + 1;
+          sessionNumberMap[s.id] = counterByClientPackage[key];
+        }
+      });
     }
 
     // Get doctor names for top doctors
@@ -1446,12 +1473,20 @@ const getDashboard = async (req, res) => {
         if (!s) return null;
         const psych = allPsychologists.find(p => p.id === s.psychologist_id);
         const client = allClients.find(c => c.id === s.client_id);
+        let package_progress = null;
+        if (s.package_id && packageTotalById[s.package_id] != null) {
+          const total = packageTotalById[s.package_id];
+          const num = sessionNumberMap[s.id] ?? 0;
+          package_progress = `${num}/${total}`;
+        }
         return {
           id: s.id,
           session_date: s.scheduled_date,
           amount: s.price,
           status: s.status,
           session_type: s.session_type || 'individual',
+          package_id: s.package_id || null,
+          package_progress,
           psychologist: psych ? {
             id: psych.id,
             first_name: psych.first_name,
@@ -2892,7 +2927,7 @@ const getCommissions = async (req, res) => {
       );
     }
 
-    const { psychologistId, month, year } = req.query;
+    const { psychologistId, month, year, dateFrom, dateTo } = req.query;
 
     // Get ALL psychologists (not just those with sessions)
     // Filter out assessment specialist
@@ -2964,7 +2999,11 @@ const getCommissions = async (req, res) => {
       .neq('session_type', 'free_assessment')
       .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled']); // Include all paid sessions
 
-    if (month && year) {
+    if (dateFrom && dateTo) {
+      allSessionsQuery = allSessionsQuery
+        .gte('scheduled_date', dateFrom)
+        .lte('scheduled_date', dateTo);
+    } else if (month && year) {
       const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
       const endDate = `${year}-${String(month).padStart(2, '0')}-31`;
       allSessionsQuery = allSessionsQuery
@@ -5138,7 +5177,8 @@ const getFreeAssessments = async (req, res) => {
         psychologist_id,
         client_id,
         user_id,
-        session_id
+        session_id,
+        created_at
       `, { count: 'exact' });
 
     // Apply filters
@@ -5228,6 +5268,7 @@ const getFreeAssessments = async (req, res) => {
         scheduled_date: assessment.scheduled_date,
         scheduled_time: assessment.scheduled_time,
         status: assessment.status,
+        created_at: assessment.created_at || null,
         psychologist: psychologist ? {
           id: psychologist.id,
           first_name: psychologist.first_name,

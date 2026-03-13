@@ -2398,6 +2398,18 @@ const deleteUser = async (req, res) => {
 
       if (sessions && sessions.length > 0) {
         const sessionIds = sessions.map(s => s.id);
+
+        // Delete commission_history linked to these sessions
+        const { error: commDelErr } = await supabaseAdmin
+          .from('commission_history')
+          .delete()
+          .in('session_id', sessionIds);
+        if (commDelErr) {
+          console.error('Delete client cascade: delete commission_history error:', commDelErr);
+          throw new Error(`Failed to delete commission history: ${commDelErr.message}`);
+        }
+        console.log(`   ✅ Deleted commission history for ${sessions.length} session(s)`);
+
         const { error: recDelErr } = await supabaseAdmin
           .from('receipts')
           .delete()
@@ -2408,7 +2420,7 @@ const deleteUser = async (req, res) => {
         }
         console.log(`   ✅ Deleted receipts for ${sessions.length} session(s)`);
 
-        // 4. Delete sessions (must happen before deleting payments due to FK constraint)
+        // Delete sessions (must happen before deleting payments due to FK constraint)
         const { error: sessDelErr } = await supabaseAdmin
           .from('sessions')
           .delete()
@@ -2419,6 +2431,17 @@ const deleteUser = async (req, res) => {
         }
         console.log(`   ✅ Deleted sessions`);
       }
+
+      // Delete slot locks for this client
+      const { error: slotDelErr } = await supabaseAdmin
+        .from('slot_locks')
+        .delete()
+        .eq('client_id', clientId);
+      if (slotDelErr) {
+        console.error('Delete client cascade: delete slot_locks error:', slotDelErr);
+        throw new Error(`Failed to delete slot locks: ${slotDelErr.message}`);
+      }
+      console.log(`   ✅ Deleted slot locks`);
 
       // 5. Delete payments (after sessions so FK sessions_payment_id_fkey is not violated)
       const { error: payDelErr } = await supabaseAdmin
@@ -2496,6 +2519,19 @@ const deleteUser = async (req, res) => {
         }
       }
       console.log(`   ✅ Deleted client profile`);
+    }
+
+    // Delete notifications for this user (uses user_id = users.id)
+    if (user.role === 'client') {
+      const { error: notifDelErr } = await supabaseAdmin
+        .from('notifications')
+        .delete()
+        .eq('user_id', userId);
+      if (notifDelErr) {
+        console.error('Delete client cascade: delete notifications error:', notifDelErr);
+        throw new Error(`Failed to delete notifications: ${notifDelErr.message}`);
+      }
+      console.log(`   ✅ Deleted notifications`);
     }
 
     // Delete user account

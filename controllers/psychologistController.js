@@ -295,6 +295,7 @@ const getSessions = async (req, res) => {
                 package_type: info.package_type,
                 session_count: info.session_count,
                 session_index: info.session_index,
+                session_number: info.session_index,
                 total_sessions: info.total_sessions
               };
             }

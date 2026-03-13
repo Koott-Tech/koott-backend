@@ -691,44 +691,41 @@ const getSessions = async (req, res) => {
       // Fetch package information for sessions that have package_id (optimized batch query)
       const packageIds = [...new Set((sessions || []).map(s => s.package_id).filter(Boolean))];
       let packagesMap = {};
+      let sessionNumberMap = {};
       
       if (packageIds.length > 0) {
           try {
-          // Batch fetch all packages at once
-          // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
           const { data: packagesData, error: packagesError } = await supabaseAdmin
               .from('packages')
               .select('id, package_type, price, description, session_count')
             .in('id', packageIds);
             
           if (!packagesError && packagesData) {
-            // Create a map for quick lookup
             packagesMap = packagesData.reduce((acc, pkg) => {
               acc[pkg.id] = pkg;
               return acc;
             }, {});
             
-            // Batch count completed sessions for all packages at once
-            // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
             const { data: allPackageSessions, error: sessionsError } = await supabaseAdmin
                 .from('sessions')
-              .select('package_id, status')
+              .select('id, package_id, status, created_at')
               .in('package_id', packageIds)
-                .eq('client_id', clientId);
+                .eq('client_id', clientId)
+              .order('created_at', { ascending: true });
               
             if (!sessionsError && allPackageSessions) {
-              // Count ONLY completed sessions per package (exclude booked/scheduled/etc)
-              // This ensures the count only reflects truly completed sessions, not booked ones
-              const completedCounts = allPackageSessions.reduce((acc, s) => {
-                // STRICTLY only count sessions with status === 'completed'
-                // Do not count 'booked', 'scheduled', 'rescheduled', or any other status
-                if (s.status === 'completed' && s.package_id) {
-                  acc[s.package_id] = (acc[s.package_id] || 0) + 1;
+              const completedCounts = {};
+              const counterByPackage = {};
+              allPackageSessions.forEach(s => {
+                if (s.package_id) {
+                  if (s.status === 'completed') {
+                    completedCounts[s.package_id] = (completedCounts[s.package_id] || 0) + 1;
+                  }
+                  counterByPackage[s.package_id] = (counterByPackage[s.package_id] || 0) + 1;
+                  sessionNumberMap[s.id] = counterByPackage[s.package_id];
                 }
-                return acc;
-              }, {});
+              });
               
-              // Add progress info to each package
               Object.keys(packagesMap).forEach(pkgId => {
                 const pkg = packagesMap[pkgId];
                 const totalSessions = pkg.session_count || 0;
@@ -736,15 +733,9 @@ const getSessions = async (req, res) => {
                 pkg.completed_sessions = completedSessions;
                 pkg.total_sessions = totalSessions;
                 pkg.remaining_sessions = Math.max(totalSessions - completedSessions, 0);
-                
-                // Debug log for package progress
-                if (process.env.NODE_ENV !== 'production') {
-                  console.log(`📦 Package ${pkgId} progress: ${completedSessions}/${totalSessions} completed, ${pkg.remaining_sessions} remaining`);
-                }
               });
             } else if (sessionsError) {
               console.error('❌ Error fetching package sessions for progress:', sessionsError);
-              // Set default values if fetch fails
               Object.keys(packagesMap).forEach(pkgId => {
                 const pkg = packagesMap[pkgId];
                 const totalSessions = pkg.session_count || 0;
@@ -759,10 +750,13 @@ const getSessions = async (req, res) => {
         }
       }
       
-      // Attach package data to sessions
+      // Attach package data + session_number to sessions
       const sessionsWithPackages = (sessions || []).map(session => {
         if (session.package_id && packagesMap[session.package_id]) {
-          session.package = packagesMap[session.package_id];
+          session.package = { ...packagesMap[session.package_id] };
+          if (sessionNumberMap[session.id]) {
+            session.package.session_number = sessionNumberMap[session.id];
+          }
         }
         return session;
       });
@@ -3119,50 +3113,32 @@ const getSession = async (req, res) => {
             session_count: packageData.session_count
           });
           
-          // Count completed sessions for this package
-          // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
+          // Fetch all sessions for this package to determine session_number
           const { data: packageSessions, error: sessionsError } = await supabaseAdmin
             .from('sessions')
-            .select('id, status')
+            .select('id, status, created_at')
             .eq('package_id', session.package_id)
-            .eq('client_id', clientId);
+            .eq('client_id', clientId)
+            .order('created_at', { ascending: true });
           
           if (!sessionsError && packageSessions) {
             const totalSessions = packageData.session_count || 0;
-            const completedSessions = packageSessions.filter(
-              s => s.status === 'completed'
-            ).length;
+            const completedSessions = packageSessions.filter(s => s.status === 'completed').length;
             
-            // Always set total_sessions from session_count, even if 0 (shouldn't happen but handle it)
+            let sessionNumber = null;
+            packageSessions.forEach((s, i) => {
+              if (s.id === session.id) sessionNumber = i + 1;
+            });
+            
             session.package.completed_sessions = completedSessions;
             session.package.total_sessions = totalSessions;
             session.package.remaining_sessions = Math.max(totalSessions - completedSessions, 0);
-            
-            if (totalSessions > 0) {
-              console.log('✅ Package progress calculated in getSession:', {
-                package_id: session.package_id,
-                total_sessions: totalSessions,
-                completed_sessions: completedSessions,
-                remaining_sessions: session.package.remaining_sessions
-              });
-            } else {
-              console.warn('⚠️ Package session_count is 0 or missing:', {
-                package_id: session.package_id,
-                session_count: packageData.session_count,
-                total_sessions_set: session.package.total_sessions
-              });
-            }
+            session.package.session_number = sessionNumber;
           } else {
-            // Even if we can't fetch package sessions, set total_sessions from session_count
             const totalSessions = packageData.session_count || 0;
             session.package.total_sessions = totalSessions;
             session.package.completed_sessions = 0;
             session.package.remaining_sessions = totalSessions;
-            
-            console.error('❌ Error fetching package sessions, but set total_sessions from session_count:', {
-              sessionsError: sessionsError,
-              total_sessions: totalSessions
-            });
           }
         } else {
           console.error('❌ Error fetching package:', packageError);

@@ -1556,7 +1556,7 @@ const cancelFreeAssessment = async (req, res) => {
 // Admin: List free assessments with optional status filter
 const adminListFreeAssessments = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, dateFrom, dateTo } = req.query;
 
     let query = supabaseAdmin
       .from('free_assessments')
@@ -1567,6 +1567,7 @@ const adminListFreeAssessments = async (req, res) => {
         scheduled_time,
         status,
         session_id,
+        created_at,
         client:clients(id, first_name, last_name, email),
         psychologist:psychologists(id, first_name, last_name, email),
         session:sessions(google_meet_link, feedback, rating)
@@ -1575,16 +1576,20 @@ const adminListFreeAssessments = async (req, res) => {
       .order('scheduled_time', { ascending: true });
 
     if (status) {
-      // If status filter is provided, use it
       if (status === 'all') {
-        // 'all' means show everything including completed
-        // Don't add any status filter
+        // show everything including completed
       } else {
         query = query.eq('status', status);
       }
     } else {
-      // Default: exclude completed assessments when no filter is provided
       query = query.neq('status', 'completed');
+    }
+
+    if (dateFrom) {
+      query = query.gte('scheduled_date', dateFrom);
+    }
+    if (dateTo) {
+      query = query.lte('scheduled_date', dateTo);
     }
 
     const { data, error } = await query;
@@ -1624,6 +1629,7 @@ const adminListFreeAssessments = async (req, res) => {
         scheduledTime: a.scheduled_time,
         status: a.status,
         session_id: a.session_id || null,
+        created_at: a.created_at || null,
         client: a.client || null,
         psychologist: a.psychologist || null,
         meetLink,

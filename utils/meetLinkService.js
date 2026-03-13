@@ -373,6 +373,15 @@ class MeetLinkService {
       // Create Meet link using Calendar API with conference data
       const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
+      // Determine the calendar owner's email so we can exclude them from attendees.
+      // When we create the event on calendarId:'primary' with the psychologist's OAuth,
+      // the psychologist is already the organizer — adding them as attendee causes Google
+      // to send a duplicate invitation and create a second event on their calendar.
+      let calendarOwnerEmail = null;
+      if (userAuth?.access_token) {
+        calendarOwnerEmail = sessionData.psychologistEmail || null;
+      }
+
       // Build attendees array - OAuth can use attendees
       const attendees = [];
       
@@ -380,13 +389,14 @@ class MeetLinkService {
         attendees.push({ email: sessionData.clientEmail });
       }
       
-      if (sessionData.psychologistEmail) {
+      // Skip psychologist email — they are the calendar organizer (event on their primary calendar)
+      if (sessionData.psychologistEmail && sessionData.psychologistEmail !== calendarOwnerEmail) {
         attendees.push({ email: sessionData.psychologistEmail });
       }
       
       if (Array.isArray(sessionData.attendees) && sessionData.attendees.length > 0) {
         sessionData.attendees.forEach(email => {
-          if (email && !attendees.find(a => a.email === email)) {
+          if (email && email !== calendarOwnerEmail && !attendees.find(a => a.email === email)) {
             attendees.push({ email });
           }
         });
