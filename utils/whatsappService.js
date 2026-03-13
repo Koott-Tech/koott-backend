@@ -107,10 +107,17 @@ function formatPhoneNumber(phoneE164) {
  * @param {string} message - Message text to send
  * @returns {Promise<Object>} - { success: boolean, data?: Object, error?: Object, skipped?: boolean, reason?: string }
  */
+// Sanitize header value: HTTP headers must not contain newlines, carriage returns, or other control chars
+function sanitizeHeaderValue(value) {
+  if (value == null || typeof value !== 'string') return '';
+  return value.replace(/[\r\n\t]/g, '').trim();
+}
+
 async function sendWhatsAppText(toPhoneE164, message) {
   return new Promise((resolve) => {
     try {
-      const apiKey = process.env.WASENDER_API_KEY;
+      const rawKey = process.env.WASENDER_API_KEY;
+      const apiKey = rawKey ? sanitizeHeaderValue(rawKey) : '';
 
       if (!apiKey) {
         console.warn('WASenderApi env (WASENDER_API_KEY) not configured; skipping send.');
