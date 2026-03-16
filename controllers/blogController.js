@@ -198,7 +198,13 @@ const createBlog = async (req, res) => {
       let counter = 1;
       let newSlug = `${slug}-${counter}`;
       
-      while (await supabaseAdmin.from('blogs').select('id').eq('slug', newSlug).single()) {
+      while (true) {
+        const { data: slugCheck } = await supabaseAdmin
+          .from('blogs')
+          .select('id')
+          .eq('slug', newSlug)
+          .maybeSingle();
+        if (!slugCheck) break;
         counter++;
         newSlug = `${slug}-${counter}`;
       }

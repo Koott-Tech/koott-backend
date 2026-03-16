@@ -82,6 +82,9 @@ router.get('/psychologists/:psychologistId/availability', adminController.getPsy
 // Manual booking (admin only - for edge cases)
 router.post('/bookings/manual', adminController.createManualBooking);
 
+// Record-only booking (admin only): add session record only, no Meet creation, no notifications
+router.post('/bookings/record-only', adminController.createRecordOnlyBooking);
+
 // Book next package session (admin only - for clients who prefer admin to book remaining sessions)
 router.post('/bookings/book-package-next-session', adminController.bookPackageNextSession);
 

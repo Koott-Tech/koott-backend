@@ -784,6 +784,276 @@ const createManualBooking = async (req, res) => {
   }
 };
 
+// Create record-only booking (admin only): add session record only, no Meet creation, no notifications.
+// Use when the meeting was created elsewhere (e.g. another email). Optional meet_link can be pasted.
+const createRecordOnlyBooking = async (req, res) => {
+  let paymentRecord = null;
+  let session = null;
+
+  try {
+    const {
+      client_id,
+      psychologist_id,
+      package_id,
+      scheduled_date,
+      scheduled_time,
+      amount,
+      payment_received_date,
+      payment_method,
+      notes,
+      meet_link
+    } = req.body;
+
+    if (!client_id || !psychologist_id || !scheduled_date || !scheduled_time || !amount) {
+      return res.status(400).json(
+        errorResponse('Missing required fields: client_id, psychologist_id, scheduled_date, scheduled_time, amount')
+      );
+    }
+
+    const amountNum = Number(amount);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      return res.status(400).json(
+        errorResponse('Invalid amount: must be a positive number')
+      );
+    }
+
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if (!datePattern.test(scheduled_date)) {
+      return res.status(400).json(
+        errorResponse('Invalid scheduled_date format. Expected YYYY-MM-DD')
+      );
+    }
+    const [y, m, d] = scheduled_date.split('-').map(Number);
+    const dateObj = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+    if (isNaN(dateObj.getTime()) || dateObj.getUTCFullYear() !== y || dateObj.getUTCMonth() !== m - 1 || dateObj.getUTCDate() !== d) {
+      return res.status(400).json(
+        errorResponse('Invalid scheduled_date: not a valid date')
+      );
+    }
+
+    const timePart = String(scheduled_time).trim().split(':').slice(0, 2).join(':');
+    const timePattern = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
+    if (!timePattern.test(timePart)) {
+      return res.status(400).json(
+        errorResponse('Invalid scheduled_time format. Expected HH:MM in 24-hour format')
+      );
+    }
+    const scheduledTimeNormalized = timePart;
+
+    const paymentReceivedDate = payment_received_date || new Date().toISOString().slice(0, 10);
+
+    // Resolve client (by id or user_id)
+    const clientIdForQuery = isNaN(client_id) ? client_id : parseInt(client_id);
+    let { data: client, error: clientError } = await supabaseAdmin
+      .from('clients')
+      .select('*, user:users(email)')
+      .eq('id', clientIdForQuery)
+      .single();
+
+    if (clientError || !client) {
+      const { data: clientByUserId } = await supabaseAdmin
+        .from('clients')
+        .select('*, user:users(email)')
+        .eq('user_id', clientIdForQuery)
+        .single();
+      if (clientByUserId) client = clientByUserId;
+      else {
+        return res.status(404).json(
+          errorResponse(`Client not found with id or user_id: ${client_id}`)
+        );
+      }
+    }
+
+    const { data: psychologist, error: psychologistError } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, first_name, last_name, email')
+      .eq('id', psychologist_id)
+      .single();
+
+    if (psychologistError || !psychologist) {
+      return res.status(404).json(
+        errorResponse('Psychologist not found')
+      );
+    }
+
+    let packageData = null;
+    if (package_id) {
+      const { data: pkg, error: packageError } = await supabaseAdmin
+        .from('packages')
+        .select('*')
+        .eq('id', package_id)
+        .single();
+      if (packageError || !pkg) {
+        return res.status(404).json(
+          errorResponse('Package not found')
+        );
+      }
+      packageData = pkg;
+    }
+
+    // Create payment record
+    const transactionId = `RECORD-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const normalizedPaymentMethod = (payment_method || 'cash').toLowerCase();
+
+    const { data: payment, error: paymentError } = await supabaseAdmin
+      .from('payments')
+      .insert({
+        transaction_id: transactionId,
+        session_id: null,
+        psychologist_id: psychologist_id,
+        client_id: client.id,
+        package_id: package_id || null,
+        amount: amount,
+        session_type: packageData ? 'package' : 'individual',
+        status: 'success',
+        payment_method: normalizedPaymentMethod,
+        razorpay_params: {
+          notes: {
+            record_only: true,
+            payment_method: normalizedPaymentMethod,
+            admin_created: true,
+            created_by: req.user?.id,
+            created_at: new Date().toISOString(),
+            payment_received_date: paymentReceivedDate
+          }
+        },
+        completed_at: paymentReceivedDate,
+        created_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (paymentError) {
+      return res.status(500).json(
+        errorResponse('Failed to create payment record')
+      );
+    }
+    paymentRecord = payment;
+
+    // Session data: no Meet creation; use meet_link from body if provided
+    const sessionData = {
+      client_id: client.id,
+      psychologist_id: psychologist_id,
+      package_id: package_id || null,
+      scheduled_date: scheduled_date,
+      scheduled_time: scheduledTimeNormalized,
+      status: 'booked',
+      payment_id: payment.id,
+      price: amount,
+      session_notes: notes || null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      original_scheduled_date: scheduled_date
+    };
+
+    const meetLinkTrimmed = typeof meet_link === 'string' ? meet_link.trim() : '';
+    if (meetLinkTrimmed && meetLinkTrimmed.length > 0) {
+      sessionData.google_meet_link = meetLinkTrimmed;
+      sessionData.google_meet_join_url = meetLinkTrimmed;
+      sessionData.google_meet_start_url = meetLinkTrimmed;
+    }
+
+    const { data: createdSession, error: sessionError } = await supabaseAdmin
+      .from('sessions')
+      .insert([sessionData])
+      .select('*')
+      .single();
+
+    if (sessionError) {
+      if (paymentRecord) {
+        await supabaseAdmin.from('payments').delete().eq('id', paymentRecord.id);
+      }
+      const isUniqueViolation =
+        sessionError.code === '23505' ||
+        sessionError.message?.toLowerCase().includes('unique') ||
+        sessionError.message?.toLowerCase().includes('duplicate');
+      if (isUniqueViolation) {
+        return res.status(409).json(
+          errorResponse('This time slot was just booked. Please select another time.')
+        );
+      }
+      return res.status(500).json(
+        errorResponse('Failed to create session')
+      );
+    }
+    session = createdSession;
+
+    await supabaseAdmin
+      .from('payments')
+      .update({ session_id: session.id })
+      .eq('id', payment.id);
+
+    // Update client_packages if package booking (keep counts correct)
+    if (package_id && packageData) {
+      const { data: existingClientPackage } = await supabaseAdmin
+        .from('client_packages')
+        .select('*')
+        .eq('client_id', client.id)
+        .eq('package_id', package_id)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      const currentRemaining = existingClientPackage?.remaining_sessions ?? 0;
+      const hasRemaining = currentRemaining > 0;
+
+      if (existingClientPackage && hasRemaining) {
+        await supabaseAdmin
+          .from('client_packages')
+          .update({ remaining_sessions: currentRemaining - 1 })
+          .eq('id', existingClientPackage.id)
+          .gt('remaining_sessions', 0);
+      } else {
+        const clientPackageData = {
+          client_id: client.id,
+          psychologist_id: psychologist_id,
+          package_id: package_id,
+          package_type: packageData.package_type,
+          total_sessions: packageData.session_count,
+          remaining_sessions: packageData.session_count - 1,
+          total_amount: packageData.price,
+          amount_paid: packageData.price,
+          status: 'active',
+          purchased_at: paymentReceivedDate,
+          first_session_id: session.id
+        };
+        await supabaseAdmin
+          .from('client_packages')
+          .insert([clientPackageData]);
+      }
+    }
+
+    const { data: completeSession } = await supabaseAdmin
+      .from('sessions')
+      .select(`
+        *,
+        client:clients(id, first_name, last_name, child_name, phone_number, user:users(email)),
+        psychologist:psychologists(id, first_name, last_name, email),
+        package:packages(*)
+      `)
+      .eq('id', session.id)
+      .single();
+
+    return res.status(201).json(
+      successResponse(completeSession || session, 'Session record added successfully')
+    );
+  } catch (error) {
+    console.error('❌ [RECORD ONLY] Unexpected error:', error);
+    if (session) {
+      try {
+        await supabaseAdmin.from('sessions').delete().eq('id', session.id);
+      } catch (_) {}
+    }
+    if (paymentRecord) {
+      try {
+        await supabaseAdmin.from('payments').delete().eq('id', paymentRecord.id);
+      } catch (_) {}
+    }
+    return res.status(500).json(
+      errorResponse('Internal server error while adding session record')
+    );
+  }
+};
+
 // ============================================
 // STUB FUNCTIONS - Need to be restored from backup
 // ============================================
@@ -3771,6 +4041,7 @@ module.exports = {
   updateSession,
   getPsychologistAvailabilityForReschedule,
   createManualBooking,
+  createRecordOnlyBooking,
   bookPackageNextSession,
   getPackagesWithRemainingSessions,
   getRescheduleRequests,
