@@ -38,6 +38,7 @@ const googleCalendarRoutes = require('./routes/googleCalendar');
 const blogRoutes = require('./routes/blogs');
 const counsellingRoutes = require('./routes/counselling');
 const assessmentsRoutes = require('./routes/assessments');
+const careerRoutes = require('./routes/careers');
 // Security routes removed - security page removed from admin dashboard
 // const securityRoutes = require('./routes/security');
 const betterParentingRoutes = require('./routes/betterParenting');
@@ -849,6 +850,7 @@ app.use('/api/blogs', blogRoutes);
 app.use('/api/counselling', counsellingRoutes);
 app.use('/api/assessments', assessmentsRoutes);
 app.use('/api/better-parenting', betterParentingRoutes);
+app.use('/api/careers', careerRoutes);
 app.use('/api/finance', financeRoutes);
 
 // 404 handler

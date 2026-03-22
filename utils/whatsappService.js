@@ -406,7 +406,7 @@ async function sendBookingConfirmation(toPhoneE164, details) {
 }
 
 /**
- * Format date as: "19 Jan-26" (DD MMM-YY format)
+ * Format date as: "19 Jan" (DD MMM format)
  * @param {string} dateStr - Date string (YYYY-MM-DD)
  * @returns {string} Formatted date
  */
@@ -417,8 +417,7 @@ function formatRescheduleDate(dateStr) {
     const day = d.getDate().toString().padStart(2, '0');
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const month = monthNames[d.getMonth()];
-    const year = d.getFullYear().toString().slice(-2);
-    return `${day} ${month}-${year}`;
+    return `${day} ${month}`;
   } catch {
     return dateStr;
   }

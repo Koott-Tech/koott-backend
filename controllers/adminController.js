@@ -801,7 +801,8 @@ const createRecordOnlyBooking = async (req, res) => {
       payment_received_date,
       payment_method,
       notes,
-      meet_link
+      meet_link,
+      status: bodyStatus
     } = req.body;
 
     if (!client_id || !psychologist_id || !scheduled_date || !scheduled_time || !amount) {
@@ -931,13 +932,18 @@ const createRecordOnlyBooking = async (req, res) => {
     paymentRecord = payment;
 
     // Session data: no Meet creation; use meet_link from body if provided
+    const allowedStatuses = ['booked', 'completed', 'cancelled', 'no_show', 'rescheduled'];
+    const sessionStatus = (bodyStatus && allowedStatuses.includes(String(bodyStatus).toLowerCase()))
+      ? String(bodyStatus).toLowerCase()
+      : 'booked';
+
     const sessionData = {
       client_id: client.id,
       psychologist_id: psychologist_id,
       package_id: package_id || null,
       scheduled_date: scheduled_date,
       scheduled_time: scheduledTimeNormalized,
-      status: 'booked',
+      status: sessionStatus,
       payment_id: payment.id,
       price: amount,
       session_notes: notes || null,
@@ -2872,6 +2878,10 @@ const updateSession = async (req, res) => {
     const doctorChanged = psychologist_id && psychologist_id !== originalPsychId;
     const effectiveDate = scheduled_date || currentSession.scheduled_date;
     const effectiveTime = scheduled_time || currentSession.scheduled_time;
+    const scheduleChanged = (
+      (scheduled_date && scheduled_date !== currentSession.scheduled_date) ||
+      (scheduled_time && scheduled_time !== currentSession.scheduled_time)
+    );
     const isSessionWithMeet = ['booked', 'rescheduled', 'reschedule_requested', 'scheduled', 'confirmed'].includes(
       (status || currentSession.status)?.toLowerCase?.() || status || currentSession.status
     );
@@ -2985,6 +2995,108 @@ const updateSession = async (req, res) => {
           updateData.google_meet_start_url = null;
           updateData.google_calendar_event_id = null;
           console.warn('⚠️ [Admin] New Meet link generation failed for reassigned session:', meetResult?.error);
+        }
+      }
+    }
+
+    // When only date/time changed (same psychologist): refresh calendar event + Meet link
+    if (!doctorChanged && scheduleChanged && isSessionWithMeet && effectiveDate && effectiveTime) {
+      const meetLinkService = require('../utils/meetLinkService');
+
+      // Fetch psychologist (with OAuth creds) and client for attendee emails
+      const targetPsychId = psychologist_id || currentSession.psychologist_id;
+      const { data: psychForMeet } = await supabaseAdmin
+        .from('psychologists')
+        .select('id, first_name, last_name, email, google_calendar_credentials')
+        .eq('id', targetPsychId)
+        .single();
+
+      const clientIdForMeet = client_id || currentSession.client_id;
+      const { data: clientForMeet } = await supabaseAdmin
+        .from('clients')
+        .select(`
+          id,
+          first_name,
+          last_name,
+          child_name,
+          user:users(email)
+        `)
+        .eq('id', clientIdForMeet)
+        .single();
+
+      // Delete old event first (best effort), then create a new event for the new slot
+      const oldEventId = currentSession.google_calendar_event_id;
+      let oldEventDeleteFailed = false;
+      if (oldEventId && psychForMeet?.google_calendar_credentials) {
+        try {
+          const creds = psychForMeet.google_calendar_credentials;
+          const oldAuth = {
+            access_token: creds.access_token,
+            refresh_token: creds.refresh_token,
+            expiry_date: creds.expiry_date
+          };
+          const eventIds = String(oldEventId).split(',').map((id) => id.trim()).filter(Boolean);
+          for (const eid of eventIds) {
+            const delResult = await meetLinkService.deleteCalendarEvent(eid, oldAuth);
+            if (delResult.success) {
+              console.log('✅ [Admin] Removed old calendar event for reschedule:', eid);
+            } else {
+              oldEventDeleteFailed = true;
+              console.warn('⚠️ [Admin] Could not delete old calendar event for reschedule:', eid, delResult.error);
+            }
+          }
+        } catch (err) {
+          oldEventDeleteFailed = true;
+          console.warn('⚠️ [Admin] Error removing old calendar event during reschedule:', err.message);
+        }
+      }
+
+      // Prevent duplicate events: if we couldn't delete old event, do not create another new one.
+      if (oldEventDeleteFailed) {
+        return res.status(500).json(
+          errorResponse('Could not remove previous calendar event. Reschedule aborted to avoid duplicate calendar events.')
+        );
+      }
+
+      if (psychForMeet && clientForMeet) {
+        const clientEmail = Array.isArray(clientForMeet.user)
+          ? clientForMeet.user?.[0]?.email
+          : clientForMeet.user?.email;
+        let clientName = clientForMeet.child_name;
+        if (!clientName || clientName.trim() === '' || String(clientName).toLowerCase() === 'pending') {
+          clientName = `${clientForMeet.first_name || ''} ${clientForMeet.last_name || ''}`.trim() || 'Client';
+        }
+
+        const endTime = addMinutesToTime(effectiveTime, 50);
+        const meetSessionData = {
+          summary: `Therapy Session - ${clientName} with ${psychForMeet.first_name}`,
+          description: `Rescheduled therapy session between ${clientName} and ${psychForMeet.first_name} ${psychForMeet.last_name}`,
+          startDate: effectiveDate,
+          startTime: effectiveTime,
+          endTime,
+          clientEmail: clientEmail || null,
+          psychologistEmail: psychForMeet.email || null
+        };
+
+        let userAuth = null;
+        if (psychForMeet.google_calendar_credentials) {
+          const c = psychForMeet.google_calendar_credentials;
+          userAuth = {
+            access_token: c.access_token,
+            refresh_token: c.refresh_token,
+            expiry_date: c.expiry_date
+          };
+        }
+
+        const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
+        if (meetResult.success && meetResult.meetLink) {
+          updateData.google_meet_link = meetResult.meetLink;
+          updateData.google_meet_join_url = meetResult.meetLink;
+          updateData.google_meet_start_url = meetResult.meetLink;
+          updateData.google_calendar_event_id = meetResult.eventId || null;
+          console.log('✅ [Admin] Refreshed Meet link for rescheduled session:', sessionId);
+        } else {
+          console.warn('⚠️ [Admin] Meet regeneration failed during reschedule, keeping previous links:', meetResult?.error);
         }
       }
     }
@@ -3155,10 +3267,8 @@ const updateSession = async (req, res) => {
               try {
                 const d = new Date(`${dateStr}T00:00:00+05:30`);
                 return d.toLocaleDateString('en-IN', {
-                  weekday: 'short',
                   day: '2-digit',
                   month: 'short',
-                  year: 'numeric',
                   timeZone: 'Asia/Kolkata'
                 });
               } catch {
@@ -3205,6 +3315,118 @@ const updateSession = async (req, res) => {
         } catch (notifError) {
           console.error('❌ [Admin] Error sending reassignment notifications:', notifError);
           // Don't fail the request if notifications fail
+        }
+      })();
+    }
+
+    // When date/time changes (admin reschedule): send reschedule emails + WhatsApp confirmation
+    if (scheduleChanged && updatedSession) {
+      (async () => {
+        try {
+          const emailService = require('../utils/emailService');
+          const { sendRescheduleConfirmation, sendWhatsAppTextWithRetry, formatFriendlyTime } = require('../utils/whatsappService');
+          const oldDate = currentSession.scheduled_date;
+          const oldTime = currentSession.scheduled_time;
+          const newDate = updatedSession.scheduled_date;
+          const newTime = updatedSession.scheduled_time;
+
+          // Resolve client email from users relation if needed
+          const { data: clientWithUser } = await supabaseAdmin
+            .from('clients')
+            .select('id, first_name, last_name, child_name, phone_number, user:users(email)')
+            .eq('id', updatedSession.client_id)
+            .single();
+
+          const clientEmail = clientWithUser?.user && (
+            Array.isArray(clientWithUser.user)
+              ? clientWithUser.user?.[0]?.email
+              : clientWithUser.user?.email
+          );
+
+          const clientName = clientWithUser?.child_name ||
+            `${clientWithUser?.first_name || ''} ${clientWithUser?.last_name || ''}`.trim() ||
+            'Client';
+
+          // Resolve psychologist directly to ensure email/phone are always available
+          const { data: psychologistRow } = await supabaseAdmin
+            .from('psychologists')
+            .select('id, first_name, last_name, email, phone')
+            .eq('id', updatedSession.psychologist_id)
+            .single();
+
+          const psychologistName = `${psychologistRow?.first_name || updatedSession.psychologist?.first_name || ''} ${psychologistRow?.last_name || updatedSession.psychologist?.last_name || ''}`.trim() || 'Psychologist';
+          const meetLink = updatedSession.google_meet_link ||
+            updatedSession.google_meet_join_url ||
+            updatedSession.google_calendar_link ||
+            null;
+
+          await emailService.sendRescheduleNotification({
+            clientName,
+            psychologistName,
+            clientEmail: clientEmail || null,
+            psychologistEmail: psychologistRow?.email || updatedSession.psychologist?.email || null,
+            scheduledDate: newDate,
+            scheduledTime: newTime,
+            sessionId: updatedSession.id,
+            meetLink
+          }, oldDate, oldTime);
+          console.log('✅ [Admin] Reschedule notification emails sent');
+
+          const clientPhone = clientWithUser?.phone_number || updatedSession.client?.phone_number || null;
+          if (clientPhone) {
+            const waResult = await sendRescheduleConfirmation(clientPhone, {
+              oldDate,
+              oldTime,
+              newDate,
+              newTime,
+              newMeetLink: meetLink
+            });
+            if (waResult?.success) {
+              console.log('✅ [Admin] Reschedule WhatsApp sent to client');
+            } else {
+              console.warn('⚠️ [Admin] Failed to send reschedule WhatsApp to client');
+            }
+          }
+
+          // Also notify psychologist on WhatsApp (similar to booking flow)
+          const psychologistPhone = psychologistRow?.phone || null;
+          if (psychologistPhone) {
+            const formatBookingDateShort = (dateStr) => {
+              if (!dateStr) return '';
+              try {
+                const d = new Date(`${dateStr}T00:00:00+05:30`);
+                return d.toLocaleDateString('en-IN', {
+                  weekday: 'short',
+                  day: '2-digit',
+                  month: 'short',
+                  year: 'numeric',
+                  timeZone: 'Asia/Kolkata'
+                });
+              } catch {
+                return dateStr;
+              }
+            };
+            const bullet = '•⁠  ⁠';
+            const psychologistMessage =
+              `Hey 👋\n\n` +
+              `A session has been rescheduled with Little Care.\n\n` +
+              `${bullet}Client: ${clientName}\n` +
+              `${bullet}Old: ${formatBookingDateShort(oldDate)} at ${formatFriendlyTime(oldTime)} (IST)\n` +
+              `${bullet}New: ${formatBookingDateShort(newDate)} at ${formatFriendlyTime(newTime)} (IST)\n\n` +
+              `${meetLink ? `Join link:\n${meetLink}\n\n` : ''}` +
+              `Please be ready 5 mins early.\n\n` +
+              `— Little Care 💜`;
+
+            const psychWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
+            if (psychWaResult?.success) {
+              console.log('✅ [Admin] Reschedule WhatsApp sent to psychologist');
+            } else {
+              console.warn('⚠️ [Admin] Failed to send reschedule WhatsApp to psychologist');
+            }
+          }
+        } catch (notifError) {
+          console.error('❌ [Admin] Error sending reschedule notifications:', notifError);
+          // Do not fail request when notifications fail
         }
       })();
     }
@@ -3990,6 +4212,9 @@ const getPackagesWithRemainingSessions = async (req, res) => {
       });
       const remaining = Math.max(total - completed - booked, 0);
       const canBookNext = completed > 0 && remaining > 0;
+
+      // Skip fully completed packages - they belong in the Completed tab only
+      if (completed >= total) return;
 
       const client = clientsMap[entry.client_id];
       const psychologist = psychologistsMap[entry.psychologist_id] || psychologistsMap[pkg.psychologist_id];

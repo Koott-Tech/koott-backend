@@ -326,6 +326,28 @@ const getAllSessions = async (req, res) => {
 
     const { page = 1, limit = 10, status, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc' } = req.query;
 
+    // ?status=booked&status=rescheduled OR ?status=booked,rescheduled OR ?status=booked
+    const normalizeStatusList = (raw) => {
+      if (raw == null || raw === '') return [];
+      const parts = Array.isArray(raw)
+        ? raw.flatMap((x) => String(x).split(','))
+        : String(raw).split(',');
+      return parts.map((s) => s.trim()).filter(Boolean);
+    };
+
+    let statusList = normalizeStatusList(status);
+
+    // Admin Booked tab: include rescheduled (comma may be stripped by proxies; some clients send only booked)
+    if (statusList.length === 1 && statusList[0].toLowerCase() === 'booked') {
+      statusList = ['booked', 'rescheduled'];
+    }
+
+    const applySessionStatusFilter = (q) => {
+      if (statusList.length === 0) return q;
+      if (statusList.length === 1) return q.eq('status', statusList[0]);
+      return q.in('status', statusList);
+    };
+
     // First, get the total count of sessions (without pagination)
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
     const { supabaseAdmin } = require('../config/supabase');
@@ -335,9 +357,7 @@ const getAllSessions = async (req, res) => {
       .neq('session_type', 'free_assessment'); // Exclude free assessments
 
     // Apply same filters for count
-    if (status) {
-      countQuery = countQuery.eq('status', status);
-    }
+    countQuery = applySessionStatusFilter(countQuery);
     if (psychologist_id) {
       countQuery = countQuery.eq('psychologist_id', psychologist_id);
     }
@@ -389,9 +409,7 @@ const getAllSessions = async (req, res) => {
     console.log('Supabase query built, executing...');
 
     // Apply filters
-    if (status) {
-      query = query.eq('status', status);
-    }
+    query = applySessionStatusFilter(query);
     if (psychologist_id) {
       query = query.eq('psychologist_id', psychologist_id);
     }
@@ -408,9 +426,13 @@ const getAllSessions = async (req, res) => {
       query = query.lte('scheduled_date', dateTo);
     }
 
-    // Apply sorting
+    // Apply sorting (scheduled_time as tiebreaker so "All" matches Booked-style ordering)
     if (sort && order) {
-      query = query.order(sort, { ascending: order === 'asc' });
+      const asc = order === 'asc';
+      query = query.order(sort, { ascending: asc });
+      if (sort === 'scheduled_date') {
+        query = query.order('scheduled_time', { ascending: asc });
+      }
     }
 
     // Don't paginate yet - we need to combine with assessment sessions first
@@ -492,9 +514,7 @@ const getAllSessions = async (req, res) => {
         .select('*', { count: 'exact', head: true });
 
       // Apply same filters for count
-      if (status) {
-        assessCountQuery = assessCountQuery.eq('status', status);
-      }
+      assessCountQuery = applySessionStatusFilter(assessCountQuery);
       if (psychologist_id) {
         assessCountQuery = assessCountQuery.eq('psychologist_id', psychologist_id);
       }
@@ -559,9 +579,7 @@ const getAllSessions = async (req, res) => {
         `);
 
       // Apply same filters as regular sessions
-      if (status) {
-        assessQuery = assessQuery.eq('status', status);
-      }
+      assessQuery = applySessionStatusFilter(assessQuery);
       if (psychologist_id) {
         assessQuery = assessQuery.eq('psychologist_id', psychologist_id);
       }
@@ -578,9 +596,13 @@ const getAllSessions = async (req, res) => {
         assessQuery = assessQuery.lte('scheduled_date', dateTo);
       }
 
-      // Apply sorting
+      // Apply sorting (match therapy sessions: date + time)
       if (sort && order) {
-        assessQuery = assessQuery.order(sort, { ascending: order === 'asc' });
+        const asc = order === 'asc';
+        assessQuery = assessQuery.order(sort, { ascending: asc });
+        if (sort === 'scheduled_date') {
+          assessQuery = assessQuery.order('scheduled_time', { ascending: asc });
+        }
       }
 
       const { data: assessData, error: assessError } = await assessQuery;
@@ -603,10 +625,30 @@ const getAllSessions = async (req, res) => {
     }
 
     // Combine regular sessions and assessment sessions
+    const scheduledDateTimeMs = (s) => {
+      const d = s?.scheduled_date;
+      if (!d) return 0;
+      const dateOnly = String(d).slice(0, 10);
+      const rawT = s.scheduled_time != null ? String(s.scheduled_time) : '00:00:00';
+      const t = rawT.split('.')[0].trim();
+      const parts = t.split(':');
+      const hh = String(parts[0] || '00').padStart(2, '0');
+      const mm = String(parts[1] || '00').padStart(2, '0');
+      const ss = String((parts[2] || '00').split('.')[0]).padStart(2, '0');
+      const ms = new Date(`${dateOnly}T${hh}:${mm}:${ss}`).getTime();
+      if (Number.isFinite(ms)) return ms;
+      const fallback = new Date(dateOnly).getTime();
+      return Number.isFinite(fallback) ? fallback : 0;
+    };
+
     const allSessions = [...(sessions || []), ...assessmentSessions]
       .sort((a, b) => {
-        // Sort by the specified sort field
-        if (sort === 'created_at' || sort === 'scheduled_date') {
+        if (sort === 'scheduled_date') {
+          const aMs = scheduledDateTimeMs(a);
+          const bMs = scheduledDateTimeMs(b);
+          return order === 'asc' ? aMs - bMs : bMs - aMs;
+        }
+        if (sort === 'created_at') {
           const aVal = a[sort] ? new Date(a[sort]) : new Date(0);
           const bVal = b[sort] ? new Date(b[sort]) : new Date(0);
           return order === 'asc' ? aVal - bVal : bVal - aVal;

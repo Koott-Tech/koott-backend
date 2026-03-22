@@ -373,10 +373,7 @@ class MeetLinkService {
       // Create Meet link using Calendar API with conference data
       const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
-      // Determine the calendar owner's email so we can exclude them from attendees.
-      // When we create the event on calendarId:'primary' with the psychologist's OAuth,
-      // the psychologist is already the organizer — adding them as attendee causes Google
-      // to send a duplicate invitation and create a second event on their calendar.
+      // Owner email for de-duping attendee list.
       let calendarOwnerEmail = null;
       if (userAuth?.access_token) {
         calendarOwnerEmail = sessionData.psychologistEmail || null;
@@ -389,7 +386,7 @@ class MeetLinkService {
         attendees.push({ email: sessionData.clientEmail });
       }
       
-      // Skip psychologist email — they are the calendar organizer (event on their primary calendar)
+      // Never add organizer as attendee: this can create duplicate events on owner calendar.
       if (sessionData.psychologistEmail && sessionData.psychologistEmail !== calendarOwnerEmail) {
         attendees.push({ email: sessionData.psychologistEmail });
       }
@@ -401,6 +398,16 @@ class MeetLinkService {
           }
         });
       }
+
+      // Final attendee de-duplication (case-insensitive)
+      const seen = new Set();
+      const dedupedAttendees = [];
+      attendees.forEach((a) => {
+        const key = String(a?.email || '').trim().toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        dedupedAttendees.push({ email: a.email });
+      });
 
       // Add admin email (company admin) as participant
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
@@ -425,7 +432,7 @@ class MeetLinkService {
           dateTime: `${sessionData.startDate}T${this.formatTime(sessionData.endTime)}`,
           timeZone: 'Asia/Kolkata'
         },
-        attendees: attendees.length > 0 ? attendees : undefined,
+        attendees: dedupedAttendees.length > 0 ? dedupedAttendees : undefined,
         // Make meeting open to anyone with the link (no waiting room)
         visibility: 'public',
         guestsCanInviteOthers: true,
@@ -902,17 +909,39 @@ class MeetLinkService {
         return { success: false, error: 'No auth available to delete event' };
       }
       
-      await calendar.events.delete({ calendarId: 'primary', eventId });
+      // Ensure cancellation propagates to all invited attendees' calendars
+      await calendar.events.delete({
+        calendarId: 'primary',
+        eventId,
+        sendUpdates: 'all'
+      });
       log('✅ Calendar event deleted:', eventId);
       return { success: true };
     } catch (error) {
+      const httpStatus =
+        typeof error.code === 'number'
+          ? error.code
+          : Number(error.code) || error.response?.status;
+      const apiMsg = error.response?.data?.error?.message;
+      const msg = String(error.message || apiMsg || '');
+      // Google returns 404/410 or "Resource has been deleted" when the event is already gone — treat as success
+      const alreadyDeleted =
+        httpStatus === 404 ||
+        httpStatus === 410 ||
+        /resource has been deleted/i.test(msg);
+
+      if (alreadyDeleted) {
+        log(`ℹ️ Calendar event already removed (ok): ${eventId}`);
+        return { success: true, alreadyDeleted: true };
+      }
+
       logError('❌ deleteCalendarEvent failed:', error.message);
-      
+
       // Check for 401/invalid-auth errors and return clear message
       if (error.code === 401 || error.message?.includes('invalid') || error.message?.includes('expired')) {
         return { success: false, error: 'access_token expired' };
       }
-      
+
       return { success: false, error: error.message };
     }
   }
