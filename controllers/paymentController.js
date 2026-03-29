@@ -1,5 +1,5 @@
 const { supabaseAdmin } = require('../config/supabase');
-const { ensureClientPackageRecord } = require('../services/packageService');
+const { ensureClientPackageRecord, assertClientPackageHasAvailableSlot } = require('../services/packageService');
 const { 
   getRazorpayConfig, 
   getRazorpayInstance,
@@ -1661,6 +1661,53 @@ const handlePaymentSuccess = async (req, res) => {
       sessionData.package_id = actualPackageId;
     }
 
+    if (sessionData.package_id) {
+      const { data: pkgForQuota, error: pkgQuotaErr } = await supabaseAdmin
+        .from('packages')
+        .select('*')
+        .eq('id', sessionData.package_id)
+        .single();
+
+      if (pkgQuotaErr || !pkgForQuota) {
+        console.error('❌ Package not found for quota check:', pkgQuotaErr);
+        await supabaseAdmin
+          .from('payments')
+          .update({
+            status: 'pending',
+            razorpay_payment_id: razorpay_payment_id,
+            razorpay_response: params
+          })
+          .eq('id', paymentRecord.id);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid package for this booking. Payment was not finalized; contact support if amount was charged.',
+          error: 'PACKAGE_NOT_FOUND_FOR_QUOTA'
+        });
+      }
+
+      const quotaCheck = await assertClientPackageHasAvailableSlot(
+        supabaseAdmin,
+        clientId,
+        pkgForQuota
+      );
+      if (!quotaCheck.ok) {
+        console.error('❌ Package quota exceeded:', quotaCheck);
+        await supabaseAdmin
+          .from('payments')
+          .update({
+            status: 'pending',
+            razorpay_payment_id: razorpay_payment_id,
+            razorpay_response: params
+          })
+          .eq('id', paymentRecord.id);
+        return res.status(409).json({
+          success: false,
+          message: quotaCheck.message,
+          error: 'PACKAGE_QUOTA_EXCEEDED'
+        });
+      }
+    }
+
     // Don't add meet data yet - will be added asynchronously
 
     // Try to insert session - if duplicate key error, another request already created it
@@ -2084,6 +2131,21 @@ const handlePaymentSuccess = async (req, res) => {
         // Create Google Meet link asynchronously
         let meetData = null;
         try {
+          const { data: existingForMeet } = await supabaseAdmin
+            .from('sessions')
+            .select('google_calendar_event_id, google_meet_link')
+            .eq('id', session.id)
+            .maybeSingle();
+
+          if (existingForMeet?.google_calendar_event_id && existingForMeet?.google_meet_link) {
+            meetData = {
+              meetLink: existingForMeet.google_meet_link,
+              eventId: existingForMeet.google_calendar_event_id,
+              calendarLink: null,
+              method: 'existing'
+            };
+            console.log('ℹ️ Session already has a Calendar event; skipping duplicate Meet/API insert');
+          } else {
           console.log('🔄 Creating Google Meet meeting via OAuth2 (async)...');
           
           const meetSessionData = {
@@ -2099,12 +2161,19 @@ const handlePaymentSuccess = async (req, res) => {
           
           // Get psychologist's OAuth tokens if available (for real Meet link creation)
           let userAuth = null;
-          if (psychologistDetails.google_calendar_credentials) {
-            const credentials = psychologistDetails.google_calendar_credentials;
+          let creds = psychologistDetails.google_calendar_credentials;
+          if (typeof creds === 'string') {
+            try {
+              creds = JSON.parse(creds);
+            } catch (_) {
+              creds = null;
+            }
+          }
+          if (creds?.access_token) {
             userAuth = {
-              access_token: credentials.access_token,
-              refresh_token: credentials.refresh_token,
-              expiry_date: credentials.expiry_date
+              access_token: creds.access_token,
+              refresh_token: creds.refresh_token,
+              expiry_date: creds.expiry_date
             };
             console.log('✅ Using psychologist OAuth tokens for Meet link creation');
           } else {
@@ -2159,6 +2228,7 @@ const handlePaymentSuccess = async (req, res) => {
         };
             console.log('⚠️ Using fallback Meet link (async):', meetResult.meetLink);
       }
+          }
     } catch (meetError) {
           console.error('❌ Error creating OAuth2 meeting (async):', meetError);
         }
@@ -2181,6 +2251,7 @@ const handlePaymentSuccess = async (req, res) => {
         clientEmail: clientDetails.user?.email,
         psychologistEmail: psychologistDetails.email,
         googleMeetLink: meetData?.meetLink,
+        googleCalendarEventId: meetData?.eventId,
         sessionId: session.id,
             transactionId: paymentRecord.transaction_id,
             amount: paymentRecord.amount,

@@ -402,24 +402,20 @@ class MeetLinkService {
       // Final attendee de-duplication (case-insensitive)
       const seen = new Set();
       const dedupedAttendees = [];
-      attendees.forEach((a) => {
-        const key = String(a?.email || '').trim().toLowerCase();
+      const pushUniqueEmail = (raw) => {
+        if (!raw || typeof raw !== 'string') return;
+        const key = raw.trim().toLowerCase();
         if (!key || seen.has(key)) return;
         seen.add(key);
-        dedupedAttendees.push({ email: a.email });
+        dedupedAttendees.push({ email: raw.trim() });
+      };
+      attendees.forEach((a) => {
+        pushUniqueEmail(String(a?.email || ''));
       });
 
-      // Add admin email (company admin) as participant
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
-      if (adminEmail && !attendees.find(a => a.email === adminEmail)) {
-        attendees.push({ email: adminEmail });
-      }
-
-      // Always include Little Care ops meet inbox as a participant
-      const opsMeetEmail = 'meet.littlecare@gmail.com';
-      if (!attendees.find(a => a.email === opsMeetEmail)) {
-        attendees.push({ email: opsMeetEmail });
-      }
+      if (adminEmail) pushUniqueEmail(adminEmail);
+      pushUniqueEmail('meet.littlecare@gmail.com');
 
       const event = {
         summary: sessionData.summary || 'Therapy Session',
@@ -458,7 +454,7 @@ class MeetLinkService {
           : '***';
         return `${maskedLocal}@${domain}`;
       };
-      log('   👥 Attendees:', attendees.length > 0 ? `${attendees.length} attendee(s)` : 'None');
+      log('   👥 Attendees:', dedupedAttendees.length > 0 ? `${dedupedAttendees.length} attendee(s)` : 'None');
       const createdEvent = await calendar.events.insert({
         calendarId: 'primary',
         resource: event,

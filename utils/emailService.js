@@ -188,8 +188,15 @@ class EmailService {
         clientId,
         packageInfo, // Package information: { totalSessions, completedSessions, remainingSessions, packageType }
         receiptId, // Receipt ID for generating download URL
-        receiptPdfBuffer // PDF buffer to attach to email
+        receiptPdfBuffer, // PDF buffer to attach to email
+        googleCalendarEventId: googleCalendarEventIdRaw,
+        google_calendar_event_id
       } = sessionData;
+
+      const googleCalendarEventId = googleCalendarEventIdRaw || google_calendar_event_id;
+      // When Calendar API already created the event + sent invites, skip .ics + "Add to calendar" links
+      // so users do not get duplicate events on top of the official Google invite.
+      const calendarFromGoogleApi = Boolean(googleCalendarEventId);
 
       // Use consistent date/time format
       const finalSessionDate = sessionDate || scheduledDate;
@@ -259,9 +266,14 @@ class EmailService {
         price: finalPrice || 0
       };
 
-      const calendarInvites = createCalendarInvites(calendarData);
-      const googleCalendarLink = generateGoogleCalendarLink(calendarData);
-      const outlookCalendarLink = generateOutlookCalendarLink(calendarData);
+      let calendarInvites = { client: null, psychologist: null };
+      let googleCalendarLink = null;
+      let outlookCalendarLink = null;
+      if (!calendarFromGoogleApi) {
+        calendarInvites = createCalendarInvites(calendarData);
+        googleCalendarLink = generateGoogleCalendarLink(calendarData);
+        outlookCalendarLink = generateOutlookCalendarLink(calendarData);
+      }
 
       // Generate receipt filename for attachment
       let receiptFileName = 'Receipt.pdf';
@@ -289,6 +301,7 @@ class EmailService {
           calendarInvite: calendarInvites.client,
           googleCalendarLink,
           outlookCalendarLink,
+          calendarFromGoogleApi,
           price: finalPrice || 0,
           receiptPdfBuffer: receiptPdfBuffer || null, // Receipt PDF buffer to attach (not used anymore)
           receiptFileName: receiptFileName, // Receipt filename for attachment (not used anymore)
@@ -312,6 +325,7 @@ class EmailService {
           calendarInvite: calendarInvites.psychologist,
           googleCalendarLink,
           outlookCalendarLink,
+          calendarFromGoogleApi,
           price: finalPrice || 0,
           packageInfo: packageInfo || null // Package information
         });
@@ -356,6 +370,7 @@ class EmailService {
       calendarInvite,
       googleCalendarLink,
       outlookCalendarLink,
+      calendarFromGoogleApi = false,
       price,
       receiptPdfBuffer,
       receiptFileName,
@@ -479,7 +494,17 @@ class EmailService {
                       </table>
                       `}
                       
-                      ${googleCalendarLink || outlookCalendarLink ? `
+                      ${calendarFromGoogleApi ? `
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 14px 16px; background: #eef2ff; border-radius: 8px; border: 1px solid #c7d2fe;">
+                            <p style="color: #3730a3; font-size: 14px; margin: 0; line-height: 1.5;">
+                              <strong>Calendar:</strong> This session is already on your Google Calendar from the official invite (same time as above). Use <strong>Join Your Session</strong> above for the Meet link—no need to add the event again.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                      ` : googleCalendarLink || outlookCalendarLink ? `
                       <!-- Add to Calendar Section -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
@@ -579,6 +604,7 @@ class EmailService {
       calendarInvite,
       googleCalendarLink,
       outlookCalendarLink,
+      calendarFromGoogleApi = false,
       price,
       packageInfo
     } = emailData;
@@ -676,7 +702,17 @@ class EmailService {
                         </tr>
                       </table>
                       
-                      ${googleCalendarLink || outlookCalendarLink ? `
+                      ${calendarFromGoogleApi ? `
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="padding: 14px 16px; background: #eef2ff; border-radius: 8px; border: 1px solid #c7d2fe;">
+                            <p style="color: #3730a3; font-size: 14px; margin: 0; line-height: 1.5;">
+                              <strong>Calendar:</strong> This session is already on your Google Calendar (you are the host). Use the Meet button below—do not add the event again from this email.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+                      ` : googleCalendarLink || outlookCalendarLink ? `
                       <!-- Calendar Section -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>

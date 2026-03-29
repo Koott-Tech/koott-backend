@@ -1,5 +1,9 @@
 const { supabaseAdmin } = require('../config/supabase');
-const { deriveSessionCount, ensureClientPackageRecord } = require('../services/packageService');
+const {
+  deriveSessionCount,
+  ensureClientPackageRecord,
+  assertClientPackageHasAvailableSlot
+} = require('../services/packageService');
 const { 
   successResponse, 
   errorResponse,
@@ -932,6 +936,17 @@ const bookSession = async (req, res) => {
 
       packageData = packageDataResult;
       console.log('✅ Package validation passed');
+
+      const quotaCheck = await assertClientPackageHasAvailableSlot(
+        supabaseAdmin,
+        clientId,
+        packageData
+      );
+      if (!quotaCheck.ok) {
+        return res.status(quotaCheck.httpStatus || 400).json(
+          errorResponse(quotaCheck.message)
+        );
+      }
     } else {
       console.log('📦 No package validation needed (package_id not provided)');
     }
@@ -977,7 +992,7 @@ const bookSession = async (req, res) => {
     // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
     const { data: psychologistDetails, error: psychologistDetailsError } = await supabaseAdmin
       .from('psychologists')
-      .select('first_name, last_name, email, phone')
+      .select('first_name, last_name, email, phone, google_calendar_credentials')
       .eq('id', psychologist_id)
       .single();
 
@@ -990,26 +1005,53 @@ const bookSession = async (req, res) => {
 
     console.log('✅ User details fetched successfully');
 
-    // Step 5: Create Google Calendar event with OAuth2 Meet service
+    // Step 5: Create Google Calendar event on the psychologist's calendar (OAuth) when connected,
+    // with client + psychologist as attendees so invites appear in their Google Calendars.
     console.log('🔍 Step 5: Creating Google Calendar event...');
     let meetData = null;
     try {
+      let creds = psychologistDetails.google_calendar_credentials;
+      if (typeof creds === 'string') {
+        try {
+          creds = JSON.parse(creds);
+        } catch (_) {
+          creds = null;
+        }
+      }
+      let userAuth = null;
+      if (creds?.access_token) {
+        userAuth = {
+          access_token: creds.access_token,
+          refresh_token: creds.refresh_token,
+          expiry_date: creds.expiry_date
+        };
+        console.log('✅ Using psychologist Google Calendar OAuth for Meet + calendar event');
+      } else {
+        console.log('⚠️ Psychologist has no Google Calendar OAuth — Meet may use service account or fallback (not on their calendar)');
+      }
+
+      const clientUserEmail = Array.isArray(clientDetails.user)
+        ? clientDetails.user[0]?.email
+        : clientDetails.user?.email;
       const sessionData = {
         summary: `Therapy Session - ${clientDetails?.child_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
         description: `Therapy session between ${clientDetails?.child_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'}`,
         startDate: scheduled_date,
         startTime: scheduled_time,
-        endTime: addMinutesToTime(scheduled_time, 50) // 50-minute session
+        endTime: addMinutesToTime(scheduled_time, 50), // 50-minute session
+        clientEmail: clientUserEmail,
+        psychologistEmail: psychologistDetails.email
       };
 
-      const meetResult = await meetLinkService.generateSessionMeetLink(sessionData);
+      const meetResult = await meetLinkService.generateSessionMeetLink(sessionData, userAuth);
       
       if (meetResult.success) {
         meetData = {
           meetLink: meetResult.meetLink,
           eventId: meetResult.eventId,
           calendarLink: meetResult.eventLink || null,
-          method: meetResult.method
+          method: meetResult.method,
+          _refreshedTokens: meetResult.refreshedTokens || null
         };
         console.log('✅ Real Meet link created successfully:', meetResult);
       } else {
@@ -1095,6 +1137,24 @@ const bookSession = async (req, res) => {
     console.log('   - Status:', session.status);
     console.log('   - Price:', session.price);
 
+    if (meetData?._refreshedTokens) {
+      try {
+        await supabaseAdmin
+          .from('psychologists')
+          .update({
+            google_calendar_credentials: {
+              access_token: meetData._refreshedTokens.access_token,
+              refresh_token: meetData._refreshedTokens.refresh_token,
+              expiry_date: meetData._refreshedTokens.expiry_date
+            }
+          })
+          .eq('id', psychologist_id);
+        console.log('✅ Persisted refreshed Google Calendar OAuth tokens for psychologist');
+      } catch (tokenPersistErr) {
+        console.error('⚠️ Failed to persist refreshed OAuth tokens:', tokenPersistErr.message);
+      }
+    }
+
     // Block the booked slot from availability using the availability service
     try {
       const availabilityService = require('../utils/availabilityCalendarService');
@@ -1164,6 +1224,7 @@ const bookSession = async (req, res) => {
         scheduledDate: scheduled_date,
         scheduledTime: scheduled_time,
         meetLink: meetData.meetLink,
+        googleCalendarEventId: meetData.eventId,
         price: session.price
       });
 
@@ -3647,36 +3708,14 @@ const bookRemainingSession = async (req, res) => {
       );
     }
 
-    const totalSessionsCount = clientPackage.package?.session_count || 0;
-    
-    // Calculate remaining sessions based on actual completed and booked sessions (same logic as getClientPackages)
-    const { data: packageSessionsForCheck, error: sessionsCountError } = await supabaseAdmin
-      .from('sessions')
-      .select('id, status')
-      .eq('package_id', clientPackage.package.id)
-      .eq('client_id', clientId);
-
-    let completedCount = 0;
-    let bookedCount = 0;
-    
-    if (!sessionsCountError && packageSessionsForCheck) {
-      packageSessionsForCheck.forEach(session => {
-        if (session.status === 'completed') {
-          completedCount++;
-        } else if (session.status !== 'cancelled' && session.status !== 'no_show' && session.status !== 'noshow') {
-          // Count booked/scheduled/rescheduled sessions (not completed, not cancelled, not no-show)
-          bookedCount++;
-        }
-      });
-    }
-
-    // Calculate remaining sessions for booking: total - completed - booked
-    const remainingSessionsForBooking = Math.max(totalSessionsCount - completedCount - bookedCount, 0);
-
-    // Check if package has remaining sessions to book
-    if (remainingSessionsForBooking <= 0) {
-      return res.status(400).json(
-        errorResponse('No remaining sessions in this package')
+    const quotaCheck = await assertClientPackageHasAvailableSlot(
+      supabaseAdmin,
+      clientId,
+      clientPackage.package
+    );
+    if (!quotaCheck.ok) {
+      return res.status(quotaCheck.httpStatus || 400).json(
+        errorResponse(quotaCheck.message || 'No remaining sessions in this package')
       );
     }
 
@@ -3867,7 +3906,11 @@ const bookRemainingSession = async (req, res) => {
           description: `Therapy session between ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'} ${psychologistDetails?.last_name || ''}`,
           startDate: scheduled_date,
           startTime: scheduled_time,
-          endTime: addMinutesToTime(scheduled_time, 50) // 50-minute session
+          endTime: addMinutesToTime(scheduled_time, 50), // 50-minute session
+          clientEmail: Array.isArray(clientDetails.user)
+            ? clientDetails.user[0]?.email
+            : clientDetails.user?.email,
+          psychologistEmail: psychologistDetails?.email
         };
 
         // Try to get psychologist OAuth tokens for better Meet link creation
@@ -3879,14 +3922,26 @@ const bookRemainingSession = async (req, res) => {
           .single();
 
         if (psychologistWithAuth?.google_calendar_credentials) {
-          const credentials = psychologistWithAuth.google_calendar_credentials;
-          userAuth = {
-            access_token: credentials.access_token,
-            refresh_token: credentials.refresh_token,
-            expiry_date: credentials.expiry_date
-          };
-          console.log('✅ Using psychologist OAuth tokens for Meet link creation');
+          let credentials = psychologistWithAuth.google_calendar_credentials;
+          if (typeof credentials === 'string') {
+            try {
+              credentials = JSON.parse(credentials);
+            } catch (_) {
+              credentials = null;
+            }
+          }
+          if (credentials?.access_token) {
+            userAuth = {
+              access_token: credentials.access_token,
+              refresh_token: credentials.refresh_token,
+              expiry_date: credentials.expiry_date
+            };
+            console.log('✅ Using psychologist OAuth tokens for Meet link creation');
+          }
         }
+
+        let emailMeetLink = fallbackMeetLink;
+        let emailCalendarEventId = null;
 
         const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
         
@@ -3897,6 +3952,8 @@ const bookRemainingSession = async (req, res) => {
             calendarLink: meetResult.eventLink || null,
             method: meetResult.method
           };
+          emailMeetLink = meetData.meetLink;
+          emailCalendarEventId = meetData.eventId;
           console.log('✅ Real Meet link created successfully (async):', meetResult);
           
           // Update session with real Meet link
@@ -3913,11 +3970,29 @@ const bookRemainingSession = async (req, res) => {
             .eq('id', session.id);
           
           console.log('✅ Session updated with real Meet link');
+
+          if (meetResult.refreshedTokens && psychologistId) {
+            try {
+              await supabaseAdmin
+                .from('psychologists')
+                .update({
+                  google_calendar_credentials: {
+                    access_token: meetResult.refreshedTokens.access_token,
+                    refresh_token: meetResult.refreshedTokens.refresh_token,
+                    expiry_date: meetResult.refreshedTokens.expiry_date
+                  }
+                })
+                .eq('id', psychologistId);
+              console.log('✅ Persisted refreshed Google Calendar OAuth tokens (package booking async)');
+            } catch (tokenPersistErr) {
+              console.error('⚠️ Failed to persist refreshed OAuth tokens:', tokenPersistErr.message);
+            }
+          }
         } else {
           console.log('⚠️ Meet link creation failed (async), keeping fallback');
         }
 
-        // Send email notifications (use fallback link initially)
+        // Send email after Meet/Calendar (avoid duplicate calendar entries from .ics + API invite)
         try {
           const emailService = require('../utils/emailService');
 
@@ -3929,7 +4004,8 @@ const bookRemainingSession = async (req, res) => {
             sessionId: session.id,
             scheduledDate: scheduled_date,
             scheduledTime: scheduled_time,
-            meetLink: fallbackMeetLink, // Will be updated async if real link is created
+            meetLink: emailMeetLink,
+            googleCalendarEventId: emailCalendarEventId,
             price: null, // null for package sessions (already paid as part of package)
             status: 'booked',
             psychologistId: psychologistId,
@@ -3949,7 +4025,7 @@ const bookRemainingSession = async (req, res) => {
 
           // Send WhatsApp to client
           const clientPhone = clientDetails.phone_number || null;
-          if (clientPhone && fallbackMeetLink) {
+          if (clientPhone && emailMeetLink) {
             // Only include childName if child_name exists and is not empty/null/'Pending'
             const childName = clientDetails.child_name && 
               clientDetails.child_name.trim() !== '' && 
@@ -3961,7 +4037,7 @@ const bookRemainingSession = async (req, res) => {
               childName: childName,
               date: scheduled_date,
               time: scheduled_time,
-              meetLink: fallbackMeetLink, // Will be updated async if real link is created
+              meetLink: emailMeetLink,
               psychologistName: psychologistName,
               packageInfo: packageInfo
             };
@@ -3979,7 +4055,7 @@ const bookRemainingSession = async (req, res) => {
 
           // Send WhatsApp to psychologist
           const psychologistPhone = psychologistDetails.phone || null;
-          if (psychologistPhone && fallbackMeetLink) {
+          if (psychologistPhone && emailMeetLink) {
             // Format date and time using the same functions as client messages
             const { formatFriendlyTime } = require('../utils/whatsappService');
             const formatBookingDateShort = (dateStr) => {
@@ -4019,7 +4095,7 @@ const bookRemainingSession = async (req, res) => {
               packageLine +
               `${bullet}Date: ${formattedDate}\n` +
               `${bullet}Time: ${formattedTime} (IST)\n\n` +
-              `Join link:\n${fallbackMeetLink}\n\n` +
+              `Join link:\n${emailMeetLink}\n\n` +
               `Please be ready 5 mins early.\n\n` +
               `For help: ${supportPhone}\n\n` +
               `— Little Care 💜`;
@@ -4573,7 +4649,7 @@ const bookSessionWithCredit = async (req, res) => {
     // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
     const { data: psychologistDetails, error: psychologistDetailsError } = await supabaseAdmin
       .from('psychologists')
-      .select('first_name, last_name, email, phone')
+      .select('first_name, last_name, email, phone, google_calendar_credentials')
       .eq('id', psychologist_id)
       .single();
 
@@ -4587,21 +4663,44 @@ const bookSessionWithCredit = async (req, res) => {
     // Create Google Meet link (same as normal booking)
     let meetData = null;
     try {
+      let creds = psychologistDetails.google_calendar_credentials;
+      if (typeof creds === 'string') {
+        try {
+          creds = JSON.parse(creds);
+        } catch (_) {
+          creds = null;
+        }
+      }
+      let userAuth = null;
+      if (creds?.access_token) {
+        userAuth = {
+          access_token: creds.access_token,
+          refresh_token: creds.refresh_token,
+          expiry_date: creds.expiry_date
+        };
+        console.log('✅ Credit booking: using psychologist Google Calendar OAuth');
+      }
+
       const sessionData = {
         summary: `Therapy Session - ${clientDetails?.child_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
         description: `Therapy session between ${clientDetails?.child_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'}`,
         startDate: scheduled_date,
         startTime: scheduled_time,
-        endTime: addMinutesToTime(scheduled_time, 50)
+        endTime: addMinutesToTime(scheduled_time, 50),
+        clientEmail: Array.isArray(clientDetails.user)
+          ? clientDetails.user[0]?.email
+          : clientDetails.user?.email,
+        psychologistEmail: psychologistDetails.email
       };
 
-      const meetResult = await meetLinkService.generateSessionMeetLink(sessionData);
+      const meetResult = await meetLinkService.generateSessionMeetLink(sessionData, userAuth);
       if (meetResult.success) {
         meetData = {
           meetLink: meetResult.meetLink,
           eventId: meetResult.eventId,
           calendarLink: meetResult.eventLink || null,
-          method: meetResult.method
+          method: meetResult.method,
+          _refreshedTokens: meetResult.refreshedTokens || null
         };
       } else {
         meetData = {
@@ -4629,8 +4728,8 @@ const bookSessionWithCredit = async (req, res) => {
 
     if (meetData) {
       sessionInsert.google_meet_link = meetData.meetLink;
-      // Some deployments may not have a separate google_meet_event_id column; 
-      // we only store the meet link here to keep compatibility.
+      if (meetData.eventId) sessionInsert.google_calendar_event_id = meetData.eventId;
+      if (meetData.calendarLink) sessionInsert.google_calendar_link = meetData.calendarLink;
     }
 
     const { data: session, error: sessionError } = await supabaseAdmin
@@ -4663,6 +4762,24 @@ const bookSessionWithCredit = async (req, res) => {
       return res.status(500).json(
         errorResponse('Failed to create session with existing payment. Please contact support.')
       );
+    }
+
+    if (meetData?._refreshedTokens) {
+      try {
+        await supabaseAdmin
+          .from('psychologists')
+          .update({
+            google_calendar_credentials: {
+              access_token: meetData._refreshedTokens.access_token,
+              refresh_token: meetData._refreshedTokens.refresh_token,
+              expiry_date: meetData._refreshedTokens.expiry_date
+            }
+          })
+          .eq('id', psychologist_id);
+        console.log('✅ Persisted refreshed Google Calendar OAuth tokens (credit booking)');
+      } catch (tokenPersistErr) {
+        console.error('⚠️ Failed to persist refreshed OAuth tokens:', tokenPersistErr.message);
+      }
     }
 
     // Mark payment as fully used
@@ -4706,6 +4823,7 @@ const bookSessionWithCredit = async (req, res) => {
         scheduledDate: formattedDate,
         scheduledTime: formattedTime,
         meetLink: meetData?.meetLink || 'https://meet.google.com/new',
+        googleCalendarEventId: meetData?.eventId,
         price: session.price
       });
       console.log('✅ Email notifications sent for credit booking');

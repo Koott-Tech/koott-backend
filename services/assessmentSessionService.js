@@ -96,6 +96,7 @@ async function sendAssessmentEmails({ session, clientName, psychologistName, mee
       scheduledDate: session.scheduled_date,
       scheduledTime: session.scheduled_time,
       meetLink,
+      googleCalendarEventId: session.google_calendar_event_id,
       price: session.amount || 0
     });
     console.log('✅ Assessment session emails dispatched');

@@ -11,6 +11,7 @@
  */
 
 const { supabaseAdmin } = require('../config/supabase');
+const { assertClientPackageHasAvailableSlot } = require('./packageService');
 const { updateSlotLockStatus } = require('./slotLockService');
 const meetLinkService = require('../utils/meetLinkService');
 const emailService = require('../utils/emailService');
@@ -121,6 +122,47 @@ const createSessionFromSlotLock = async (slotLock) => {
       sessionData.session_type = 'Package Session';
     } else {
       sessionData.session_type = 'Individual Session';
+    }
+
+    if (sessionData.package_id) {
+      const { data: pkgForQuota, error: pkgQuotaErr } = await supabaseAdmin
+        .from('packages')
+        .select('*')
+        .eq('id', sessionData.package_id)
+        .single();
+
+      if (pkgQuotaErr || !pkgForQuota) {
+        console.error('❌ Package not found for quota check (slot lock):', pkgQuotaErr);
+        await updateSlotLockStatus(slotLock.order_id, 'FAILED', {
+          reason: 'PACKAGE_NOT_FOUND_FOR_QUOTA',
+          detail: pkgQuotaErr?.message
+        });
+        return {
+          success: false,
+          error: 'Invalid package for this booking',
+          code: 'PACKAGE_NOT_FOUND_FOR_QUOTA',
+          isPermanent: true
+        };
+      }
+
+      const quotaCheck = await assertClientPackageHasAvailableSlot(
+        supabaseAdmin,
+        slotLock.client_id,
+        pkgForQuota
+      );
+      if (!quotaCheck.ok) {
+        console.error('❌ Package quota exceeded (slot lock):', quotaCheck);
+        await updateSlotLockStatus(slotLock.order_id, 'FAILED', {
+          reason: 'PACKAGE_QUOTA_EXCEEDED',
+          detail: quotaCheck.message
+        });
+        return {
+          success: false,
+          error: quotaCheck.message,
+          code: 'PACKAGE_QUOTA_EXCEEDED',
+          isPermanent: true
+        };
+      }
     }
 
     // Try to create session
@@ -574,6 +616,7 @@ class MeetLinkCreationQueue {
         sessionTime: slotLock.scheduled_time,
         googleMeetLink: meetResult.meetLink,
         meetLink: meetResult.meetLink,
+        googleCalendarEventId: meetResult.eventId,
         sessionId: session.id,
         price: paymentRecord.amount,
         amount: paymentRecord.amount,

@@ -33,6 +33,83 @@ const deriveSessionCount = (pkg = {}, fallback = 1) => {
 };
 
 /**
+ * Count sessions that consume a slot toward the package quota for this client + catalog package.
+ * Matches getClientPackages / bookRemainingSession: completed + active (non-cancelled, non–no-show).
+ *
+ * @param {import('@supabase/supabase-js').SupabaseClient} supabaseAdmin
+ * @param {string} clientId
+ * @param {string} catalogPackageId - packages.id
+ * @returns {Promise<{ error: object|null, used: number }>}
+ */
+const countSessionsTowardClientPackageQuota = async (supabaseAdmin, clientId, catalogPackageId) => {
+  const { data: sessions, error } = await supabaseAdmin
+    .from('sessions')
+    .select('id, status')
+    .eq('client_id', clientId)
+    .eq('package_id', catalogPackageId);
+
+  if (error) {
+    return { error, used: 0 };
+  }
+
+  let used = 0;
+  for (const s of sessions || []) {
+    if (s.status === 'completed') {
+      used++;
+    } else if (!['cancelled', 'no_show', 'noshow'].includes(s.status)) {
+      used++;
+    }
+  }
+  return { error: null, used };
+};
+
+/**
+ * Returns ok: false if the client already has session_count sessions booked/completed for this catalog package.
+ *
+ * @param {import('@supabase/supabase-js').SupabaseClient} supabaseAdmin
+ * @param {string} clientId
+ * @param {object} packageRow - row from packages (must include id, session_count / package_type for deriveSessionCount)
+ * @returns {Promise<{ ok: boolean, httpStatus?: number, message?: string, used?: number, limit?: number }>}
+ */
+const assertClientPackageHasAvailableSlot = async (supabaseAdmin, clientId, packageRow) => {
+  if (!packageRow || !packageRow.id) {
+    return { ok: true };
+  }
+
+  const limit = deriveSessionCount(packageRow);
+  if (!Number.isFinite(limit) || limit < 1) {
+    return { ok: true };
+  }
+
+  const { error, used } = await countSessionsTowardClientPackageQuota(
+    supabaseAdmin,
+    clientId,
+    packageRow.id
+  );
+
+  if (error) {
+    return {
+      ok: false,
+      httpStatus: 500,
+      message: 'Failed to verify package session quota'
+    };
+  }
+
+  if (used >= limit) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      used,
+      limit,
+      message:
+        'This package has no remaining sessions. All sessions for this package have already been booked or completed.'
+    };
+  }
+
+  return { ok: true, used, limit };
+};
+
+/**
  * Ensure that a client_packages record exists for a package purchase.
  * Will skip creation if a record already exists for the supplied session.
  *
@@ -157,6 +234,8 @@ const ensureClientPackageRecord = async ({
 
 module.exports = {
   deriveSessionCount,
-  ensureClientPackageRecord
+  ensureClientPackageRecord,
+  countSessionsTowardClientPackageQuota,
+  assertClientPackageHasAvailableSlot
 };
 

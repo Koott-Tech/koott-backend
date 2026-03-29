@@ -591,6 +591,7 @@ const createManualBooking = async (req, res) => {
         psychologistEmail: psychologist.email,
         googleMeetLink: meetData?.meetLink,
         meetLink: meetData?.meetLink,
+        googleCalendarEventId: meetData?.eventId,
         sessionId: session.id,
         transactionId: transactionId,
         amount: amount,
@@ -1113,6 +1114,7 @@ const getAllUsers = async (req, res) => {
         const user = client.users || {};
         return {
           id: user.id || client.user_id,
+          client_id: client.id,
           email: user.email || '',
           role: user.role || 'client',
           profile_picture_url: user.profile_picture_url || null,
@@ -1122,7 +1124,8 @@ const getAllUsers = async (req, res) => {
             last_name: client.last_name || '',
             phone_number: client.phone_number || null,
             child_name: client.child_name || null,
-            child_age: client.child_age || null
+            child_age: client.child_age || null,
+            client_id: client.id
           },
           // Add name field for easy access
           name: client.first_name && client.last_name 
@@ -3223,6 +3226,7 @@ const updateSession = async (req, res) => {
             sessionTime: updatedSession.scheduled_time,
             googleMeetLink: meetLink,
             meetLink,
+            googleCalendarEventId: updatedSession.google_calendar_event_id,
             sessionId: updatedSession.id,
             price: updatedSession.price ?? paymentRow?.amount ?? 0,
             amount: updatedSession.price ?? paymentRow?.amount ?? 0,
@@ -4078,6 +4082,7 @@ const bookPackageNextSession = async (req, res) => {
             scheduledDate: scheduled_date,
             scheduledTime: scheduled_time,
             meetLink: effectiveMeetLink || undefined,
+            googleCalendarEventId: meetResult.success ? meetResult.eventId : null,
             price: null,
             status: 'booked',
             psychologistId,
