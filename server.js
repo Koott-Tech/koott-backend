@@ -827,6 +827,10 @@ if (process.env.NODE_ENV === 'development' && process.env.ENABLE_DEBUG_ROUTES ==
 // Public endpoint to get psychologist availability (no authentication required)
 // This is now handled by the availability routes with better Google Calendar integration
 
+// Public image proxy (Supabase Storage) — must stay unauthenticated
+const imageProxyRoutes = require('./routes/imageProxy');
+app.use('/api/images', imageProxyRoutes);
+
 // API routes
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/clients', clientRoutes);
