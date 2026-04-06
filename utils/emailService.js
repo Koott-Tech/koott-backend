@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const { resolveSessionDurationMinutes } = require('./sessionMeetDuration');
 
 // Always use production site in emails/links (never localhost)
 const PRODUCTION_SITE_URL = 'https://www.little.care';
@@ -249,7 +250,7 @@ class EmailService {
       // Format time directly (no timezone conversion - time is already in IST)
       const formattedTime = formatTimeFromString(finalSessionTime);
 
-      // Removed verbose logging - time is formatted directly from stored value
+      const durationMinutes = resolveSessionDurationMinutes(sessionData);
 
       // Generate calendar invites
       const { createCalendarInvites, generateGoogleCalendarLink, generateOutlookCalendarLink } = require('./calendarInviteGenerator');
@@ -263,7 +264,8 @@ class EmailService {
         meetLink: finalMeetLink,
         clientEmail,
         psychologistEmail,
-        price: finalPrice || 0
+        price: finalPrice || 0,
+        duration: durationMinutes
       };
 
       let calendarInvites = { client: null, psychologist: null };
@@ -301,11 +303,11 @@ class EmailService {
           calendarInvite: calendarInvites.client,
           googleCalendarLink,
           outlookCalendarLink,
-          calendarFromGoogleApi,
           price: finalPrice || 0,
           receiptPdfBuffer: receiptPdfBuffer || null, // Receipt PDF buffer to attach (not used anymore)
           receiptFileName: receiptFileName, // Receipt filename for attachment (not used anymore)
-          packageInfo: packageInfo || null // Package information
+          packageInfo: packageInfo || null, // Package information
+          durationMinutes
         });
       } else {
         console.log('⚠️ Skipping client email (placeholder or missing):', clientEmail);
@@ -327,7 +329,8 @@ class EmailService {
           outlookCalendarLink,
           calendarFromGoogleApi,
           price: finalPrice || 0,
-          packageInfo: packageInfo || null // Package information
+          packageInfo: packageInfo || null, // Package information
+          durationMinutes
         });
       } else {
         console.log('⚠️ Skipping psychologist email (placeholder or missing):', psychologistEmail);
@@ -370,11 +373,11 @@ class EmailService {
       calendarInvite,
       googleCalendarLink,
       outlookCalendarLink,
-      calendarFromGoogleApi = false,
       price,
       receiptPdfBuffer,
       receiptFileName,
-      packageInfo
+      packageInfo,
+      durationMinutes = 50
     } = emailData;
 
     // Get logo URL - use favicon for email compatibility
@@ -463,7 +466,7 @@ class EmailService {
                         ${packageLine}
                         •⁠  ⁠Date: ${formattedDateShort}<br>
                         •⁠  ⁠Time: ${scheduledTime} (IST)<br>
-                        •⁠  ⁠Duration: 50 min<br>
+                        •⁠  ⁠Duration: ${durationMinutes} min<br>
                         ${formattedPrice ? `•⁠  ⁠Price: ₹${formattedPrice}<br>` : ''}
                       </div>
                       
@@ -494,17 +497,7 @@ class EmailService {
                       </table>
                       `}
                       
-                      ${calendarFromGoogleApi ? `
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
-                        <tr>
-                          <td style="padding: 14px 16px; background: #eef2ff; border-radius: 8px; border: 1px solid #c7d2fe;">
-                            <p style="color: #3730a3; font-size: 14px; margin: 0; line-height: 1.5;">
-                              <strong>Calendar:</strong> This session is already on your Google Calendar from the official invite (same time as above). Use <strong>Join Your Session</strong> above for the Meet link—no need to add the event again.
-                            </p>
-                          </td>
-                        </tr>
-                      </table>
-                      ` : googleCalendarLink || outlookCalendarLink ? `
+                      ${googleCalendarLink || outlookCalendarLink ? `
                       <!-- Add to Calendar Section -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
@@ -606,7 +599,8 @@ class EmailService {
       outlookCalendarLink,
       calendarFromGoogleApi = false,
       price,
-      packageInfo
+      packageInfo,
+      durationMinutes = 50
     } = emailData;
     
     // Format price for display (convert to number if string, then format with commas)
@@ -677,7 +671,7 @@ class EmailService {
                               </tr>
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Duration:</strong></td>
-                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">50 min</td>
+                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${durationMinutes} min</td>
                               </tr>
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client:</strong></td>
@@ -1352,7 +1346,8 @@ class EmailService {
         scheduledTime,
         sessionId,
         meetLink,
-        isFreeAssessment = false
+        isFreeAssessment = false,
+        durationMinutes: rescheduleDurationFromPayload
       } = sessionData;
 
       // Format dates as "Mon, 12 Jan 2026" for email
@@ -1397,6 +1392,14 @@ class EmailService {
       // Generate calendar links for the new session
       let googleCalendarLink = null;
       let outlookCalendarLink = null;
+      const rescheduleCalendarMinutes = isFreeAssessment
+        ? 20
+        : typeof rescheduleDurationFromPayload === 'number' &&
+            Number.isFinite(rescheduleDurationFromPayload) &&
+            rescheduleDurationFromPayload > 0
+          ? Math.round(rescheduleDurationFromPayload)
+          : 50;
+
       if (meetLink && scheduledDate && scheduledTime) {
         try {
           const { generateGoogleCalendarLink, generateOutlookCalendarLink } = require('./calendarInviteGenerator');
@@ -1406,7 +1409,7 @@ class EmailService {
             sessionDate: scheduledDate,
             sessionTime: scheduledTime,
             meetLink: meetLink,
-            duration: 50 // Paid session: 50 minutes
+            duration: rescheduleCalendarMinutes
           };
           googleCalendarLink = generateGoogleCalendarLink(calendarData);
           outlookCalendarLink = generateOutlookCalendarLink(calendarData);

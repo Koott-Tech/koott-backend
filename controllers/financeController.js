@@ -84,8 +84,9 @@ const getDashboard = async (req, res) => {
       );
     }
 
-    const { dateFrom, dateTo, includeCharts } = req.query;
-    console.log('Processing dashboard with dates:', { dateFrom, dateTo });
+    const { dateFrom, dateTo, includeCharts, allTime } = req.query;
+    const allTimeMode = String(allTime || '').toLowerCase() === 'true';
+    console.log('Processing dashboard with dates:', { dateFrom, dateTo, allTimeMode });
     const shouldIncludeCharts = includeCharts !== 'false'; // Default to true for backward compatibility
     
     // Get current date in IST timezone for accurate defaults
@@ -108,16 +109,28 @@ const getDashboard = async (req, res) => {
     const startOfYear = new Date(today.getFullYear(), 0, 1);
 
     // Calculate date ranges
-    // If dateFrom/dateTo are provided, use them for filtering (user-selected range)
-    // If not provided, default to current month (start of month to today) in IST
-    const mtdFrom = dateFrom || getISTDateString(startOfMonth);
-    const mtdTo = dateTo || getISTDateString(today);
-    
+    // allTime: no MTD bounds (full-history metrics for the selected summary path)
+    // Else if dateFrom/dateTo are provided, use them; else default to current month (IST)
+    let mtdFrom;
+    let mtdTo;
+    if (allTimeMode) {
+      mtdFrom = null;
+      mtdTo = null;
+    } else {
+      mtdFrom = dateFrom || getISTDateString(startOfMonth);
+      mtdTo = dateTo || getISTDateString(today);
+    }
+
     // Check if we should use stored monthly snapshot
-    // Extract year and month from mtdFrom (assuming it's start of month)
-    const filterDate = new Date(mtdFrom);
-    const filterYear = filterDate.getFullYear();
-    const filterMonth = filterDate.getMonth() + 1; // JavaScript months are 0-indexed
+    let filterYear = today.getFullYear();
+    let filterMonth = today.getMonth() + 1;
+    if (mtdFrom) {
+      const filterDate = new Date(mtdFrom);
+      if (!isNaN(filterDate.getTime())) {
+        filterYear = filterDate.getFullYear();
+        filterMonth = filterDate.getMonth() + 1;
+      }
+    }
     
     // Check if this is a full month filter (from start to end of month)
     const isFullMonthFilter = dateFrom && dateTo;
@@ -830,9 +843,11 @@ const getDashboard = async (req, res) => {
           let shouldIncludeForCompletedCount = false;
           
           // Always use mtdFrom/mtdTo for filtering (defaults to current month if not provided)
+          let origInRange = false;
+          let schedInRange = false;
           if (mtdFrom && mtdTo) {
-            const origInRange = origDate ? isInDateRange(origDate) : false;
-            const schedInRange = s.scheduled_date ? isInDateRange(s.scheduled_date) : false;
+            origInRange = origDate ? isInDateRange(origDate) : false;
+            schedInRange = s.scheduled_date ? isInDateRange(s.scheduled_date) : false;
             
             // REVENUE: Use original_scheduled_date for non-completed, completion_date for completed sessions
             // This ensures revenue is counted in the month when session was originally booked, not when rescheduled

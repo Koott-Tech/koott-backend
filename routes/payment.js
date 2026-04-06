@@ -3,6 +3,7 @@ const router = express.Router();
 const { 
   createPaymentOrder,
   createCashPayment,
+  handlePaymentSuccess,
   handlePaymentFailure, 
   getPaymentStatus 
 } = require('../controllers/paymentController');
@@ -35,6 +36,18 @@ const verifySignatureLimiter = rateLimit({
   legacyHeaders: false
 });
 
+// Confirms payment + creates session (signature-verified; no JWT). Was missing from router — caused ~30s wait until booking-status poll reconciled via Razorpay.
+const paymentSuccessLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  message: {
+    success: false,
+    message: 'Too many requests. Please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
 // Create payment order (requires authentication)
 router.post('/create-order', authenticateToken, createPaymentOrder);
 
@@ -48,6 +61,8 @@ router.post('/webhook', handleRazorpayWebhook);
 // Payment status endpoints (read-only, for frontend polling)
 router.get('/booking-status/:orderId', bookingStatusLimiter, getBookingStatusByOrderId); // Public - used by success page
 router.post('/verify-signature', verifySignatureLimiter, verifyPaymentSignature); // Optional verification (doesn't create session)
+
+router.post('/success', paymentSuccessLimiter, handlePaymentSuccess);
 
 // Legacy endpoints (kept for backward compatibility)
 router.post('/failure', handlePaymentFailure);

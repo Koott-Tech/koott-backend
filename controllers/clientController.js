@@ -14,6 +14,7 @@ const {
 } = require('../utils/helpers');
 const availabilityService = require('../utils/availabilityCalendarService');
 const meetLinkService = require('../utils/meetLinkService');
+const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const userInteractionLogger = require('../utils/userInteractionLogger');
 const { reserveAssessmentSlot, bookAssessment, getAssessmentSessions } = require('./assessmentBookingController');
 
@@ -1033,12 +1034,13 @@ const bookSession = async (req, res) => {
       const clientUserEmail = Array.isArray(clientDetails.user)
         ? clientDetails.user[0]?.email
         : clientDetails.user?.email;
+      const meetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
       const sessionData = {
         summary: `Therapy Session - ${clientDetails?.child_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
         description: `Therapy session between ${clientDetails?.child_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'}`,
         startDate: scheduled_date,
         startTime: scheduled_time,
-        endTime: addMinutesToTime(scheduled_time, 50), // 50-minute session
+        endTime: addMinutesToTime(scheduled_time, meetMinutes),
         clientEmail: clientUserEmail,
         psychologistEmail: psychologistDetails.email
       };
@@ -1225,7 +1227,8 @@ const bookSession = async (req, res) => {
         scheduledTime: scheduled_time,
         meetLink: meetData.meetLink,
         googleCalendarEventId: meetData.eventId,
-        price: session.price
+        price: session.price,
+        durationMinutes: meetMinutes
       });
 
       console.log('✅ Email notifications sent successfully');
@@ -1251,6 +1254,7 @@ const bookSession = async (req, res) => {
             time: scheduled_time,
             meetLink: meetData.meetLink,
             psychologistName: psychologistName, // Add psychologist name to WhatsApp message
+            durationMinutes: meetMinutes,
           };
           const clientWaResult = await sendBookingConfirmation(clientPhone, clientDetails_wa);
           if (clientWaResult?.success) {
@@ -1360,7 +1364,8 @@ const bookSession = async (req, res) => {
             `New session booked with Little Care.\n\n` +
             `${bullet}Client: ${clientName}\n` +
             `${bullet}Date: ${formattedDate}\n` +
-            `${bullet}Time: ${formattedTime} (IST)\n\n` +
+            `${bullet}Time: ${formattedTime} (IST)\n` +
+            `${bullet}Duration: ${meetMinutes} min\n\n` +
             `Join link:\n${meetData.meetLink}\n\n` +
             `Please be ready 5 mins early.\n\n` +
             `For help: ${supportPhone}\n\n` +
@@ -2396,6 +2401,16 @@ const rescheduleSession = async (req, res) => {
       };
       
       const newTime24Hour = convertTo24Hour(new_time);
+
+      let rescheduleTherapyMeetMinutes = 50;
+      if (!isFreeAssessment && session.package_id) {
+        const { data: resPkg } = await supabaseAdmin
+          .from('packages')
+          .select('package_type')
+          .eq('id', session.package_id)
+          .maybeSingle();
+        rescheduleTherapyMeetMinutes = getMeetEventDurationMinutes(resPkg?.package_type);
+      }
       
       const sessionDataForMeet = {
         summary: isFreeAssessment 
@@ -2408,7 +2423,7 @@ const rescheduleSession = async (req, res) => {
         startTime: newTime24Hour,
         endTime: isFreeAssessment 
           ? addMinutesToTime(newTime24Hour, 20)
-          : addMinutesToTime(newTime24Hour, 50),
+          : addMinutesToTime(newTime24Hour, rescheduleTherapyMeetMinutes),
         clientEmail: clientDetails?.email,
         psychologistEmail: psychologistDetails?.email,
         attendees: []
@@ -2702,6 +2717,16 @@ const rescheduleSession = async (req, res) => {
     // Create notification for psychologist
     await createRescheduleNotification(session, updatedSession, client.id);
 
+    let rescheduleNotifyDurationMinutes = session.session_type === 'free_assessment' ? 20 : 50;
+    if (session.session_type !== 'free_assessment' && session.package_id) {
+      const { data: reschedulePkgForNotify } = await supabaseAdmin
+        .from('packages')
+        .select('package_type')
+        .eq('id', session.package_id)
+        .maybeSingle();
+      rescheduleNotifyDurationMinutes = getMeetEventDurationMinutes(reschedulePkgForNotify?.package_type);
+    }
+
     // Send email notifications
     try {
       const emailService = require('../utils/emailService');
@@ -2725,7 +2750,8 @@ const rescheduleSession = async (req, res) => {
             scheduledTime: updatedSession.scheduled_time,
             sessionId: updatedSession.id,
             meetLink: meetData?.meetLink,
-            isFreeAssessment: session.session_type === 'free_assessment'
+            isFreeAssessment: session.session_type === 'free_assessment',
+            durationMinutes: rescheduleNotifyDurationMinutes
           },
           session.scheduled_date,
           session.scheduled_time
@@ -2798,7 +2824,9 @@ const rescheduleSession = async (req, res) => {
           oldTime: session.scheduled_time,
           newDate: updatedSession.scheduled_date,
           newTime: updatedSession.scheduled_time,
-          newMeetLink: meetData?.meetLink || null
+          newMeetLink: meetData?.meetLink || null,
+          isFreeAssessment: session.session_type === 'free_assessment',
+          durationMinutes: rescheduleNotifyDurationMinutes
         });
         
         if (clientResult?.success) {
@@ -2835,12 +2863,17 @@ const rescheduleSession = async (req, res) => {
         const bullet = '•⁠  ⁠';
         const meetLinkLine = meetData?.meetLink ? `Join link:\n${meetData.meetLink}\n\n` : '';
         
+        const psychRescheduleDurationLine = !isFreeAssessment
+          ? `${bullet}Duration: ${rescheduleNotifyDurationMinutes} min\n`
+          : '';
         const psychologistMessage =
           `Hey 👋\n\n` +
           `${isFreeAssessment ? 'Free assessment' : 'Session'} rescheduled with Little Care.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Old: ${oldDateTime}\n` +
-          `${bullet}New: ${newDateTime}\n\n` +
+          `${bullet}New: ${newDateTime}\n` +
+          psychRescheduleDurationLine +
+          `\n` +
           meetLinkLine +
           `Please be ready 5 mins early.\n\n` +
           `For help: +91 95390 07766\n\n` +
@@ -3163,7 +3196,7 @@ const getSession = async (req, res) => {
         // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
         const { data: packageData, error: packageError } = await supabaseAdmin
           .from('packages')
-          .select('id, package_type, price, description, session_count')
+          .select('id, name, package_type, price, description, session_count')
           .eq('id', session.package_id)
           .single();
         
@@ -3235,6 +3268,12 @@ const getPsychologistPackages = async (req, res) => {
   try {
     const { psychologistId } = req.params;
     console.log(`📦 Getting packages for psychologist ${psychologistId}`);
+
+    const { ensureChildSpecialistPackagesSynced } = require('../utils/childSpecialistPricing');
+    const syncResult = await ensureChildSpecialistPackagesSynced(supabaseAdmin, psychologistId);
+    if (syncResult.synced) {
+      console.log(`📦 Auto-synced child specialist packages for ${psychologistId} (client route)`);
+    }
 
     // Get packages for this psychologist
     const { data: packages, error: packagesError } = await supabaseAdmin
@@ -3901,12 +3940,13 @@ const bookRemainingSession = async (req, res) => {
         // Create Meet link asynchronously (after response is sent - doesn't block user)
         console.log('🔄 Creating real Google Meet link for package session (async)...');
         
+        const meetMinutes = getMeetEventDurationMinutes(packageInfo.packageType);
         const meetSessionData = {
           summary: `Therapy Session - ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
           description: `Therapy session between ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'} ${psychologistDetails?.last_name || ''}`,
           startDate: scheduled_date,
           startTime: scheduled_time,
-          endTime: addMinutesToTime(scheduled_time, 50), // 50-minute session
+          endTime: addMinutesToTime(scheduled_time, meetMinutes),
           clientEmail: Array.isArray(clientDetails.user)
             ? clientDetails.user[0]?.email
             : clientDetails.user?.email,
@@ -4010,7 +4050,8 @@ const bookRemainingSession = async (req, res) => {
             status: 'booked',
             psychologistId: psychologistId,
             clientId: clientId,
-            packageInfo: packageInfo
+            packageInfo: packageInfo,
+            durationMinutes: meetMinutes
           });
           console.log('✅ Email notifications sent successfully');
         } catch (emailError) {
@@ -4039,7 +4080,8 @@ const bookRemainingSession = async (req, res) => {
               time: scheduled_time,
               meetLink: emailMeetLink,
               psychologistName: psychologistName,
-              packageInfo: packageInfo
+              packageInfo: packageInfo,
+              durationMinutes: meetMinutes
             };
             const clientWaResult = await sendBookingConfirmation(clientPhone, clientDetails_wa);
             if (clientWaResult?.success) {
@@ -4094,7 +4136,8 @@ const bookRemainingSession = async (req, res) => {
               `${bullet}Client: ${clientName}\n` +
               packageLine +
               `${bullet}Date: ${formattedDate}\n` +
-              `${bullet}Time: ${formattedTime} (IST)\n\n` +
+              `${bullet}Time: ${formattedTime} (IST)\n` +
+              `${bullet}Duration: ${meetMinutes} min\n\n` +
               `Join link:\n${emailMeetLink}\n\n` +
               `Please be ready 5 mins early.\n\n` +
               `For help: ${supportPhone}\n\n` +
@@ -4626,6 +4669,16 @@ const bookSessionWithCredit = async (req, res) => {
       );
     }
 
+    let creditMeetMinutes = 50;
+    if (payment.package_id && String(payment.package_id) !== 'individual') {
+      const { data: creditPkg } = await supabaseAdmin
+        .from('packages')
+        .select('package_type')
+        .eq('id', payment.package_id)
+        .maybeSingle();
+      creditMeetMinutes = getMeetEventDurationMinutes(creditPkg?.package_type);
+    }
+
     // Fetch client and psychologist details for meet link
     const { data: clientDetails, error: clientDetailsError } = await supabaseAdmin
       .from('clients')
@@ -4686,7 +4739,7 @@ const bookSessionWithCredit = async (req, res) => {
         description: `Therapy session between ${clientDetails?.child_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'}`,
         startDate: scheduled_date,
         startTime: scheduled_time,
-        endTime: addMinutesToTime(scheduled_time, 50),
+        endTime: addMinutesToTime(scheduled_time, creditMeetMinutes),
         clientEmail: Array.isArray(clientDetails.user)
           ? clientDetails.user[0]?.email
           : clientDetails.user?.email,
@@ -4824,7 +4877,8 @@ const bookSessionWithCredit = async (req, res) => {
         scheduledTime: formattedTime,
         meetLink: meetData?.meetLink || 'https://meet.google.com/new',
         googleCalendarEventId: meetData?.eventId,
-        price: session.price
+        price: session.price,
+        durationMinutes: creditMeetMinutes
       });
       console.log('✅ Email notifications sent for credit booking');
 
@@ -4842,7 +4896,8 @@ const bookSessionWithCredit = async (req, res) => {
             date: formattedDate,
             time: formattedTime,
             meetLink: meetData.meetLink,
-            psychologistName
+            psychologistName,
+            durationMinutes: creditMeetMinutes
           });
           console.log('✅ WhatsApp confirmation sent to client (credit booking)');
         }
@@ -4873,7 +4928,8 @@ const bookSessionWithCredit = async (req, res) => {
             `New session booked with Little Care.\n\n` +
             `${bullet}Client: ${clientName}\n` +
             `${bullet}Date: ${formattedDateShort}\n` +
-            `${bullet}Time: ${formattedTimeFriendly} (IST)\n\n` +
+            `${bullet}Time: ${formattedTimeFriendly} (IST)\n` +
+            `${bullet}Duration: ${creditMeetMinutes} min\n\n` +
             `Join link:\n${meetData.meetLink}\n\n` +
             `Please be ready 5 mins early.\n\n` +
             `For help: ${supportPhone}\n\n` +

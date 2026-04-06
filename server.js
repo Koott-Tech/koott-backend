@@ -43,6 +43,7 @@ const careerRoutes = require('./routes/careers');
 // const securityRoutes = require('./routes/security');
 const betterParentingRoutes = require('./routes/betterParenting');
 const financeRoutes = require('./routes/finance');
+const { isChildSpecialistEffective } = require('./utils/childSpecialistPricing');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -301,6 +302,17 @@ const formatPublicPsychologist = (psych) => {
   if (!psych) return null;
 
   let extractedPrice = psych.individual_session_price;
+  if (isChildSpecialistEffective(psych) && psych.child_specialist_pricing?.initial) {
+    const init = psych.child_specialist_pricing.initial;
+    const candidates = ['parent_only', 'child_only', 'family']
+      .map((k) => init[k]?.price)
+      .filter((p) => p != null && p !== '')
+      .map((p) => Number(p))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (candidates.length > 0) {
+      extractedPrice = Math.min(...candidates);
+    }
+  }
   if (!extractedPrice) {
     const priceMatch = psych.description?.match(/Individual Session Price: [₹\$](\d+(?:\.\d+)?)/);
     extractedPrice = priceMatch ? parseInt(priceMatch[1]) : null;
@@ -325,7 +337,10 @@ const formatPublicPsychologist = (psych) => {
     description: psych.description || 'Professional psychologist dedicated to helping clients achieve mental wellness.',
     profile_picture_url: null,
     cover_image_url: psych.cover_image_url,
-    price: extractedPrice
+    price: extractedPrice,
+    specialist_category: psych.specialist_category ?? null,
+    child_specialist_pricing: psych.child_specialist_pricing ?? null,
+    better_parent_pricing: psych.better_parent_pricing ?? null
     // OPTIMIZED: Removed unused fields (phone, ug_college, pg_college, phd_college, faq fields)
   };
 };
@@ -352,6 +367,9 @@ const formatPublicPsychologistCard = (psych) => {
     description: full.description || fullDesc,
     personality_traits: full.personality_traits || [],
     area_of_expertise: full.area_of_expertise || [],
+    specialist_category: full.specialist_category ?? null,
+    // Needed on list payloads so booking/profile can treat as child specialist before /details returns
+    child_specialist_pricing: full.child_specialist_pricing ?? null,
   };
 };
 
@@ -382,7 +400,10 @@ app.get('/api/public/psychologists', async (req, res) => {
         individual_session_price,
         display_order,
         created_at,
-        designation
+        designation,
+        specialist_category,
+        child_specialist_pricing,
+        better_parent_pricing
       `)
       .neq('email', assessmentEmail)
       .eq('active', true) // Only show active psychologists on client-facing pages
@@ -538,7 +559,10 @@ app.get('/api/public/psychologists/:psychologistId/details', async (req, res) =>
       pg_college: psychologist.pg_college ?? null,
       mphil_college: psychologist.mphil_college ?? null,
       phd_college: psychologist.phd_college ?? null,
-      area_of_expertise: psychologist.area_of_expertise ?? formattedPsychologist.area_of_expertise ?? []
+      area_of_expertise: psychologist.area_of_expertise ?? formattedPsychologist.area_of_expertise ?? [],
+      specialist_category: psychologist.specialist_category ?? null,
+      child_specialist_pricing: psychologist.child_specialist_pricing ?? null,
+      better_parent_pricing: psychologist.better_parent_pricing ?? null
     });
 
     res.json({
@@ -561,8 +585,14 @@ app.get('/api/public/psychologists/:psychologistId/details', async (req, res) =>
 app.get('/api/public/psychologists/:psychologistId/packages', async (req, res) => {
   try {
     const { supabaseAdmin } = require('./config/supabase');
+    const { ensureChildSpecialistPackagesSynced } = require('./utils/childSpecialistPricing');
     const { psychologistId } = req.params;
     console.log(`📦 Getting packages for psychologist ${psychologistId}`);
+
+    const syncResult = await ensureChildSpecialistPackagesSynced(supabaseAdmin, psychologistId);
+    if (syncResult.synced) {
+      console.log(`📦 Auto-synced child specialist packages for ${psychologistId}`);
+    }
 
     // Get packages for this psychologist
     // Use supabaseAdmin to bypass RLS (public endpoint, backend handles auth logic)

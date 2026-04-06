@@ -14,6 +14,7 @@ const { supabaseAdmin } = require('../config/supabase');
 const { assertClientPackageHasAvailableSlot } = require('./packageService');
 const { updateSlotLockStatus } = require('./slotLockService');
 const meetLinkService = require('../utils/meetLinkService');
+const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const emailService = require('../utils/emailService');
 const userInteractionLogger = require('../utils/userInteractionLogger');
 
@@ -429,6 +430,7 @@ class MeetLinkCreationQueue {
 
     // Fetch package details if this is a package session
     let packageInfo = null;
+    let meetDurationMinutes = 50;
     if (paymentRecord.package_id && paymentRecord.package_id !== 'null' && paymentRecord.package_id !== 'undefined' && paymentRecord.package_id !== 'individual') {
       try {
         const { data: packageData, error: packageError } = await supabaseAdmin
@@ -438,6 +440,7 @@ class MeetLinkCreationQueue {
           .single();
         
         if (!packageError && packageData) {
+          meetDurationMinutes = getMeetEventDurationMinutes(packageData.package_type);
           // Calculate package progress: count completed sessions for this package
           const { data: packageSessions, error: sessionsError } = await supabaseAdmin
             .from('sessions')
@@ -465,9 +468,8 @@ class MeetLinkCreationQueue {
       }
     }
 
-    // Calculate end time (50 minutes for therapy session)
     const { addMinutesToTime } = require('../utils/helpers');
-    const endTime = addMinutesToTime(slotLock.scheduled_time, 50);
+    const endTime = addMinutesToTime(slotLock.scheduled_time, meetDurationMinutes);
 
     // Create Google Meet link
     // Handle client name: prefer child_name, but skip if it's "Pending" or empty
@@ -620,6 +622,7 @@ class MeetLinkCreationQueue {
         sessionId: session.id,
         price: paymentRecord.amount,
         amount: paymentRecord.amount,
+        durationMinutes: meetDurationMinutes,
         status: session.status || 'booked',
         psychologistId: slotLock.psychologist_id,
         clientId: slotLock.client_id,
@@ -664,6 +667,7 @@ class MeetLinkCreationQueue {
           time: slotLock.scheduled_time,
           meetLink: meetResult.meetLink,
           psychologistName: psychologistName,
+          durationMinutes: meetDurationMinutes,
           packageInfo: packageInfo, // Include package details
           receiptPdfBuffer: receiptResult?.pdfBuffer || null,
           receiptNumber: receiptResult?.receiptNumber || null,
@@ -736,7 +740,8 @@ class MeetLinkCreationQueue {
           `${bullet}Client: ${clientName}\n` +
           packageLine +
           `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n\n` +
+          `${bullet}Time: ${formattedTime} (IST)\n` +
+          `${bullet}Duration: ${meetDurationMinutes} min\n\n` +
           `Join link:\n${meetResult.meetLink}\n\n` +
           `Please be ready 5 mins early.\n\n` +
           `For help: +91 95390 07766\n\n` +

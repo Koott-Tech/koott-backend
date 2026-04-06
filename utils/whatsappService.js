@@ -1,6 +1,7 @@
 const https = require('https');
 const { URL } = require('url');
 const { supabaseAdmin } = require('../config/supabase');
+const { resolveSessionDurationMinutes } = require('./sessionMeetDuration');
 
 // Always use production site in WhatsApp links (never localhost)
 const PRODUCTION_SITE_URL = 'https://www.little.care';
@@ -309,7 +310,7 @@ function buildBookingMessage({ childName, date, time, meetLink, psychologistName
 /**
  * Send booking confirmation WhatsApp messages (multi-part)
  * @param {string} toPhoneE164 - Phone number in E.164 format
- * @param {Object} details - { childName, date, time, meetLink, psychologistName?, receiptUrl?, isFreeAssessment?, packageInfo? }
+ * @param {Object} details - { childName, date, time, meetLink, psychologistName?, durationMinutes?, sessionDuration?, isFreeAssessment?, packageInfo? }
  * @returns {Promise<Object>} - { success: boolean, ... }
  */
 async function sendBookingConfirmation(toPhoneE164, details) {
@@ -382,8 +383,10 @@ async function sendBookingConfirmation(toPhoneE164, details) {
     ? `${bullet}Little Care Specialist\n`
     : `${bullet}Specialist: ${specialist}\n`;
 
-  // Duration line: 50 min for paid sessions, not shown for free assessment
-  const durationLine = !isFreeAssessment ? `${bullet}Duration: 50 min\n` : '';
+  const bookingDurationMinutes = isFreeAssessment
+    ? 20
+    : resolveSessionDurationMinutes(details || {});
+  const durationLine = !isFreeAssessment ? `${bullet}Duration: ${bookingDurationMinutes} min\n` : '';
 
   // Format message - same structure for all session types
   const message =
@@ -455,7 +458,9 @@ async function sendRescheduleConfirmation(toPhoneE164, details) {
     oldTime,
     newDate,
     newTime,
-    newMeetLink
+    newMeetLink,
+    durationMinutes,
+    isFreeAssessment = false
   } = details || {};
 
   const bullet = '•⁠  ⁠';
@@ -463,11 +468,18 @@ async function sendRescheduleConfirmation(toPhoneE164, details) {
   const newFormatted = `${formatRescheduleDate(newDate)}, ${formatRescheduleTime(newTime)}`;
   
   const newLinkBlock = newMeetLink ? `${bullet}New link: ${newMeetLink}\n\n` : '';
+  const durationLine =
+    !isFreeAssessment &&
+    typeof durationMinutes === 'number' &&
+    durationMinutes > 0
+      ? `${bullet}Duration: ${durationMinutes} min\n`
+      : '';
 
   const message =
     `Hey, Your session has been rescheduled.\n\n` +
     `${bullet}Old: ${oldFormatted}\n` +
     `${bullet}New: ${newFormatted}\n` +
+    durationLine +
     newLinkBlock +
     `We're looking forward to seeing you at the new time.\n\n` +
     `— Little Care 💜`;

@@ -9,9 +9,11 @@ const {
 const meetLinkService = require('../utils/meetLinkService');
 const assessmentSessionService = require('../services/assessmentSessionService');
 const { addMinutesToTime, errorResponse, formatTimeForDisplay } = require('../utils/helpers');
+const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const emailService = require('../utils/emailService');
 const userInteractionLogger = require('../utils/userInteractionLogger');
 const { generateAndStoreReceipt } = require('../services/receiptService');
+const { processPaymentCaptured } = require('./razorpayWebhookController');
 
 // Generate and store PDF receipt in Supabase storage
 /**
@@ -390,31 +392,47 @@ const generateReceiptPDF = async (receiptDetails) => {
       quantity: receiptDetails.quantity
     });
     
-    drawText(
-      itemDescription, 
-      config.fields.itemDescription.x, 
-      config.fields.itemDescription.y, 
+    const lineSpacing = config.fontSizes.lineHeight || config.fontSizes.value * 1.2;
+    const blockGap = 14;
+    const itemLineCount = drawText(
+      itemDescription,
+      config.fields.itemDescription.x,
+      config.fields.itemDescription.y,
       config.fontSizes.value,
       false,
-      config.fields.itemDescription.alignment
+      config.fields.itemDescription.alignment,
+      270,
+      lineSpacing
     );
+    const itemBottomY = config.fields.itemDescription.y - (itemLineCount - 1) * lineSpacing;
+    const sessionLineY = itemBottomY - blockGap;
 
-    // Session Details (date and time, left aligned) - time in 12-hour AM/PM, no seconds
-    const sessionDetails = `${new Date(receiptDetails.session_date).toLocaleDateString('en-IN')} at ${formatTimeForDisplay(receiptDetails.session_time)}`;
+    // Session row: date/time + optional "Session x of y" + duration (receiptService)
+    let sessionDetailsLine = `${new Date(receiptDetails.session_date).toLocaleDateString('en-IN')} at ${formatTimeForDisplay(receiptDetails.session_time)}`;
+    const sessionBits = [];
+    if (receiptDetails.package_session_label) {
+      sessionBits.push(receiptDetails.package_session_label);
+    }
+    if (receiptDetails.session_duration_label) {
+      sessionBits.push(receiptDetails.session_duration_label);
+    }
+    if (sessionBits.length) {
+      sessionDetailsLine += ` · ${sessionBits.join(' · ')}`;
+    }
     drawText(
-      sessionDetails, 
-      config.fields.sessionDetails.x, 
-      config.fields.sessionDetails.y, 
+      sessionDetailsLine,
+      config.fields.sessionDetails.x,
+      sessionLineY,
       config.fontSizes.value,
       false,
       config.fields.sessionDetails.alignment
     );
 
-    // Therapist Name (left aligned)
+    const therapistLineY = sessionLineY - blockGap;
     drawText(
-      receiptDetails.psychologist_name, 
-      config.fields.therapistName.x, 
-      config.fields.therapistName.y, 
+      receiptDetails.psychologist_name,
+      config.fields.therapistName.x,
+      therapistLineY,
       config.fontSizes.value,
       false,
       config.fields.therapistName.alignment
@@ -448,32 +466,40 @@ const generateReceiptPDF = async (receiptDetails) => {
       config.fields.quantity.alignment
     );
 
-    // Unit Price (center aligned) - only price number, no INR
+    const unitPriceStr =
+      receiptDetails.unit_price_display != null && receiptDetails.unit_price_display !== ''
+        ? String(receiptDetails.unit_price_display)
+        : String(receiptDetails.amount ?? '');
+    const lineTotalStr = String(
+      receiptDetails.line_total_amount != null ? receiptDetails.line_total_amount : receiptDetails.amount
+    );
+
+    // Unit Price (center aligned) — per session when multi-session package
     drawText(
-      receiptDetails.amount, 
-      config.fields.unitPrice.x, 
-      config.fields.unitPrice.y, 
+      unitPriceStr,
+      config.fields.unitPrice.x,
+      config.fields.unitPrice.y,
       config.fontSizes.value,
       false,
       config.fields.unitPrice.alignment
     );
 
-    // Line Total (right aligned) - same font weight as unit price, no INR
+    // Line Total (right aligned) — full amount paid
     drawText(
-      receiptDetails.amount, 
-      config.fields.lineTotal.x, 
-      config.fields.lineTotal.y, 
+      lineTotalStr,
+      config.fields.lineTotal.x,
+      config.fields.lineTotal.y,
       config.fontSizes.value,
-      false, // regular weight, same as unit price
+      false,
       config.fields.lineTotal.alignment
     );
 
     // Grand Total (right aligned, bold) - currency from receiptDetails
     const currency = receiptDetails.currency || 'INR';
     drawText(
-      `${currency} ${receiptDetails.amount}`, 
-      config.fields.grandTotal.x, 
-      config.fields.grandTotal.y, 
+      `${currency} ${lineTotalStr}`,
+      config.fields.grandTotal.x,
+      config.fields.grandTotal.y,
       config.fontSizes.value,
       true, // bold
       config.fields.grandTotal.alignment
@@ -546,7 +572,18 @@ const generateReceiptPDFFallback = async (receiptDetails) => {
       doc.fontSize(10).font('Helvetica');
       doc.text(`Date: ${new Date(receiptDetails.session_date).toLocaleDateString('en-IN')}`);
       doc.text(`Time: ${formatTimeForDisplay(receiptDetails.session_time)}`);
+      if (receiptDetails.package_session_label) {
+        doc.text(receiptDetails.package_session_label);
+      }
+      if (receiptDetails.session_duration_label) {
+        doc.text(`Session length: ${receiptDetails.session_duration_label}`);
+      }
       doc.text(`Status: ${receiptDetails.session_status || 'booked'}`);
+      doc.moveDown();
+
+      doc.fontSize(12).font('Helvetica-Bold').text('Service:');
+      doc.fontSize(10).font('Helvetica');
+      doc.text(String(receiptDetails.item_description || 'Therapy session'));
       doc.moveDown();
 
       // Psychologist details
@@ -568,7 +605,18 @@ const generateReceiptPDFFallback = async (receiptDetails) => {
       doc.fontSize(12).font('Helvetica-Bold').text('Payment Details:');
       doc.fontSize(10).font('Helvetica');
       doc.text(`Transaction ID: ${receiptDetails.transaction_id}`);
-      doc.text(`Amount: ₹${receiptDetails.amount}`);
+      if (
+        receiptDetails.is_package &&
+        receiptDetails.quantity &&
+        Number(receiptDetails.quantity) > 1 &&
+        receiptDetails.unit_price_display
+      ) {
+        doc.text(`Qty (sessions in package): ${receiptDetails.quantity}`);
+        doc.text(`Price per session: ₹${receiptDetails.unit_price_display}`);
+        doc.text(`Package total: ₹${receiptDetails.line_total_amount ?? receiptDetails.amount}`);
+      } else {
+        doc.text(`Amount: ₹${receiptDetails.amount}`);
+      }
       doc.text(`Payment Date: ${new Date(receiptDetails.payment_date || new Date()).toLocaleDateString('en-IN')}`);
       doc.moveDown();
 
@@ -1380,6 +1428,57 @@ const handlePaymentSuccess = async (req, res) => {
     console.log('   Scheduled Date:', actualScheduledDate);
     console.log('   Scheduled Time:', actualScheduledTime);
 
+    // Same path as Razorpay payment.captured webhook: create session from slot lock (or legacy notes).
+    // Critical when webhooks never reach this server (local dev, misconfigured webhook URL) or are delayed.
+    if (!isAssessment) {
+      try {
+        const amountPaise = Math.round(Number(paymentRecord.amount) * 100);
+        const capturePayload = {
+          payment: {
+            entity: {
+              id: razorpay_payment_id,
+              order_id: razorpay_order_id,
+              amount: amountPaise,
+              currency: 'INR',
+              status: 'captured'
+            }
+          }
+        };
+        const captureResult = await processPaymentCaptured(
+          capturePayload,
+          `handlePaymentSuccess_${razorpay_payment_id}`,
+          true
+        );
+        if (captureResult.success && captureResult.sessionId) {
+          return res.json({
+            success: true,
+            message: captureResult.alreadyProcessed
+              ? 'Payment already processed'
+              : 'Payment verified and booking confirmed',
+            data: {
+              sessionId: captureResult.sessionId,
+              transactionId: paymentRecord.transaction_id,
+              razorpayPaymentId: razorpay_payment_id,
+              amount: paymentRecord.amount
+            }
+          });
+        }
+        if (!captureResult.success) {
+          console.warn(
+            '⚠️ processPaymentCaptured did not complete; continuing with legacy session insert:',
+            captureResult?.message || captureResult?.error
+          );
+        } else if (!captureResult.sessionId) {
+          console.warn('⚠️ processPaymentCaptured succeeded without sessionId; continuing with legacy insert:', captureResult);
+        }
+      } catch (syncErr) {
+        console.warn(
+          '⚠️ processPaymentCaptured threw; continuing with legacy session insert:',
+          syncErr?.message || syncErr
+        );
+      }
+    }
+
     // Check if this is an assessment booking
     if (isAssessment && actualAssessmentSessionId) {
       // Update assessment session status to booked
@@ -2130,6 +2229,15 @@ const handlePaymentSuccess = async (req, res) => {
         
         // Create Google Meet link asynchronously
         let meetData = null;
+        let meetDurationMinutes = 50;
+        if (session.package_id) {
+          const { data: pkgForMeetDur } = await supabaseAdmin
+            .from('packages')
+            .select('package_type')
+            .eq('id', session.package_id)
+            .maybeSingle();
+          meetDurationMinutes = getMeetEventDurationMinutes(pkgForMeetDur?.package_type);
+        }
         try {
           const { data: existingForMeet } = await supabaseAdmin
             .from('sessions')
@@ -2153,7 +2261,7 @@ const handlePaymentSuccess = async (req, res) => {
         description: `Online therapy session between ${clientDetails.child_name || clientDetails.first_name} and ${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
         startDate: actualScheduledDate,
         startTime: actualScheduledTime,
-            endTime: addMinutesToTime(actualScheduledTime, 50),
+            endTime: addMinutesToTime(actualScheduledTime, meetDurationMinutes),
             // Add both emails as attendees - this ensures they can join without host approval
             clientEmail: clientDetails.user?.email,
             psychologistEmail: psychologistDetails.email
@@ -2247,7 +2355,8 @@ const handlePaymentSuccess = async (req, res) => {
         psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
         sessionDate: actualScheduledDate,
         sessionTime: actualScheduledTime,
-        sessionDuration: '60 minutes',
+        durationMinutes: meetDurationMinutes,
+        sessionDuration: `${meetDurationMinutes} minutes`,
         clientEmail: clientDetails.user?.email,
         psychologistEmail: psychologistDetails.email,
         googleMeetLink: meetData?.meetLink,
@@ -2340,6 +2449,7 @@ const handlePaymentSuccess = async (req, res) => {
           time: actualScheduledTime,
           meetLink: meetData.meetLink,
           psychologistName: psychologistName, // Add psychologist name to WhatsApp message
+          durationMinutes: meetDurationMinutes,
           // Pass receipt PDF buffer so we can send the PDF via WhatsApp
           receiptPdfBuffer: receiptResult?.pdfBuffer || null,
           receiptNumber: receiptResult?.receiptNumber || null,
@@ -2472,7 +2582,8 @@ const handlePaymentSuccess = async (req, res) => {
           `New session booked with Little Care.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n\n` +
+          `${bullet}Time: ${formattedTime} (IST)\n` +
+          `${bullet}Duration: ${meetDurationMinutes} min\n\n` +
           `Join link:\n${meetData.meetLink}\n\n` +
           `Please be ready 5 mins early.\n\n` +
           `For help: ${supportPhone}\n\n` +
@@ -2775,22 +2886,7 @@ const handlePaymentSuccess = async (req, res) => {
 const handlePaymentFailure = async (req, res) => {
   try {
     const params = req.body;
-
-    console.log('Razorpay Failure Response:', JSON.stringify(params, null, 2));
-
     const { razorpay_order_id, error } = params;
-
-    // Log specific error details for risk check failures
-    if (error?.reason === 'payment_risk_check_failed') {
-      console.warn('⚠️ Payment Risk Check Failed:', {
-        orderId: razorpay_order_id,
-        errorCode: error?.code,
-        errorDescription: error?.description,
-        errorReason: error?.reason,
-        errorStep: error?.step,
-        metadata: error?.metadata
-      });
-    }
 
     if (!razorpay_order_id) {
       console.error('❌ Missing Razorpay order ID in failure response');
@@ -2812,6 +2908,39 @@ const handlePaymentFailure = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'Payment record not found'
+      });
+    }
+
+    // Razorpay (and some clients) may POST /payment/failure multiple times for one order.
+    // Check before verbose logging so duplicate retries do not spam logs or re-send admin email.
+    if (paymentRecord.status === 'failed') {
+      const extraPayId = error?.metadata?.payment_id;
+      console.log(
+        'ℹ️ Duplicate payment failure callback ignored (already failed):',
+        `${String(razorpay_order_id).slice(0, 16)}…`,
+        extraPayId ? `attempt payment_id=${extraPayId}` : ''
+      );
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        message: 'Payment failure was already recorded',
+        data: {
+          transactionId: paymentRecord.transaction_id,
+          orderId: razorpay_order_id
+        }
+      });
+    }
+
+    // First failure for this order: full diagnostic logging
+    console.log('Razorpay Failure Response:', JSON.stringify(params, null, 2));
+    if (error?.reason === 'payment_risk_check_failed') {
+      console.warn('⚠️ Payment Risk Check Failed:', {
+        orderId: razorpay_order_id,
+        errorCode: error?.code,
+        errorDescription: error?.description,
+        errorReason: error?.reason,
+        errorStep: error?.step,
+        metadata: error?.metadata
       });
     }
 

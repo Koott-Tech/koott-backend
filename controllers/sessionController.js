@@ -11,6 +11,7 @@ const meetLinkService = require('../utils/meetLinkService'); // New Meet Link Se
 const emailService = require('../utils/emailService');
 const availabilityService = require('../utils/availabilityCalendarService');
 const { assertClientPackageHasAvailableSlot } = require('../services/packageService');
+const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 
 // Book a new session
 const bookSession = async (req, res) => {
@@ -325,7 +326,8 @@ const bookSession = async (req, res) => {
           `New session booked with Little Care.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n\n` +
+          `${bullet}Time: ${formattedTime} (IST)\n` +
+          `${bullet}Duration: 50 min\n\n` +
           `Join link:\n${meetData.meetLink}\n\n` +
           `Please be ready 5 mins early.\n\n` +
           `For help: ${supportPhone}\n\n` +
@@ -505,7 +507,7 @@ const getAllSessions = async (req, res) => {
       if (packageIds.length > 0) {
         const { data: packages, error: packagesError } = await supabaseAdmin
           .from('packages')
-          .select('id, package_type, price, description, session_count')
+          .select('id, name, package_type, price, description, session_count')
           .in('id', packageIds);
 
         if (!packagesError && packages) {
@@ -1251,6 +1253,16 @@ const rescheduleSession = async (req, res) => {
         }
     */
     
+    let sessionRescheduleNotifyMinutes = session.session_type === 'free_assessment' ? 20 : 50;
+    if (session.session_type !== 'free_assessment' && session.package_id) {
+      const { data: sessionReschedulePkg } = await supabaseAdmin
+        .from('packages')
+        .select('package_type')
+        .eq('id', session.package_id)
+        .maybeSingle();
+      sessionRescheduleNotifyMinutes = getMeetEventDurationMinutes(sessionReschedulePkg?.package_type);
+    }
+
     // Get client and psychologist details for email and WhatsApp notifications
     if (true) { // Always fetch for email notifications
       try {
@@ -1281,7 +1293,9 @@ const rescheduleSession = async (req, res) => {
             psychologistEmail: psychologistDetails.email,
             scheduledDate: new_date,
             scheduledTime: new_time,
-            sessionId: session.id
+            sessionId: session.id,
+            isFreeAssessment: session.session_type === 'free_assessment',
+            durationMinutes: sessionRescheduleNotifyMinutes
           }, session.scheduled_date, session.scheduled_time);
           console.log('Reschedule notification emails sent successfully');
         } catch (emailError) {
@@ -1300,7 +1314,9 @@ const rescheduleSession = async (req, res) => {
               oldTime: session.scheduled_time,
               newDate: new_date,
               newTime: new_time,
-              newMeetLink: meetLink
+              newMeetLink: meetLink,
+              isFreeAssessment: session.session_type === 'free_assessment',
+              durationMinutes: sessionRescheduleNotifyMinutes
             });
             if (clientResult?.success) {
               console.log('✅ Reschedule WhatsApp sent to client');

@@ -102,10 +102,10 @@ const getBookingStatusByOrderId = async (req, res) => {
       let overallStatus = paymentRecord.status?.toUpperCase() || 'PENDING';
       let message = '';
 
-      if (paymentRecord.status === 'success' && session) {
+      if (paymentRecord.status === 'success' && session?.id) {
         overallStatus = 'COMPLETED';
         message = 'Booking confirmed!';
-      } else if (paymentRecord.status === 'success' && !session) {
+      } else if (paymentRecord.status === 'success' && !session?.id) {
         overallStatus = 'PAYMENT_SUCCESS';
         message = 'Payment successful, creating session...';
       } else if (paymentRecord.status === 'pending') {
@@ -118,6 +118,11 @@ const getBookingStatusByOrderId = async (req, res) => {
         message = 'Processing...';
       }
 
+      const failureReason =
+        paymentRecord?.razorpay_response?.error?.reason ||
+        paymentRecord?.razorpay_response?.error?.description ||
+        null;
+
       return res.status(200).json({
         success: true,
         data: {
@@ -125,6 +130,7 @@ const getBookingStatusByOrderId = async (req, res) => {
           status: overallStatus,
           slotLockStatus: null, // No slot lock
           message,
+          failureReason: overallStatus === 'FAILED' ? failureReason : null,
           payment: {
             id: paymentRecord.id,
             status: paymentRecord.status,
@@ -226,14 +232,15 @@ const getBookingStatusByOrderId = async (req, res) => {
       });
     }
 
-    // CRITICAL: If slot is SLOT_HELD and payment is pending for > 30 seconds,
-    // check Razorpay directly (webhook might not have fired in test mode)
+    // If slot is SLOT_HELD and payment is still pending, reconcile from Razorpay (webhook may not reach dev / localhost).
+    // Keep this short so the success page is not stuck waiting if POST /payment/success was missed.
+    const RAZORPAY_RECONCILE_AFTER_MS = Number(process.env.PAYMENT_RECONCILE_AFTER_MS) || 6000;
     if (slotLock.status === 'SLOT_HELD' && paymentRecord.status === 'pending') {
       // Verify paymentRecord.created_at exists and is valid before computing age
       if (paymentRecord.created_at && !isNaN(new Date(paymentRecord.created_at).getTime())) {
         const paymentAge = Date.now() - new Date(paymentRecord.created_at).getTime();
-        if (paymentAge > 30000) { // 30 seconds
-          console.log('🔍 Payment pending for >30s, checking Razorpay status...');
+        if (paymentAge > RAZORPAY_RECONCILE_AFTER_MS) {
+          console.log(`🔍 Payment pending for >${RAZORPAY_RECONCILE_AFTER_MS}ms, checking Razorpay status...`);
           
           try {
             const razorpay = getRazorpayInstance();
@@ -310,28 +317,43 @@ const getBookingStatusByOrderId = async (req, res) => {
         message = 'Processing...';
     }
 
-    // If status is COMPLETED but session is null, use slot details as fallback and mark incomplete
-    const sessionResponse = session ? {
-      id: session.id,
-      status: session.status,
-      scheduledDate: session.scheduled_date,
-      scheduledTime: session.scheduled_time,
-      meetLink: session.google_meet_link || null,
-      session_type: session.session_type || null,
-      package_id: session.package_id || null
-    } : (overallStatus === 'COMPLETED' ? (() => {
-      console.warn('⚠️ Missing session for completed booking (orderId:', slotLock.order_id, ') — data inconsistency');
-      return {
-        id: null,
-        status: 'incomplete',
-        incomplete: true,
-        scheduledDate: slotLock.scheduled_date,
-        scheduledTime: slotLock.scheduled_time,
-        meetLink: null,
-        session_type: null,
-        package_id: null
-      };
-    })() : null);
+    // `payments` row is authoritative for whether the charge succeeded or was declined
+    if (paymentRecord.status === 'failed') {
+      overallStatus = 'FAILED';
+      message = 'Payment failed. Please try again.';
+    } else if (paymentRecord.status === 'success' && session?.id) {
+      overallStatus = 'COMPLETED';
+      message = 'Booking confirmed!';
+    } else if (overallStatus === 'COMPLETED' && !session?.id) {
+      // Never return COMPLETED without a real session row — that caused false "Payment successful" UI
+      console.warn(
+        '⚠️ Slot lock SESSION_CREATED but no session id (orderId:',
+        slotLock.order_id,
+        ') — reporting PAYMENT_SUCCESS for polling'
+      );
+      overallStatus = 'PAYMENT_SUCCESS';
+      message = 'Payment successful, creating session...';
+    } else if (paymentRecord.status === 'success' && !session?.id && overallStatus !== 'FAILED' && overallStatus !== 'EXPIRED') {
+      overallStatus = 'PAYMENT_SUCCESS';
+      message = 'Payment successful, creating session...';
+    }
+
+    const sessionResponse = session?.id
+      ? {
+          id: session.id,
+          status: session.status,
+          scheduledDate: session.scheduled_date,
+          scheduledTime: session.scheduled_time,
+          meetLink: session.google_meet_link || null,
+          session_type: session.session_type || null,
+          package_id: session.package_id || null
+        }
+      : null;
+
+    const failureReasonFromPayment =
+      paymentRecord?.razorpay_response?.error?.reason ||
+      paymentRecord?.razorpay_response?.error?.description ||
+      null;
 
     return res.status(200).json({
       success: true,
@@ -340,6 +362,10 @@ const getBookingStatusByOrderId = async (req, res) => {
         status: overallStatus,
         slotLockStatus: slotLock.status,
         message,
+        failureReason:
+          overallStatus === 'FAILED' || overallStatus === 'EXPIRED'
+            ? failureReasonFromPayment
+            : null,
         payment: paymentRecord ? {
           id: paymentRecord.id,
           status: paymentRecord.status,

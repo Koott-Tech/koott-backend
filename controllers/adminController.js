@@ -11,6 +11,29 @@ const { validatePassword } = require('../utils/passwordPolicy');
 const { formatFriendlyTime } = require('../utils/whatsappService');
 const { deriveSessionCount } = require('../services/packageService');
 const availabilityService = require('../utils/availabilityCalendarService');
+const {
+  normalizeChildSpecialistPricing,
+  validateChildSpecialistPricing,
+  buildChildSpecialistPackageRows,
+  minInitialPrice,
+  deleteSyncedChildSpecialistPackages,
+  isChildSpecialistEffective,
+} = require('../utils/childSpecialistPricing');
+const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
+
+async function deleteChildSpecialistPackagesForPsychologist(psychologistId) {
+  await deleteSyncedChildSpecialistPackages(supabaseAdmin, psychologistId);
+}
+
+async function upsertChildSpecialistPackages(psychologistId, normalizedPricing) {
+  await deleteChildSpecialistPackagesForPsychologist(psychologistId);
+  const rows = buildChildSpecialistPackageRows(normalizedPricing, psychologistId);
+  if (!rows.length) {
+    return { error: new Error('Child specialist pricing produced no package rows') };
+  }
+  const { error } = await supabaseAdmin.from('packages').insert(rows);
+  return { error };
+}
 
 // Helper function to get availability dates for a day of the week
 const getAvailabilityDatesForDay = (dayName, numOccurrences = 1) => {
@@ -312,12 +335,13 @@ const createManualBooking = async (req, res) => {
     try {
       console.log('🔄 [MANUAL BOOKING] Creating Google Meet link...');
 
+      const manualMeetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
       const sessionData = {
         summary: `Therapy Session - ${client.child_name || client.first_name} with ${psychologist.first_name}`,
         description: `Online therapy session between ${client.child_name || client.first_name} and ${psychologist.first_name} ${psychologist.last_name}`,
         startDate: scheduled_date,
         startTime: scheduledTimeNormalized,
-        endTime: addMinutesToTime(scheduledTimeNormalized, 50)
+        endTime: addMinutesToTime(scheduledTimeNormalized, manualMeetMinutes)
       };
       
       // Try to use psychologist's OAuth credentials
@@ -574,6 +598,7 @@ const createManualBooking = async (req, res) => {
             packageType: packageData.package_type || `package_${packageData.session_count}`
           }
         : null;
+      const manualNotifyMeetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
 
       try {
         // Email notifications
@@ -586,7 +611,7 @@ const createManualBooking = async (req, res) => {
         psychologistName: psychologistName,
         sessionDate: scheduled_date,
         sessionTime: scheduledTimeNormalized,
-        sessionDuration: '60 minutes',
+        sessionDuration: `${manualNotifyMeetMinutes} minutes`,
         clientEmail: client.user?.email,
         psychologistEmail: psychologist.email,
         googleMeetLink: meetData?.meetLink,
@@ -633,7 +658,8 @@ const createManualBooking = async (req, res) => {
             meetLink: meetData.meetLink,
             psychologistName: psychologistName,
             clientName: clientName,
-            packageInfo: packageInfoForNotification
+            packageInfo: packageInfoForNotification,
+            durationMinutes: manualNotifyMeetMinutes
             });
         } else {
             const sessionDateTime = new Date(`${scheduled_date}T${scheduledTimeNormalized}`).toLocaleString('en-IN', {
@@ -1576,7 +1602,8 @@ const createPsychologist = async (req, res) => {
       mphil_college,
       phd_college, 
       area_of_expertise, 
-      description, 
+      description,
+      designation,
       experience_years, 
       availability,
       packages, // New field for dynamic packages
@@ -1591,7 +1618,10 @@ const createPsychologist = async (req, res) => {
       faq_question_3,
       faq_answer_3,
       psychiatrist_15min_price,
-      psychiatrist_30min_price
+      psychiatrist_30min_price,
+      specialist_category,
+      child_specialist_pricing,
+      better_parent_pricing
     } = req.body;
 
     // Keep email as-is (don't normalize dots away)
@@ -1623,16 +1653,33 @@ const createPsychologist = async (req, res) => {
     // Hash password
     const hashedPassword = await hashPassword(password);
 
-    // Validate individual session price BEFORE creating psychologist to prevent orphaned records
-    // Use price from request body, or require explicit price
-    const individualSessionPrice = price ? parseInt(price) : null;
-    
-    if (!individualSessionPrice || individualSessionPrice <= 0) {
+    const isPsychiatrist = (designation || '').toLowerCase().includes('psychiatrist');
+    const useChildSpecialist =
+      !isPsychiatrist && specialist_category === 'child_specialist';
+
+    let individualSessionPrice = price ? parseInt(price, 10) : null;
+    let normalizedChildPricing = null;
+
+    if (useChildSpecialist) {
+      normalizedChildPricing = normalizeChildSpecialistPricing(child_specialist_pricing);
+      const pricingErrors = validateChildSpecialistPricing(normalizedChildPricing);
+      if (pricingErrors.length > 0) {
+        return res.status(400).json(
+          errorResponse('Invalid child specialist pricing', pricingErrors)
+        );
+      }
+      individualSessionPrice = minInitialPrice(normalizedChildPricing);
+    } else if (!individualSessionPrice || individualSessionPrice <= 0) {
       console.error('❌ Error: Individual session price is required and must be positive');
       return res.status(400).json(
         errorResponse('Individual session price is required. Please provide a valid price.')
       );
     }
+
+    const specialistCategoryValue =
+      specialist_category === 'child_specialist' || specialist_category === 'better_parent'
+        ? specialist_category
+        : null;
 
     // Create psychologist directly in psychologists table (standalone) - after validation passes
     const { data: psychologist, error: psychologistError } = await supabaseAdmin
@@ -1650,6 +1697,7 @@ const createPsychologist = async (req, res) => {
         area_of_expertise,
         personality_traits, // NEW
         description,
+        designation: designation?.trim() || null,
         experience_years: experience_years || 0,
         individual_session_price: individualSessionPrice,
         psychiatrist_15min_price: psychiatrist_15min_price ? parseInt(psychiatrist_15min_price) : null,
@@ -1662,6 +1710,9 @@ const createPsychologist = async (req, res) => {
         faq_answer_2: faq_answer_2 || null,
         faq_question_3: faq_question_3 || null,
         faq_answer_3: faq_answer_3 || null,
+        specialist_category: specialistCategoryValue,
+        child_specialist_pricing: useChildSpecialist ? normalizedChildPricing : null,
+        better_parent_pricing: better_parent_pricing != null ? better_parent_pricing : null,
         active: true // New psychologists are active by default
       }])
       .select('*')
@@ -1674,44 +1725,53 @@ const createPsychologist = async (req, res) => {
       );
     }
 
-    const individualSession = {
-      psychologist_id: psychologist.id,
-      package_type: 'individual',
-      name: 'Single Session',
-      description: 'One therapy session',
-      session_count: 1,
-      price: individualSessionPrice,
-      discount_percentage: 0
-    };
-
-    // Insert individual session package into database
-    const { error: individualSessionError } = await supabaseAdmin
-      .from('packages')
-      .insert([individualSession]);
-
-    if (individualSessionError) {
-      console.error('❌ Error creating individual session package:', individualSessionError);
-      // Rollback psychologist creation to prevent orphaned record
-      const { error: deleteError } = await supabaseAdmin
-        .from('psychologists')
-        .delete()
-        .eq('id', psychologist.id);
-      
-      if (deleteError) {
-        console.error('❌ Error rolling back psychologist creation:', deleteError);
-      } else {
-        console.log('✅ Rolled back psychologist creation due to package creation failure');
+    if (useChildSpecialist) {
+      const { error: csPkgErr } = await upsertChildSpecialistPackages(psychologist.id, normalizedChildPricing);
+      if (csPkgErr) {
+        console.error('❌ Error creating child specialist packages:', csPkgErr);
+        await supabaseAdmin.from('psychologists').delete().eq('id', psychologist.id);
+        return res.status(500).json(
+          errorResponse('Failed to create child specialist session packages')
+        );
       }
-      
-      return res.status(500).json(
-        errorResponse('Failed to create individual session package')
-      );
+      console.log('✅ Child specialist packages created');
     } else {
+      const individualSession = {
+        psychologist_id: psychologist.id,
+        package_type: 'individual',
+        name: 'Single Session',
+        description: 'One therapy session',
+        session_count: 1,
+        price: individualSessionPrice,
+        discount_percentage: 0
+      };
+
+      const { error: individualSessionError } = await supabaseAdmin
+        .from('packages')
+        .insert([individualSession]);
+
+      if (individualSessionError) {
+        console.error('❌ Error creating individual session package:', individualSessionError);
+        const { error: deleteError } = await supabaseAdmin
+          .from('psychologists')
+          .delete()
+          .eq('id', psychologist.id);
+
+        if (deleteError) {
+          console.error('❌ Error rolling back psychologist creation:', deleteError);
+        } else {
+          console.log('✅ Rolled back psychologist creation due to package creation failure');
+        }
+
+        return res.status(500).json(
+          errorResponse('Failed to create individual session package')
+        );
+      }
       console.log('✅ Individual session package created');
     }
 
     // Create dynamic packages for the psychologist based on admin selection
-    if (packages && Array.isArray(packages) && packages.length > 0) {
+    if (!useChildSpecialist && packages && Array.isArray(packages) && packages.length > 0) {
       try {
         console.log('📦 Creating custom packages:', packages);
         
@@ -2190,6 +2250,45 @@ const updatePsychologist = async (req, res) => {
       } catch (availabilityError) {
         console.error('❌ [ADMIN] Error handling availability:', availabilityError);
         // Continue - availability errors shouldn't block psychologist update
+      }
+    }
+
+    const shouldSyncChildPackages =
+      updateData.specialist_category !== undefined ||
+      updateData.child_specialist_pricing !== undefined;
+
+    if (shouldSyncChildPackages) {
+      const { data: latestRow } = await supabaseAdmin
+        .from('psychologists')
+        .select('specialist_category, child_specialist_pricing, individual_session_price')
+        .eq('id', psychologistId)
+        .single();
+
+      if (latestRow && isChildSpecialistEffective(latestRow) && latestRow.child_specialist_pricing) {
+        const norm = normalizeChildSpecialistPricing(latestRow.child_specialist_pricing);
+        const pricingErrors = validateChildSpecialistPricing(norm);
+        if (pricingErrors.length > 0) {
+          console.warn('⚠️ [ADMIN] Child specialist pricing validation:', pricingErrors);
+        }
+        await supabaseAdmin
+          .from('packages')
+          .delete()
+          .eq('psychologist_id', psychologistId)
+          .eq('package_type', 'individual');
+        const { error: csSyncErr } = await upsertChildSpecialistPackages(psychologistId, norm);
+        if (csSyncErr) {
+          console.error('❌ [ADMIN] Child specialist package sync failed:', csSyncErr);
+        }
+        const minP = minInitialPrice(norm);
+        if (minP != null && minP !== latestRow.individual_session_price) {
+          await supabaseAdmin
+            .from('psychologists')
+            .update({ individual_session_price: minP, updated_at: new Date().toISOString() })
+            .eq('id', psychologistId);
+          updatedPsychologist.individual_session_price = minP;
+        }
+      } else {
+        await deleteChildSpecialistPackagesForPsychologist(psychologistId);
       }
     }
 
@@ -2889,6 +2988,18 @@ const updateSession = async (req, res) => {
       (status || currentSession.status)?.toLowerCase?.() || status || currentSession.status
     );
 
+    let adminRescheduleMeetMinutes = 50;
+    if (currentSession.session_type === 'free_assessment') {
+      adminRescheduleMeetMinutes = 20;
+    } else if (currentSession.package_id) {
+      const { data: pkgDurRow } = await supabaseAdmin
+        .from('packages')
+        .select('package_type')
+        .eq('id', currentSession.package_id)
+        .maybeSingle();
+      adminRescheduleMeetMinutes = getMeetEventDurationMinutes(pkgDurRow?.package_type);
+    }
+
     const updateData = {};
 
     // When psychologist is changed: remove old Meet from old doc's calendar and create new Meet for new doc
@@ -2966,7 +3077,7 @@ const updateSession = async (req, res) => {
         if (!clientName || clientName.trim() === '' || String(clientName).toLowerCase() === 'pending') {
           clientName = `${clientForMeet.first_name || ''} ${clientForMeet.last_name || ''}`.trim() || 'Client';
         }
-        const endTime = addMinutesToTime(effectiveTime, 50);
+        const endTime = addMinutesToTime(effectiveTime, adminRescheduleMeetMinutes);
         const meetSessionData = {
           summary: `Therapy Session - ${clientName} with ${newPsych.first_name}`,
           description: `Online therapy session between ${clientName} and ${newPsych.first_name} ${newPsych.last_name}`,
@@ -3070,7 +3181,7 @@ const updateSession = async (req, res) => {
           clientName = `${clientForMeet.first_name || ''} ${clientForMeet.last_name || ''}`.trim() || 'Client';
         }
 
-        const endTime = addMinutesToTime(effectiveTime, 50);
+        const endTime = addMinutesToTime(effectiveTime, adminRescheduleMeetMinutes);
         const meetSessionData = {
           summary: `Therapy Session - ${clientName} with ${psychForMeet.first_name}`,
           description: `Rescheduled therapy session between ${clientName} and ${psychForMeet.first_name} ${psychForMeet.last_name}`,
@@ -3234,6 +3345,7 @@ const updateSession = async (req, res) => {
             psychologistId: updatedSession.psychologist_id,
             clientId: updatedSession.client_id,
             packageInfo,
+            durationMinutes: adminRescheduleMeetMinutes,
             receiptId: null,
             receiptNumber: null,
             receiptPdfBuffer: null
@@ -3256,6 +3368,7 @@ const updateSession = async (req, res) => {
               meetLink,
               psychologistName,
               packageInfo,
+              durationMinutes: adminRescheduleMeetMinutes,
               receiptPdfBuffer: null,
               receiptNumber: null,
               clientName: receiptClientName
@@ -3308,7 +3421,8 @@ const updateSession = async (req, res) => {
               `${bullet}Client: ${clientName}\n` +
               packageLine +
               `${bullet}Date: ${formattedDate}\n` +
-              `${bullet}Time: ${formattedTime} (IST)\n\n` +
+              `${bullet}Time: ${formattedTime} (IST)\n` +
+              `${bullet}Duration: ${adminRescheduleMeetMinutes} min\n\n` +
               `Join link:\n${meetLink}\n\n` +
               `Please be ready 5 mins early.\n\n` +
               `For help: +91 95390 07766\n\n` +
@@ -3372,7 +3486,9 @@ const updateSession = async (req, res) => {
             scheduledDate: newDate,
             scheduledTime: newTime,
             sessionId: updatedSession.id,
-            meetLink
+            meetLink,
+            isFreeAssessment: updatedSession.session_type === 'free_assessment',
+            durationMinutes: adminRescheduleMeetMinutes
           }, oldDate, oldTime);
           console.log('✅ [Admin] Reschedule notification emails sent');
 
@@ -3383,7 +3499,9 @@ const updateSession = async (req, res) => {
               oldTime,
               newDate,
               newTime,
-              newMeetLink: meetLink
+              newMeetLink: meetLink,
+              isFreeAssessment: updatedSession.session_type === 'free_assessment',
+              durationMinutes: adminRescheduleMeetMinutes
             });
             if (waResult?.success) {
               console.log('✅ [Admin] Reschedule WhatsApp sent to client');
@@ -3411,12 +3529,18 @@ const updateSession = async (req, res) => {
               }
             };
             const bullet = '•⁠  ⁠';
+            const psychDurationLine =
+              updatedSession.session_type !== 'free_assessment'
+                ? `${bullet}Duration: ${adminRescheduleMeetMinutes} min\n`
+                : '';
             const psychologistMessage =
               `Hey 👋\n\n` +
               `A session has been rescheduled with Little Care.\n\n` +
               `${bullet}Client: ${clientName}\n` +
               `${bullet}Old: ${formatBookingDateShort(oldDate)} at ${formatFriendlyTime(oldTime)} (IST)\n` +
-              `${bullet}New: ${formatBookingDateShort(newDate)} at ${formatFriendlyTime(newTime)} (IST)\n\n` +
+              `${bullet}New: ${formatBookingDateShort(newDate)} at ${formatFriendlyTime(newTime)} (IST)\n` +
+              psychDurationLine +
+              `\n` +
               `${meetLink ? `Join link:\n${meetLink}\n\n` : ''}` +
               `Please be ready 5 mins early.\n\n` +
               `— Little Care 💜`;
@@ -4023,12 +4147,13 @@ const bookPackageNextSession = async (req, res) => {
           .single();
 
         const clientEmail = Array.isArray(clientDetails?.user) ? clientDetails?.user?.[0]?.email : clientDetails?.user?.email;
+        const nextPkgMeetMinutes = getMeetEventDurationMinutes(clientPackage.package?.package_type);
         const meetSessionData = {
           summary: `Therapy Session - ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
           description: `Therapy session between ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'} ${psychologistDetails?.last_name || ''}`,
           startDate: scheduled_date,
           startTime: scheduled_time,
-          endTime: addMinutesToTime(scheduled_time, 50),
+          endTime: addMinutesToTime(scheduled_time, nextPkgMeetMinutes),
           clientEmail: clientEmail || undefined,
           psychologistEmail: psychologistDetails?.email || undefined
         };
@@ -4087,7 +4212,8 @@ const bookPackageNextSession = async (req, res) => {
             status: 'booked',
             psychologistId,
             clientId: client_id,
-            packageInfo
+            packageInfo,
+            durationMinutes: nextPkgMeetMinutes
           });
         } catch (e) {
           console.error('Book package next session email error:', e);
@@ -4104,7 +4230,8 @@ const bookPackageNextSession = async (req, res) => {
               time: scheduled_time,
               meetLink: effectiveMeetLink || undefined,
               psychologistName,
-              packageInfo
+              packageInfo,
+              durationMinutes: nextPkgMeetMinutes
             });
           }
           if (psychologistDetails?.phone) {
@@ -4120,7 +4247,7 @@ const bookPackageNextSession = async (req, res) => {
             const linkLine = effectiveMeetLink
               ? `\n\nJoin link:\n${effectiveMeetLink}\n\n`
               : '\n\nDue to some issue Google Meet didn\'t get created. Please contact our support.\n\n';
-            const msg = `Hey 👋\n\nNew session booked with Little Care.\n\n${bullet}Client: ${clientName}\n${bullet}Package: ${completedCount}/${totalSessions} sessions completed, ${updatedRemaining} remaining\n${bullet}Date: ${formatBookingDateShort(scheduled_date)}\n${bullet}Time: ${formatFriendlyTime(scheduled_time)} (IST)${linkLine}Please be ready 5 mins early.\n\n— Little Care 💜`;
+            const msg = `Hey 👋\n\nNew session booked with Little Care.\n\n${bullet}Client: ${clientName}\n${bullet}Package: ${completedCount}/${totalSessions} sessions completed, ${updatedRemaining} remaining\n${bullet}Date: ${formatBookingDateShort(scheduled_date)}\n${bullet}Time: ${formatFriendlyTime(scheduled_time)} (IST)\n${bullet}Duration: ${nextPkgMeetMinutes} min${linkLine}Please be ready 5 mins early.\n\n— Little Care 💜`;
             await sendWhatsAppTextWithRetry(psychologistDetails.phone, msg);
           }
         } catch (waErr) {
@@ -4171,7 +4298,7 @@ const getPackagesWithRemainingSessions = async (req, res) => {
     const packageIds = [...new Set(Object.values(byKey).map(p => p.package_id))];
     const { data: packages } = await supabaseAdmin
       .from('packages')
-      .select('id, package_type, session_count, psychologist_id')
+      .select('id, name, package_type, session_count, psychologist_id, price')
       .in('id', packageIds);
     const packagesMap = (packages || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
 
@@ -4231,7 +4358,9 @@ const getPackagesWithRemainingSessions = async (req, res) => {
         psychologist: psychologist || { id: pkg.psychologist_id, first_name: '', last_name: '' },
         package: {
           id: pkg.id,
+          name: pkg.name || null,
           package_type: pkg.package_type,
+          price: pkg.price ?? null,
           session_count: total,
           total_sessions: total,
           completed_sessions: completed,
