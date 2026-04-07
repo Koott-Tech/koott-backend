@@ -37,6 +37,8 @@ const dailyCalendarConflictAlert = require('./services/dailyCalendarConflictAler
 const googleCalendarRoutes = require('./routes/googleCalendar');
 const blogRoutes = require('./routes/blogs');
 const counsellingRoutes = require('./routes/counselling');
+const eventPagesRoutes = require('./routes/eventPages');
+const eventsRoutes = require('./routes/events');
 const assessmentsRoutes = require('./routes/assessments');
 const careerRoutes = require('./routes/careers');
 // Security routes removed - security page removed from admin dashboard
@@ -882,6 +884,8 @@ app.use('/api', oauthRoutes);
 app.use('/api/psychologists/google-calendar', googleCalendarRoutes);
 app.use('/api/blogs', blogRoutes);
 app.use('/api/counselling', counsellingRoutes);
+app.use('/api/event-pages', eventPagesRoutes);
+app.use('/api/events', eventsRoutes);
 app.use('/api/assessments', assessmentsRoutes);
 app.use('/api/better-parenting', betterParentingRoutes);
 app.use('/api/careers', careerRoutes);

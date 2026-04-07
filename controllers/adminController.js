@@ -4380,6 +4380,140 @@ const getPackagesWithRemainingSessions = async (req, res) => {
   }
 };
 
+const getEventRegistrations = async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('event_registrations')
+      .select(
+        'id, event_slug, event_title, full_name, email, country_code, phone, whatsapp_e164, session_join_url, created_at'
+      )
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      const msg = error.message || String(error);
+      if (msg.includes('does not exist') || msg.includes('schema cache')) {
+        return res.status(503).json(
+          errorResponse(
+            'Event registrations table not found. Run backend/scripts/create-event-registrations.sql in Supabase SQL Editor.'
+          )
+        );
+      }
+      return res.status(500).json(errorResponse(msg));
+    }
+
+    const bySlug = new Map();
+    for (const row of data || []) {
+      const slug = row.event_slug || 'unknown';
+      if (!bySlug.has(slug)) {
+        bySlug.set(slug, {
+          event_slug: slug,
+          event_title: row.event_title || slug.replace(/-/g, ' '),
+          registrations: [],
+        });
+      }
+      const ev = bySlug.get(slug);
+      if (row.event_title && row.event_title.length > (ev.event_title?.length || 0)) {
+        ev.event_title = row.event_title;
+      }
+      ev.registrations.push({
+        id: row.id,
+        full_name: row.full_name,
+        email: row.email,
+        country_code: row.country_code,
+        phone: row.phone,
+        whatsapp_e164: row.whatsapp_e164,
+        session_join_url: row.session_join_url || null,
+        created_at: row.created_at,
+      });
+    }
+
+    const events = Array.from(bySlug.values());
+    res.json(successResponse({ events }));
+  } catch (err) {
+    console.error('getEventRegistrations:', err);
+    res.status(500).json(errorResponse(err.message || 'Failed to load event registrations'));
+  }
+};
+
+const updateEventRegistration = async (req, res) => {
+  try {
+    const { registrationId } = req.params;
+    const body = req.body || {};
+    const patch = {};
+
+    if (body.full_name !== undefined) patch.full_name = String(body.full_name || '').trim();
+    if (body.email !== undefined) patch.email = String(body.email || '').trim().toLowerCase();
+    if (body.country_code !== undefined) patch.country_code = String(body.country_code || '').trim();
+    if (body.phone !== undefined) patch.phone = String(body.phone || '').trim();
+    if (body.event_slug !== undefined) patch.event_slug = String(body.event_slug || '').trim();
+    if (body.event_title !== undefined) patch.event_title = String(body.event_title || '').trim();
+
+    if (patch.full_name !== undefined && patch.full_name.length < 2) {
+      return res.status(400).json(errorResponse('Please provide a valid full name.'));
+    }
+    if (patch.email !== undefined) {
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRe.test(patch.email)) {
+        return res.status(400).json(errorResponse('Please provide a valid email.'));
+      }
+    }
+    if (patch.phone !== undefined && patch.phone.length < 6) {
+      return res.status(400).json(errorResponse('Please provide a valid phone number.'));
+    }
+    if (patch.event_slug !== undefined && !patch.event_slug) {
+      return res.status(400).json(errorResponse('Event slug cannot be empty.'));
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json(errorResponse('No fields provided to update.'));
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('event_registrations')
+      .update(patch)
+      .eq('id', registrationId)
+      .select(
+        'id, event_slug, event_title, full_name, email, country_code, phone, whatsapp_e164, session_join_url, created_at'
+      )
+      .single();
+
+    if (error) {
+      const msg = error.message || String(error);
+      if (error.code === '23505' || msg.includes('duplicate') || msg.includes('unique')) {
+        return res.status(409).json(errorResponse('This email is already registered for the selected event.'));
+      }
+      if (msg.includes('not found') || msg.includes('No rows')) {
+        return res.status(404).json(errorResponse('Registration not found.'));
+      }
+      return res.status(500).json(errorResponse(msg));
+    }
+
+    return res.json(successResponse({ registration: data }, 'Registration updated successfully'));
+  } catch (err) {
+    console.error('updateEventRegistration:', err);
+    return res.status(500).json(errorResponse(err.message || 'Failed to update registration'));
+  }
+};
+
+const deleteEventRegistration = async (req, res) => {
+  try {
+    const { registrationId } = req.params;
+    const { error } = await supabaseAdmin
+      .from('event_registrations')
+      .delete()
+      .eq('id', registrationId);
+
+    if (error) {
+      return res.status(500).json(errorResponse(error.message || 'Failed to delete registration'));
+    }
+
+    return res.json(successResponse(null, 'Registration deleted successfully'));
+  } catch (err) {
+    console.error('deleteEventRegistration:', err);
+    return res.status(500).json(errorResponse(err.message || 'Failed to delete registration'));
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserDetails,
@@ -4389,6 +4523,9 @@ module.exports = {
   searchUsers,
   getRecentUsers,
   getRecentBookings,
+  getEventRegistrations,
+  updateEventRegistration,
+  deleteEventRegistration,
   getAllPsychologists,
   createPsychologist,
   updatePsychologist,

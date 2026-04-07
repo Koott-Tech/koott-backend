@@ -226,7 +226,14 @@ async function ensureChildSpecialistPackagesSynced(supabaseAdmin, psychologistId
   if (psychErr || !psych) {
     return { synced: false, reason: 'psychologist_not_found' };
   }
-  if (!isChildSpecialistEffective(psych) || !psych.child_specialist_pricing) {
+  if (!isChildSpecialistEffective(psych)) {
+    return { synced: false, reason: 'not_child_specialist' };
+  }
+  // Category child_specialist with null JSON can happen if admin only set the category;
+  // public UI still shows CS booking, so use sheet defaults (same as normalize empty object).
+  const hadNullChildPricing =
+    !psych.child_specialist_pricing && psych.specialist_category === 'child_specialist';
+  if (!psych.child_specialist_pricing && !hadNullChildPricing) {
     return { synced: false, reason: 'not_child_specialist' };
   }
 
@@ -242,7 +249,7 @@ async function ensureChildSpecialistPackagesSynced(supabaseAdmin, psychologistId
     return { synced: false, reason: 'already_synced' };
   }
 
-  const norm = normalizeChildSpecialistPricing(psych.child_specialist_pricing);
+  const norm = normalizeChildSpecialistPricing(psych.child_specialist_pricing || {});
   const rows = buildChildSpecialistPackageRows(norm, psychologistId);
   if (!rows.length) {
     console.warn('[ensureChildSpecialistPackagesSynced] no rows built from pricing JSON', {
@@ -275,11 +282,11 @@ async function ensureChildSpecialistPackagesSynced(supabaseAdmin, psychologistId
   }
 
   const minP = minInitialPrice(norm);
-  if (minP != null) {
-    await supabaseAdmin
-      .from('psychologists')
-      .update({ individual_session_price: minP, updated_at: new Date().toISOString() })
-      .eq('id', psychologistId);
+  if (minP != null || hadNullChildPricing) {
+    const psychUpdate = { updated_at: new Date().toISOString() };
+    if (minP != null) psychUpdate.individual_session_price = minP;
+    if (hadNullChildPricing) psychUpdate.child_specialist_pricing = norm;
+    await supabaseAdmin.from('psychologists').update(psychUpdate).eq('id', psychologistId);
   }
 
   return { synced: true };

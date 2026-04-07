@@ -54,6 +54,11 @@ router.get('/search/users', adminController.searchUsers);
 router.get('/recent-users', adminController.getRecentUsers);
 router.get('/recent-bookings', adminController.getRecentBookings);
 
+// Workshop / marketing event registrations (Supabase table event_registrations)
+router.get('/event-registrations', adminController.getEventRegistrations);
+router.put('/event-registrations/:registrationId', adminController.updateEventRegistration);
+router.delete('/event-registrations/:registrationId', adminController.deleteEventRegistration);
+
 // Psychologist management
 router.get('/psychologists', adminController.getAllPsychologists);
 router.post('/psychologists', adminController.createPsychologist);

@@ -2590,6 +2590,134 @@ The Little Care Team
       throw error;
     }
   }
+
+  async sendEventRegistrationConfirmation({ to, fullName, eventTitle, sessionJoinUrl }) {
+    if (!this.transporter) {
+      console.warn('Email service not available - skipping event registration email');
+      return { ok: false, skipped: true };
+    }
+
+    const safeName = String(fullName || 'there');
+    const safeTitle = String(eventTitle || 'your event');
+    const safeJoin = String(sessionJoinUrl || '').trim();
+    const fromEmail = process.env.EMAIL_FROM || process.env.EMAIL_USER || process.env.COMPANY_ADMIN_EMAIL;
+
+    if (!fromEmail || !to) {
+      console.warn('Missing sender or recipient for event registration email');
+      return { ok: false, skipped: true };
+    }
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      </head>
+      <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f7fa;">
+        <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f7fa;">
+          <tr>
+            <td style="padding: 20px 10px;">
+              <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                <tr>
+                  <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
+                      <tr>
+                        <td align="center" style="padding-bottom: 15px;">
+                          <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                        </td>
+                      </tr>
+                      <tr>
+                        <td align="center">
+                          <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 600;">Registration Confirmed</h1>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding: 30px 20px;">
+                    <h2 style="color: #1a202c; margin: 0 0 20px 0; font-size: 24px; font-weight: 600;">Hi ${safeName},</h2>
+                    <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">
+                      Thanks for registering for <strong>${safeTitle}</strong>. Your spot is reserved.
+                    </p>
+
+                    <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 24px 0;">
+                      <tr>
+                        <td style="padding: 16px; background: #f8f5ff; border: 1px solid #e9ddff; border-radius: 10px;">
+                          <p style="margin: 0 0 8px 0; color: #3f2e73; font-size: 15px; font-weight: 700;">Event</p>
+                          <p style="margin: 0; color: #2d3748; font-size: 15px;">${safeTitle}</p>
+                        </td>
+                      </tr>
+                    </table>
+
+                    ${
+                      safeJoin
+                        ? `
+                    <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 24px 0;">
+                      <tr>
+                        <td style="padding: 0 0 12px 0;">
+                          <p style="margin: 0; color: #2d3748; font-size: 15px; line-height: 1.6;">
+                            Your session join link:
+                          </p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="text-align: center;">
+                          <a href="${safeJoin}" target="_blank" rel="noopener noreferrer" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                            Join Session
+                          </a>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding-top: 12px;">
+                          <p style="margin: 0; color: #718096; font-size: 13px; word-break: break-all;">${safeJoin}</p>
+                        </td>
+                      </tr>
+                    </table>
+                        `
+                        : `
+                    <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 24px 0;">
+                      We will share your session link shortly.
+                    </p>
+                        `
+                    }
+
+                    <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0;">
+                      You will also receive the same details on WhatsApp.
+                    </p>
+                    <p style="color: #2d3748; font-size: 15px; margin: 18px 0 0 0;">
+                      — <strong style="color: #3f2e73;">The Little Care Team</strong>
+                    </p>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="background: #f7fafc; padding: 22px 24px; text-align: center; border-top: 1px solid #e2e8f0;">
+                    <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
+                      This is an automated message. Please do not reply to this email.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+
+    const mailOptions = this.addEmailHeaders({
+      from: fromEmail,
+      to,
+      subject: `You're registered — ${safeTitle}`,
+      html
+    });
+
+    await this.transporter.sendMail(mailOptions);
+    return { ok: true };
+  }
 }
 
 module.exports = new EmailService();
