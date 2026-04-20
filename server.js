@@ -17,6 +17,7 @@ const clientRoutes = require('./routes/clients');
 const psychologistRoutes = require('./routes/psychologists');
 const sessionRoutes = require('./routes/sessions');
 const adminRoutes = require('./routes/admin');
+const integrationsRoutes = require('./routes/integrations');
 const superadminRoutes = require('./routes/superadmin');
 const availabilityRoutes = require('./routes/availability');
 const availabilityControllerRoutes = require('./routes/availabilityControllerRoutes');
@@ -34,6 +35,7 @@ const sessionReminderService = require('./services/sessionReminderService');
 const dailyAvailabilityService = require('./services/dailyAvailabilityService');
 const dailyFreeAssessmentService = require('./services/dailyFreeAssessmentService');
 const dailyCalendarConflictAlert = require('./services/dailyCalendarConflictAlert');
+const wixRealtimeSyncService = require('./services/wixRealtimeSyncService');
 const googleCalendarRoutes = require('./routes/googleCalendar');
 const blogRoutes = require('./routes/blogs');
 const counsellingRoutes = require('./routes/counselling');
@@ -870,6 +872,7 @@ app.use('/api/psychologists', psychologistRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/user-sessions', sessionRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/integrations', integrationsRoutes);
 app.use('/api/superadmin', superadminRoutes);
 app.use('/api/availability', availabilityRoutes);
 app.use('/api/availability-controller', availabilityControllerRoutes);
@@ -973,6 +976,9 @@ console.log(`🚀 Little Care Backend running on port ${PORT}`);
   
   // Start Daily Calendar Conflict Monitor service (checks for conflicts at 1 AM)
   dailyCalendarConflictAlert.start();
+  
+  // Start Wix discover mirror sync service (near real-time fallback)
+  wixRealtimeSyncService.start();
   
   // Start Recovery Job (recovers failed session creations, runs every 5 minutes)
   const { startRecoveryScheduler } = require('./jobs/recoveryJob');

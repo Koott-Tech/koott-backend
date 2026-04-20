@@ -3,6 +3,8 @@ const router = express.Router();
 const adminController = require('../controllers/adminController');
 const assessmentBookingController = require('../controllers/assessmentBookingController');
 const sessionController = require('../controllers/sessionController');
+const wixDiscoverController = require('../controllers/wixDiscoverController');
+const wixBookingsController = require('../controllers/wixBookingsController');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const { createRateLimiters } = require('../middleware/security');
 const multer = require('multer');
@@ -53,6 +55,13 @@ router.get('/search/users', adminController.searchUsers);
 // Recent data for dashboard
 router.get('/recent-users', adminController.getRecentUsers);
 router.get('/recent-bookings', adminController.getRecentBookings);
+
+// Wix Velo `/_functions/discover` — inspect payload (admin tooling; no Supabase writes)
+router.get('/wix/discover-inspect', wixDiscoverController.discoverInspect);
+
+// Wix → Supabase mirror (`wix_bookings`)
+router.post('/wix/sync', wixBookingsController.syncWixBookings);
+router.get('/wix/bookings', wixBookingsController.listWixBookings);
 
 // Workshop / marketing event registrations (Supabase table event_registrations)
 router.get('/event-registrations', adminController.getEventRegistrations);
