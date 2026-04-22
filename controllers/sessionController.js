@@ -433,20 +433,22 @@ const getAllSessions = async (req, res) => {
     // Now fetch the paginated sessions
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
     // Exclude free assessments - they have their own page
+    // Note: we intentionally do NOT embed `user:users(email)` inside clients
+    // here because PostgREST can't resolve the clients→users relationship in
+    // this project's schema cache. Email is fetched separately below and
+    // reattached as client.user.email so the frontend contract is preserved.
     let query = supabaseAdmin
       .from('sessions')
       .select(`
         *,
         client:clients(
           id,
+          user_id,
           first_name,
           last_name,
           child_name,
           child_age,
-          phone_number,
-          user:users(
-            email
-          )
+          phone_number
         ),
         psychologist:psychologists(
           id,
@@ -495,7 +497,9 @@ const getAllSessions = async (req, res) => {
     if (error) {
       console.error('Get all sessions error:', error);
       return res.status(500).json(
-        errorResponse('Failed to fetch sessions')
+        errorResponse(
+          `Failed to fetch sessions: ${error.message || 'unknown'}${error.code ? ` [${error.code}]` : ''}${error.details ? ` — ${error.details}` : ''}`
+        )
       );
     }
 
@@ -606,14 +610,12 @@ const getAllSessions = async (req, res) => {
           updated_at,
           client:clients(
             id,
+            user_id,
             first_name,
             last_name,
             child_name,
             child_age,
-            phone_number,
-            user:users(
-              email
-            )
+            phone_number
           ),
           psychologist:psychologists(
             id,
@@ -674,6 +676,40 @@ const getAllSessions = async (req, res) => {
       }
     } catch (assessError) {
       console.error('Error fetching assessment sessions (non-blocking):', assessError);
+    }
+
+    // Reattach client email via a separate users lookup (avoids PostgREST
+    // clients→users relationship embed which isn't resolvable on this schema).
+    try {
+      const userIds = new Set();
+      for (const s of sessions || []) {
+        const uid = s?.client?.user_id;
+        if (uid) userIds.add(uid);
+      }
+      for (const s of assessmentSessions) {
+        const uid = s?.client?.user_id;
+        if (uid) userIds.add(uid);
+      }
+      if (userIds.size) {
+        const { data: users, error: usersError } = await supabaseAdmin
+          .from('users')
+          .select('id, email')
+          .in('id', [...userIds]);
+        if (!usersError && users) {
+          const emailById = new Map(users.map((u) => [u.id, u.email]));
+          const attach = (s) => {
+            if (s?.client && s.client.user_id) {
+              s.client.user = { email: emailById.get(s.client.user_id) || null };
+            }
+          };
+          (sessions || []).forEach(attach);
+          assessmentSessions.forEach(attach);
+        } else if (usersError) {
+          console.warn('[getAllSessions] users email lookup failed:', usersError.message || usersError);
+        }
+      }
+    } catch (emailAttachError) {
+      console.warn('[getAllSessions] email reattach non-blocking error:', emailAttachError?.message || emailAttachError);
     }
 
     // Combine regular sessions and assessment sessions

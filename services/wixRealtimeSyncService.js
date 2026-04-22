@@ -2,6 +2,8 @@ const { performWixSync } = require('../controllers/wixBookingsController');
 
 let timer = null;
 let isRunning = false;
+let runStartedAt = 0;
+let blockedTickCount = 0;
 
 function getIntervalMs() {
   const sec = Number.parseInt(String(process.env.WIX_SYNC_INTERVAL_SECONDS || '60'), 10);
@@ -10,11 +12,41 @@ function getIntervalMs() {
 }
 
 async function runOnce(source = 'interval') {
-  if (isRunning) return;
+  const intervalMs = getIntervalMs();
+  const stuckThresholdMs = intervalMs * 2;
+
+  if (isRunning) {
+    const runningForMs = Date.now() - runStartedAt;
+    blockedTickCount += 1;
+    console.warn(
+      `[wixRealtimeSyncService] ${source}: skipped — previous run in-flight for ${Math.round(
+        runningForMs / 1000
+      )}s (blocked ticks: ${blockedTickCount})`
+    );
+    // Watchdog: if the prior run has been "running" for >2x interval, assume it
+    // crashed without clearing the lock and force-reset so we don't stall forever.
+    if (runningForMs > stuckThresholdMs) {
+      console.error(
+        `[wixRealtimeSyncService] watchdog: force-resetting stuck lock after ${Math.round(
+          runningForMs / 1000
+        )}s`
+      );
+      isRunning = false;
+      blockedTickCount = 0;
+    } else {
+      return;
+    }
+  }
+
   isRunning = true;
+  runStartedAt = Date.now();
+  blockedTickCount = 0;
   try {
     const result = await performWixSync();
-    console.log(`[wixRealtimeSyncService] ${source}: synced ${result.upserted} booking(s)`);
+    const tookMs = Date.now() - runStartedAt;
+    console.log(
+      `[wixRealtimeSyncService] ${source}: synced ${result.upserted} booking(s) in ${tookMs}ms`
+    );
   } catch (e) {
     if (e.code === 'WIX_CONFIG_MISSING') {
       console.warn('[wixRealtimeSyncService] skipped: Wix env not configured');
@@ -23,6 +55,7 @@ async function runOnce(source = 'interval') {
     }
   } finally {
     isRunning = false;
+    runStartedAt = 0;
   }
 }
 

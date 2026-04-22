@@ -1100,7 +1100,7 @@ const getAllUsers = async (req, res) => {
     
     // For clients, we need to join with the clients table to get name information
     if (role === 'client') {
-      // Query clients table and join with users table
+      // Query clients table first, then fetch user emails separately (no FK embed)
     let query = supabaseAdmin
         .from('clients')
         .select(`
@@ -1111,33 +1111,37 @@ const getAllUsers = async (req, res) => {
           child_name,
           child_age,
           created_at,
-          user_id,
-          users:user_id (
-            id,
-            email,
-            role,
-            profile_picture_url,
-            created_at
-          )
+          user_id
         `, { count: 'exact' });
-      
+
       if (search) {
         const escapedSearch = escapeLike(search);
         query = query.or(`first_name.ilike.%${escapedSearch}%,last_name.ilike.%${escapedSearch}%,child_name.ilike.%${escapedSearch}%`);
       }
-      
+
       query = query.range(offset, offset + limit - 1).order('created_at', { ascending: false });
-      
+
       const { data, error, count } = await query;
-      
+
       if (error) {
         console.error('Error fetching clients:', error);
-        return res.status(500).json(errorResponse('Failed to fetch users'));
+        return res.status(500).json(errorResponse(`Failed to fetch users: ${error.message || error.code || 'unknown'}`));
       }
-      
+
+      // Fetch user details separately to avoid PostgREST FK embed requirement
+      const userIds = (data || []).map(c => c.user_id).filter(Boolean);
+      const userMap = new Map();
+      if (userIds.length) {
+        const { data: usersData } = await supabaseAdmin
+          .from('users')
+          .select('id, email, role, profile_picture_url, created_at')
+          .in('id', userIds);
+        (usersData || []).forEach(u => userMap.set(u.id, u));
+      }
+
       // Transform the data to match expected format
       const transformedUsers = (data || []).map(client => {
-        const user = client.users || {};
+        const user = userMap.get(client.user_id) || {};
         return {
           id: user.id || client.user_id,
           client_id: client.id,
@@ -1153,8 +1157,7 @@ const getAllUsers = async (req, res) => {
             child_age: client.child_age || null,
             client_id: client.id
           },
-          // Add name field for easy access
-          name: client.first_name && client.last_name 
+          name: client.first_name && client.last_name
             ? `${client.first_name} ${client.last_name}`.trim()
             : client.first_name || client.child_name || 'No Name'
         };

@@ -62,6 +62,8 @@ router.get('/wix/discover-inspect', wixDiscoverController.discoverInspect);
 // Wix → Supabase mirror (`wix_bookings`)
 router.post('/wix/sync', wixBookingsController.syncWixBookings);
 router.get('/wix/bookings', wixBookingsController.listWixBookings);
+router.get('/wix/therapists', wixBookingsController.listWixTherapists);
+router.post('/wix/backfill-clients', wixBookingsController.backfillWixClients);
 
 // Workshop / marketing event registrations (Supabase table event_registrations)
 router.get('/event-registrations', adminController.getEventRegistrations);
