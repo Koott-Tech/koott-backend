@@ -46,6 +46,23 @@ function sessionTypeFromBooking(b) {
   return 'individual';
 }
 
+/**
+ * Estimate number of sessions purchased.
+ * Only meaningful for package bookings (actualPaid >= 2× catalogRate).
+ * Returns the rounded count for packages, 1 for individuals, null when data missing.
+ */
+function sessionCountFromBooking(b) {
+  const catalogRate = parseFloat(b?.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 0);
+  const actualPaid  = parseFloat(b?.paymentDetails?.balance?.finalPrice?.amount ?? 0);
+  if (catalogRate <= 0 || actualPaid <= 0) return null;
+  // Only compute multi-session count when it clearly qualifies as a package
+  if (actualPaid >= catalogRate * 2) {
+    const count = Math.round(actualPaid / catalogRate);
+    return count >= 2 ? count : null;
+  }
+  return 1;
+}
+
 function therapistNameFromBooking(b) {
   if (!b) return null;
   if (typeof b.therapist === 'string') return b.therapist;
@@ -98,6 +115,7 @@ function discoverRowToDb(booking) {
     status: normalizeWixStatusToSessionStatus(b.status),
     title: b.title != null ? String(b.title) : null,
     session_type: sessionTypeFromBooking(b),
+    session_count: sessionCountFromBooking(b),
     therapist_name: therapistNameFromBooking(b),
     tags: Array.isArray(b.tags) ? b.tags : b.tags != null ? b.tags : null,
     start_time: b.startTime || null,
@@ -189,4 +207,5 @@ module.exports = {
   normalizeWixStatusToSessionStatus,
   therapistNameFromBooking,
   sessionTypeFromBooking,
+  sessionCountFromBooking,
 };

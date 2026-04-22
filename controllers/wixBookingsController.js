@@ -21,7 +21,7 @@ async function upsertEnrichedBookings(rawBookings) {
   const list = Array.isArray(rawBookings) ? rawBookings : rawBookings ? [rawBookings] : [];
   const deduped = dedupeBookings(list);
 
-  const rows = deduped
+  let rows = deduped
     .map(discoverRowToDb)
     .filter(Boolean)
     .map((row) => Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined)));
@@ -33,6 +33,8 @@ async function upsertEnrichedBookings(rawBookings) {
   if (!rows.length) {
     return { upserted: 0, sessionsUpserted: 0, sessionMirrorSkipped: false };
   }
+
+  rows = await applyMaxPriceGuard(rows);
 
   const { data, error } = await supabaseAdmin
     .from('wix_bookings')
@@ -148,6 +150,47 @@ function dedupeBookings(bookings) {
   return Array.from(byKey.values());
 }
 
+/**
+ * Protect rows whose price/session_type was previously resolved correctly.
+ * Wix payment API returns inconsistent data — sometimes `paymentDetails` is empty
+ * for the same booking on subsequent fetches. This guard ensures we never
+ * downgrade a price that was previously set higher (e.g. 8699 → 1999).
+ */
+async function applyMaxPriceGuard(rows) {
+  if (!rows.length) return rows;
+  const ids = rows.map((r) => r.wix_booking_id).filter(Boolean);
+  const { data: existing } = await supabaseAdmin
+    .from('wix_bookings')
+    .select('wix_booking_id, price, session_type, session_count')
+    .in('wix_booking_id', ids);
+
+  if (!existing?.length) return rows;
+  const existingMap = new Map(existing.map((e) => [e.wix_booking_id, e]));
+
+  return rows.map((row) => {
+    const prev = existingMap.get(row.wix_booking_id);
+    if (!prev) return row;
+
+    const newPrice  = parseFloat(row.price ?? 0);
+    const prevPrice = parseFloat(prev.price ?? 0);
+
+    // Keep whichever price is higher
+    if (prevPrice > newPrice && prevPrice > 0) {
+      row = { ...row, price: prev.price, currency: row.currency || prev.currency };
+    }
+
+    // Keep the better session_type: package > individual > null
+    const typeRank = { package: 2, individual: 1 };
+    const newRank  = typeRank[row.session_type]  ?? 0;
+    const prevRank = typeRank[prev.session_type] ?? 0;
+    if (prevRank > newRank) {
+      row = { ...row, session_type: prev.session_type, session_count: prev.session_count ?? row.session_count };
+    }
+
+    return row;
+  });
+}
+
 async function performWixSync() {
   const r = await fetchWixDiscover({
     limit: process.env.WIX_DISCOVER_BOOKING_LIMIT || DEFAULT_WIX_SYNC_LIMIT,
@@ -169,7 +212,7 @@ async function performWixSync() {
     };
   }
 
-  const rows = dedupedBookings
+  let rows = dedupedBookings
     .map(discoverRowToDb)
     .filter(Boolean)
     .map((row) => Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined)));
@@ -185,6 +228,10 @@ async function performWixSync() {
       fetchedAt: r.json?.fetchedAt || new Date().toISOString(),
     };
   }
+
+  // Never overwrite a previously-correct higher price with Wix's inconsistent lower value
+  rows = await applyMaxPriceGuard(rows);
+
   const { data, error } = await supabaseAdmin
     .from('wix_bookings')
     .upsert(rows, { onConflict: 'wix_booking_id' })
