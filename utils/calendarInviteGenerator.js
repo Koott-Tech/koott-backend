@@ -47,16 +47,16 @@ function generateCalendarInvite(sessionData) {
 
   // When no Meet link yet, avoid showing "undefined" — use a clear placeholder
   const meetText = meetLink && String(meetLink).trim() ? meetLink : 'Join link will be shared separately';
-  const locationText = meetLink && String(meetLink).trim() ? meetLink : 'Online session - Little Care';
+  const locationText = meetLink && String(meetLink).trim() ? meetLink : 'Online session - Koott';
 
   // Generate unique UID
-  const uid = `session-${sessionId}-${crypto.randomUUID()}@littlecare.com`;
+  const uid = `session-${sessionId}-${crypto.randomUUID()}@koott.com`;
 
   // Calendar invite content with IST timezone
   const icalContent = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
-    'PRODID:-//Little Care//Therapy Sessions//EN',
+    'PRODID:-//Koott//Therapy Sessions//EN',
     'CALSCALE:GREGORIAN',
     'METHOD:REQUEST',
     'BEGIN:VTIMEZONE',
@@ -74,7 +74,7 @@ function generateCalendarInvite(sessionData) {
     `DTSTART;TZID=Asia/Kolkata:${startDate}`,
     `DTEND;TZID=Asia/Kolkata:${endDate}`,
     `SUMMARY:Therapy Session - ${clientName} with ${psychologistName}`,
-    `DESCRIPTION:Online therapy session scheduled through Little Care.\\n\\n` +
+    `DESCRIPTION:Online therapy session scheduled through Koott.\\n\\n` +
     `Client: ${clientName}\\n` +
     `Psychologist: ${psychologistName}\\n` +
     `Session Fee: $${price}\\n\\n` +
@@ -166,7 +166,7 @@ function generateGoogleCalendarLink(sessionData) {
   const details = encodeURIComponent(
     `Online therapy session\n\nJoin via Google Meet: ${meetText}\n\nPlease join 5 minutes early.`
   );
-  const location = encodeURIComponent(meetLink && String(meetLink).trim() ? meetLink : 'Online session - Little Care');
+  const location = encodeURIComponent(meetLink && String(meetLink).trim() ? meetLink : 'Online session - Koott');
 
   return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${startDate}/${endDate}&details=${details}&location=${location}`;
 }
@@ -195,7 +195,7 @@ function generateOutlookCalendarLink(sessionData) {
   const body = encodeURIComponent(
     `Online therapy session\n\nJoin via Google Meet: ${meetText}\n\nPlease join 5 minutes early.`
   );
-  const location = encodeURIComponent(meetLink && String(meetLink).trim() ? meetLink : 'Online session - Little Care');
+  const location = encodeURIComponent(meetLink && String(meetLink).trim() ? meetLink : 'Online session - Koott');
 
   // Use IST time for Outlook
   const startDate = sessionDateTime.toISOString();

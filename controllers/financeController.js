@@ -494,10 +494,14 @@ const getDashboard = async (req, res) => {
     // Get revenue by session type (only if charts are needed)
     let revenueByType = { individual: 0, package: 0 };
     if (shouldIncludeCharts) {
-      const individualSessions = filteredSessionsForDisplay.filter(shouldIncludeInRevenue);
+      const revenueSessions = filteredSessionsForDisplay.filter(shouldIncludeInRevenue);
       revenueByType = {
-        individual: individualSessions.reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0),
-        package: 0 // Will be calculated from package sessions
+        individual: revenueSessions
+          .filter(s => s.session_type !== 'package')
+          .reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0),
+        package: revenueSessions
+          .filter(s => s.session_type === 'package')
+          .reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0),
       };
     }
 

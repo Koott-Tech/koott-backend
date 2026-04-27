@@ -104,6 +104,15 @@ const generateAvailabilityRecords = (psychologistId, startDate, endDate, timeSlo
  */
 const setDefaultAvailability = async (psychologistId) => {
   try {
+    // Pre-flight: verify time_slots column exists
+    const { error: probeError } = await supabaseAdmin
+      .from('availability')
+      .select('time_slots')
+      .limit(1);
+    if (probeError && probeError.message && probeError.message.includes('time_slots')) {
+      return { success: false, message: 'availability.time_slots column not found — migration required' };
+    }
+
     // Fetch psychologist to determine designation (psychiatrist vs others)
     const { data: psych, error: psychError } = await supabaseAdmin
       .from('psychologists')
@@ -188,6 +197,18 @@ const setDefaultAvailability = async (psychologistId) => {
  */
 const addNextDayAvailability = async () => {
   try {
+    // Pre-flight: verify that the availability table has the 'time_slots' column.
+    // If the column is missing (schema not migrated yet), skip silently to avoid
+    // spamming hundreds of PGRST204 errors.
+    const { error: probeError } = await supabaseAdmin
+      .from('availability')
+      .select('time_slots')
+      .limit(1);
+    if (probeError && probeError.message && probeError.message.includes('time_slots')) {
+      console.warn('[dailyAvailability] ⚠️ availability.time_slots column missing — skipping. Run the schema migration first.');
+      return { success: false, message: 'availability.time_slots column not found — migration required' };
+    }
+
     // Get all active psychologists
     // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
     const { data: psychologists, error: psychError } = await supabaseAdmin

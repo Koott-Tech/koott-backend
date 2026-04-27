@@ -323,7 +323,7 @@ const bookSession = async (req, res) => {
         
         const psychologistMessage =
           `Hey 👋\n\n` +
-          `New session booked with Little Care.\n\n` +
+          `New session booked with Koott.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Date: ${formattedDate}\n` +
           `${bullet}Time: ${formattedTime} (IST)\n` +
@@ -331,7 +331,7 @@ const bookSession = async (req, res) => {
           `Join link:\n${meetData.meetLink}\n\n` +
           `Please be ready 5 mins early.\n\n` +
           `For help: ${supportPhone}\n\n` +
-          `— Little Care 💜`;
+          `— Koott 💜`;
         
         const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
         if (psychologistWaResult?.success) {

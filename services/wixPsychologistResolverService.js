@@ -1,4 +1,6 @@
 const { supabaseAdmin } = require('../config/supabase');
+const { hashPassword } = require('../utils/helpers');
+const emailService = require('../utils/emailService');
 
 function splitName(fullName) {
   const raw = String(fullName || '').trim();
@@ -24,41 +26,74 @@ function therapistFromBooking(booking) {
   };
 }
 
+/**
+ * Resolve or create a psychologist row for a Wix booking.
+ * When creating a new row, also sets a password_hash so the therapist
+ * can log into the psychologist dashboard.
+ *
+ * @returns {{ psychologistId: string|null, isNew: boolean }}
+ */
+/**
+ * Resolve or create a psychologist row for a Wix booking.
+ * When creating a new row, also sets a password_hash so the therapist
+ * can log into the psychologist dashboard.
+ *
+ * @returns {{ psychologistId: string|null, isNew: boolean }}
+ */
 async function resolveOrCreateWixPsychologist(booking) {
   const therapist = therapistFromBooking(booking);
   const rawName = String(therapist.name || '').trim();
   const rawEmail = String(therapist.email || '').trim().toLowerCase();
   const rawPhone = String(therapist.phone || '').trim();
 
-  if (!rawName && !rawEmail) return null;
+  if (!rawName && !rawEmail) return { psychologistId: null, isNew: false };
 
+  // 1. Try resolving by email (most unique)
   if (rawEmail) {
     const { data: existingByEmail } = await supabaseAdmin
       .from('psychologists')
       .select('id')
       .ilike('email', rawEmail)
-      .maybeSingle();
-    if (existingByEmail?.id) return existingByEmail.id;
+      .limit(1);
+    if (existingByEmail?.[0]?.id) return { psychologistId: existingByEmail[0].id, isNew: false };
   }
 
+  // 2. Try resolving by name (fallback)
   const { firstName, lastName } = splitName(rawName);
-  if (firstName && lastName) {
-    const { data: existingByName } = await supabaseAdmin
+  if (firstName) {
+    let query = supabaseAdmin
       .from('psychologists')
       .select('id')
-      .ilike('first_name', firstName)
-      .ilike('last_name', lastName)
-      .maybeSingle();
-    if (existingByName?.id) return existingByName.id;
+      .ilike('first_name', firstName);
+    
+    if (lastName) {
+      query = query.ilike('last_name', lastName);
+    } else {
+      query = query.is('last_name', null);
+    }
+
+    const { data: existingByName } = await query.limit(1);
+    if (existingByName?.[0]?.id) return { psychologistId: existingByName[0].id, isNew: false };
+  }
+
+  // Build a deterministic temp password
+  let passwordHash = null;
+  let tempPassword = null;
+  if (rawEmail) {
+    const localPart = rawEmail.split('@')[0] || 'user';
+    const suffix = localPart.slice(0, 4).toLowerCase();
+    tempPassword = `Welcome@${suffix}`;
+    passwordHash = await hashPassword(tempPassword);
   }
 
   const insertPayload = {
     email: rawEmail || null,
     first_name: firstName,
-    last_name: lastName,
+    last_name: lastName || null,
     phone: rawPhone || null,
     profile_picture_url: therapist.image || null,
     designation: 'Psychologist',
+    password_hash: passwordHash,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -70,33 +105,63 @@ async function resolveOrCreateWixPsychologist(booking) {
     .single();
 
   if (error) {
-    // Handle race where another process inserted the same email simultaneously.
-    if (rawEmail) {
-      const { data: retryByEmail } = await supabaseAdmin
-        .from('psychologists')
-        .select('id')
-        .ilike('email', rawEmail)
-        .maybeSingle();
-      if (retryByEmail?.id) return retryByEmail.id;
-    }
+    // Fetch again just in case
+    const { data: retryCheck } = await supabaseAdmin
+      .from('psychologists')
+      .select('id')
+      .ilike('first_name', firstName)
+      .limit(1);
+    
+    if (retryCheck?.[0]?.id) return { psychologistId: retryCheck[0].id, isNew: false };
+    
     console.warn('[wixPsychologistResolver] insert failed:', error.message || error);
-    return null;
+    return { psychologistId: null, isNew: false };
   }
 
-  return inserted.id;
+  // Send welcome email with login credentials (fire-and-forget)
+  if (rawEmail && tempPassword) {
+    const psychologistName = [firstName, insertPayload.last_name].filter(Boolean).join(' ') || rawEmail;
+    emailService.sendWelcomePsychologistEmail({
+      to: rawEmail,
+      psychologistName,
+      tempPassword,
+      loginUrl: 'https://www.little.care',
+    }).catch((err) => {
+      console.error(`[wixPsychologistResolver] welcome email failed for ${rawEmail}:`, err?.message || err);
+    });
+  }
+
+  return { psychologistId: inserted.id, isNew: true };
 }
+
 
 async function resolvePsychologistsForBookings(bookings) {
   if (!Array.isArray(bookings) || !bookings.length) return new Map();
 
   const wixIdToPsychologistId = new Map();
-  for (const booking of bookings) {
+  const newPsychologistWixIds = new Set();
+  const resolveCache = new Map(); // name+email -> Promise
+
+  await Promise.all(bookings.map(async (booking) => {
     const wixBookingId = booking?.id != null ? String(booking.id) : null;
-    if (!wixBookingId) continue;
-    const psychologistId = await resolveOrCreateWixPsychologist(booking);
-    if (!psychologistId) continue;
-    wixIdToPsychologistId.set(wixBookingId, psychologistId);
-  }
+    if (!wixBookingId) return;
+
+    const therapist = therapistFromBooking(booking);
+    const cacheKey = `${therapist.name || ''}|${therapist.email || ''}`.toLowerCase().trim();
+
+    if (!resolveCache.has(cacheKey)) {
+      resolveCache.set(cacheKey, resolveOrCreateWixPsychologist(booking));
+    }
+
+    const result = await resolveCache.get(cacheKey);
+    const psychologistId = result?.psychologistId ?? result;
+    const isNew = result?.isNew ?? false;
+    
+    if (psychologistId) {
+      wixIdToPsychologistId.set(wixBookingId, psychologistId);
+      if (isNew) newPsychologistWixIds.add(wixBookingId);
+    }
+  }));
 
   for (const [wixBookingId, psychologistId] of wixIdToPsychologistId.entries()) {
     const { error } = await supabaseAdmin
@@ -112,6 +177,7 @@ async function resolvePsychologistsForBookings(bookings) {
     }
   }
 
+  wixIdToPsychologistId._newPsychologistWixIds = newPsychologistWixIds;
   return wixIdToPsychologistId;
 }
 

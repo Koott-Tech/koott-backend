@@ -1,6 +1,6 @@
 /**
  * Inspect the raw Wix payload for a specific client email.
- * Run from littlecare-backend/:
+ * Run from koott-backend/:
  *   node scripts/inspect-wix-client.cjs abiyabijuthomas@gmail.com
  */
 require('dotenv').config();

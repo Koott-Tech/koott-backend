@@ -736,7 +736,7 @@ class MeetLinkCreationQueue {
         
         const psychologistMessage =
           `Hey 👋\n\n` +
-          `New session booked with Little Care.\n\n` +
+          `New session booked with Koott.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           packageLine +
           `${bullet}Date: ${formattedDate}\n` +
@@ -745,7 +745,7 @@ class MeetLinkCreationQueue {
           `Join link:\n${meetResult.meetLink}\n\n` +
           `Please be ready 5 mins early.\n\n` +
           `For help: +91 95390 07766\n\n` +
-          `— Little Care 💜`;
+          `— Koott 💜`;
         
         const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
         if (psychologistWaResult?.success) {

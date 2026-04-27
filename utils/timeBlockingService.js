@@ -80,7 +80,7 @@ class TimeBlockingService {
         const endDateStr = endDate.toISOString().split('T')[0];
         event = {
           summary: `🚫 BLOCKED - ${reason}`,
-          description: `Recurring block by psychologist (e.g. leave) - ${reason}. Synced from Little Care.`,
+          description: `Recurring block by psychologist (e.g. leave) - ${reason}. Synced from Koott.`,
           start: { date: startDateStr },
           end: { date: endDateStr },
           recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${byDay}`],
@@ -109,7 +109,7 @@ class TimeBlockingService {
           const endDateTime = `${startDateStr}T${endSlot}:00`;
           event = {
             summary: `🚫 BLOCKED - ${reason}`,
-            description: `Recurring block by psychologist - ${reason}. Synced from Little Care.`,
+            description: `Recurring block by psychologist - ${reason}. Synced from Koott.`,
             start: { dateTime: startDateTime, timeZone: 'Asia/Kolkata' },
             end: { dateTime: endDateTime, timeZone: 'Asia/Kolkata' },
             recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${byDay}`],
@@ -136,7 +136,7 @@ class TimeBlockingService {
           const endSlot = `${String(endH).padStart(2, '0')}:${String(m || 0).padStart(2, '0')}`;
           const slotEvent = {
             summary: `🚫 BLOCKED - ${reason}`,
-            description: `Recurring block by psychologist - ${reason}. Synced from Little Care.`,
+            description: `Recurring block by psychologist - ${reason}. Synced from Koott.`,
             start: { dateTime: `${startDateStr}T${startSlot}:00`, timeZone: 'Asia/Kolkata' },
             end: { dateTime: `${startDateStr}T${endSlot}:00`, timeZone: 'Asia/Kolkata' },
             recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${byDay}`],

@@ -21,7 +21,7 @@ router.post('/workshop-register', async (req, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const countryCode = String(req.body?.countryCode || '').trim();
     const phone = String(req.body?.phone || '').trim().replace(/\s+/g, '');
-    const eventSlug = String(req.body?.eventSlug || 'little-care-summer-workshops-2026').trim();
+    const eventSlug = String(req.body?.eventSlug || 'Koott-summer-workshops-2026').trim();
 
     if (!fullName || fullName.length < 2) return fail(res, 'Please enter your full name.');
     if (!email || !EMAIL_RE.test(email)) return fail(res, 'Please enter a valid email address.');
@@ -135,7 +135,7 @@ router.post('/workshop-register', async (req, res) => {
             '',
             'Use this link for the session — same link as in your email.',
             '',
-            '— Little Care',
+            '— Koott',
           ].join('\n');
           try {
             await sendWhatsAppTextWithRetry(registrantWhatsApp, userMsg, 0, 0);

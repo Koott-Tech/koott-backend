@@ -109,7 +109,7 @@ function buildBookingMessage({ childName, date, time, meetLink }) {
     `⏰ *Time:* ${time}\n` +
     `🔗 *Join via Google Meet:* ${meetLink}\n\n` +
     `We look forward to seeing you! 😊\n\n` +
-    `_Powered by Little Care Child Therapy_`
+    `_Powered by Koott Child Therapy_`
   );
 }
 

@@ -43,11 +43,11 @@ class EmailService {
   addEmailHeaders(mailOptions) {
     return {
       ...mailOptions,
-      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'support@littlecare.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'support@koott.com',
       headers: {
         'Message-ID': `<${Date.now()}-${Math.random().toString(36).substring(7)}@little.care>`,
-        'X-Mailer': 'LittleCare Platform',
-        'List-Unsubscribe': process.env.EMAIL_UNSUBSCRIBE_URL || `<mailto:unsubscribe@littlecare.com>`,
+        'X-Mailer': 'Koott Platform',
+        'List-Unsubscribe': process.env.EMAIL_UNSUBSCRIBE_URL || `<mailto:unsubscribe@koott.com>`,
         ...(mailOptions.headers || {})
       }
     };
@@ -336,10 +336,10 @@ class EmailService {
         console.log('⚠️ Skipping psychologist email (placeholder or missing):', psychologistEmail);
       }
 
-      // Send email to company admin and meet.littlecare@gmail.com (same content)
+      // Send email to company admin and meet.koott@gmail.com (same content)
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
-      const meetLittleCareEmail = 'meet.littlecare@gmail.com';
-      const adminRecipients = [adminEmail, meetLittleCareEmail].filter(Boolean).join(', ');
+      const meetKoottEmail = 'meet.koott@gmail.com';
+      const adminRecipients = [adminEmail, meetKoottEmail].filter(Boolean).join(', ');
       if (adminRecipients) {
         await this.sendAdminNotification({
           to: adminRecipients,
@@ -412,7 +412,7 @@ class EmailService {
 
     const mailOptions = {
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -437,7 +437,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="${logoUrl}" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${logoUrl}" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -455,7 +455,7 @@ class EmailService {
                       <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
-                        Your session with <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Little Care</span> is scheduled.
+                        Your session with <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Koott</span> is scheduled.
                       </p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">Here are the details:</p>
@@ -550,7 +550,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The <span style="font-style: italic; color: #3f2e73;">Little Care</span> Team</strong>
+                        <strong style="color: #3f2e73;">The <span style="font-style: italic; color: #3f2e73;">Koott</span> Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -575,7 +575,7 @@ class EmailService {
     const finalMailOptions = {
       ...mailOptions,
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -611,7 +611,7 @@ class EmailService {
 
     const mailOptions = {
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -636,7 +636,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -781,7 +781,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The Little Care Team</strong>
+                        <strong style="color: #3f2e73;">The Koott Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -845,7 +845,7 @@ class EmailService {
 
     const mailOptions = {
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -870,7 +870,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -962,7 +962,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">Little Care Platform</strong>
+                        <strong style="color: #3f2e73;">Koott Platform</strong>
                       </p>
                     </td>
                   </tr>
@@ -971,7 +971,7 @@ class EmailService {
                   <tr>
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
-                        This is an automated notification from the Little Care therapy platform.<br>
+                        This is an automated notification from the Koott therapy platform.<br>
                         If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
@@ -989,7 +989,7 @@ class EmailService {
   }
 
   /**
-   * Send reschedule request notification to admin and meet.littlecare@gmail.com
+   * Send reschedule request notification to admin and meet.koott@gmail.com
    * Called when a client requests reschedule that requires admin approval (within 24h or 2nd+ reschedule)
    */
   async sendRescheduleRequestNotification(emailData) {
@@ -1034,7 +1034,7 @@ class EmailService {
 
     const mailOptions = {
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -1059,7 +1059,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1149,7 +1149,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">Little Care Platform</strong>
+                        <strong style="color: #3f2e73;">Koott Platform</strong>
                       </p>
                     </td>
                   </tr>
@@ -1158,7 +1158,7 @@ class EmailService {
                   <tr>
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
-                        This is an automated notification from the Little Care therapy platform.<br>
+                        This is an automated notification from the Koott therapy platform.<br>
                         If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
@@ -1176,7 +1176,7 @@ class EmailService {
   }
 
   /**
-   * Send new user registration notification to admin and meet.littlecare@gmail.com
+   * Send new user registration notification to admin and meet.koott@gmail.com
    * Called when a new user (client or psychologist) creates an account
    */
   async sendNewUserRegistrationNotification(emailData) {
@@ -1205,7 +1205,7 @@ class EmailService {
 
     const mailOptions = {
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -1230,7 +1230,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1309,7 +1309,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">Little Care Platform</strong>
+                        <strong style="color: #3f2e73;">Koott Platform</strong>
                       </p>
                     </td>
                   </tr>
@@ -1318,7 +1318,7 @@ class EmailService {
                   <tr>
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
-                        This is an automated notification from the Little Care therapy platform.<br>
+                        This is an automated notification from the Koott therapy platform.<br>
                         If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
@@ -1518,7 +1518,7 @@ class EmailService {
 
     const mailOptions = {
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -1543,7 +1543,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="${logoUrl}" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${logoUrl}" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1561,7 +1561,7 @@ class EmailService {
                       <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
-                        Your session with <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Little Care</span> has been rescheduled.
+                        Your session with <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Koott</span> has been rescheduled.
                       </p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">Here are the updated details:</p>
@@ -1642,7 +1642,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The <span style="font-style: italic; color: #3f2e73;">Little Care</span> Team</strong>
+                        <strong style="color: #3f2e73;">The <span style="font-style: italic; color: #3f2e73;">Koott</span> Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -1713,10 +1713,10 @@ class EmailService {
         });
       }
 
-      // Send same admin email to COMPANY_ADMIN_EMAIL and meet.littlecare@gmail.com
+      // Send same admin email to COMPANY_ADMIN_EMAIL and meet.koott@gmail.com
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
-      const meetLittleCareEmail = 'meet.littlecare@gmail.com';
-      const adminRecipients = [adminEmail, meetLittleCareEmail].filter(Boolean).join(', ');
+      const meetKoottEmail = 'meet.koott@gmail.com';
+      const adminRecipients = [adminEmail, meetKoottEmail].filter(Boolean).join(', ');
       if (adminRecipients) {
         await this.sendAdminNotification({
           to: adminRecipients,
@@ -1750,7 +1750,7 @@ class EmailService {
 
     const mailOptions = {
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -1775,7 +1775,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1885,7 +1885,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The Little Care Team</strong>
+                        <strong style="color: #3f2e73;">The Koott Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -1938,7 +1938,7 @@ If you need to cancel or reschedule, please contact us at least 24 hours in adva
 We look forward to meeting you!
 
 Best regards,
-The Little Care Team
+The Koott Team
       `
     };
 
@@ -1952,7 +1952,7 @@ The Little Care Team
 
     const mailOptions = {
       from: {
-        name: 'LittleCare',
+        name: 'Koott',
         address: 'noreply@little.care'
       },
       replyTo: 'noreply@little.care',
@@ -1977,7 +1977,7 @@ The Little Care Team
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -2083,7 +2083,7 @@ The Little Care Team
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The Little Care Team</strong>
+                        <strong style="color: #3f2e73;">The Koott Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -2119,7 +2119,7 @@ The Little Care Team
 
       const mailOptions = {
         from: {
-          name: 'LittleCare',
+          name: 'Koott',
           address: 'noreply@little.care'
         },
         replyTo: 'noreply@little.care',
@@ -2165,7 +2165,7 @@ The Little Care Team
 
       const mailOptions = {
         from: {
-          name: 'LittleCare',
+          name: 'Koott',
           address: 'noreply@little.care'
         },
         replyTo: 'noreply@little.care',
@@ -2190,7 +2190,7 @@ The Little Care Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2257,7 +2257,7 @@ The Little Care Team
                         
                         <p style="color: #2d3748; font-size: 15px; margin: 0;">
                           Best regards,<br>
-                          <strong style="color: #3f2e73;">The Little Care Team</strong>
+                          <strong style="color: #3f2e73;">The Koott Team</strong>
                         </p>
                       </td>
                     </tr>
@@ -2311,7 +2311,7 @@ The Little Care Team
 
       const mailOptions = {
         from: {
-          name: 'LittleCare',
+          name: 'Koott',
           address: 'noreply@little.care'
         },
         replyTo: 'noreply@little.care',
@@ -2336,7 +2336,7 @@ The Little Care Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2413,7 +2413,7 @@ The Little Care Team
                         
                         <p style="color: #2d3748; font-size: 15px; margin: 0;">
                           Best regards,<br>
-                          <strong style="color: #3f2e73;">The Little Care Team</strong>
+                          <strong style="color: #3f2e73;">The Koott Team</strong>
                         </p>
                       </td>
                     </tr>
@@ -2457,7 +2457,7 @@ The Little Care Team
 
       const mailOptions = {
         from: {
-          name: 'LittleCare',
+          name: 'Koott',
           address: 'noreply@little.care'
         },
         replyTo: 'noreply@little.care',
@@ -2482,7 +2482,7 @@ The Little Care Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2561,7 +2561,7 @@ The Little Care Team
                         
                         <p style="color: #2d3748; font-size: 15px; margin: 0;">
                           Best regards,<br>
-                          <strong style="color: #3f2e73;">The Little Care Team</strong>
+                          <strong style="color: #3f2e73;">The Koott Team</strong>
                         </p>
                       </td>
                     </tr>
@@ -2624,7 +2624,7 @@ The Little Care Team
                     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                       <tr>
                         <td align="center" style="padding-bottom: 15px;">
-                          <img src="https://www.little.care/favicon.png" alt="Little Care" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                         </td>
                       </tr>
                       <tr>
@@ -2688,7 +2688,7 @@ The Little Care Team
                       You will also receive the same details on WhatsApp.
                     </p>
                     <p style="color: #2d3748; font-size: 15px; margin: 18px 0 0 0;">
-                      — <strong style="color: #3f2e73;">The Little Care Team</strong>
+                      — <strong style="color: #3f2e73;">The Koott Team</strong>
                     </p>
                   </td>
                 </tr>
@@ -2717,6 +2717,279 @@ The Little Care Team
 
     await this.transporter.sendMail(mailOptions);
     return { ok: true };
+  }
+
+  /**
+   * Send welcome email to new clients with their temporary credentials.
+   * @param {{ to: string, clientName: string, tempPassword: string, loginUrl: string }} emailData
+   */
+  async sendWelcomeEmail(emailData) {
+    const { to, clientName, tempPassword, loginUrl } = emailData;
+    
+    const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
+    const firstName = clientName ? clientName.split(' ')[0] : 'there';
+
+    const mailOptions = {
+      from: {
+        name: 'Koott',
+        address: 'noreply@little.care'
+      },
+      replyTo: 'hey@little.care',
+      to: to,
+      subject: 'Welcome to Koott - Your Account Details',
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f7fa;">
+          <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f7fa;">
+            <tr>
+              <td style="padding: 20px 10px;">
+                <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                  <!-- Header with Logo -->
+                  <tr>
+                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
+                        <tr>
+                          <td align="center" style="padding-bottom: 15px;">
+                            <img src="${logoUrl}" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          </td>
+                        </tr>
+                        <tr>
+                          <td align="center">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 600;">Welcome to Koott</h1>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  
+                  <!-- Main Content -->
+                  <tr>
+                    <td style="padding: 40px 30px;">
+                      <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
+                      
+                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
+                        We're thrilled to have you join <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Koott</span>. Your account has been created successfully.
+                      </p>
+                      
+                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">You can access your dashboard using the credentials below:</p>
+                      
+                      <!-- Credentials Card -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0; background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
+                        <tr>
+                          <td style="padding: 24px;">
+                            <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                              <tr>
+                                <td style="padding: 8px 0; color: #64748b; font-size: 14px; width: 100px;">Email:</td>
+                                <td style="padding: 8px 0; color: #1e293b; font-size: 15px; font-weight: 600;">${to}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #64748b; font-size: 14px;">Password:</td>
+                                <td style="padding: 8px 0; color: #1e293b; font-size: 15px; font-weight: 600; font-family: monospace; letter-spacing: 0.5px;">${tempPassword}</td>
+                              </tr>
+                            </table>
+                          </td>
+                        </tr>
+                      </table>
+                      
+                      <!-- Login Button -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="text-align: center;">
+                            <a href="${loginUrl}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;">
+                              Log In to Your Dashboard
+                            </a>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 30px 0; font-style: italic;">
+                        Note: For security reasons, we recommend changing your password after your first login.
+                      </p>
+                      
+                      <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 0 0 30px 0;" />
+
+                      <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">
+                        At Koott, we're committed to providing the best support for your child's well-being. Our platform allows you to:
+                      </p>
+                      
+                      <ul style="color: #4a5568; font-size: 14px; line-height: 1.8; margin: 0 0 30px 0; padding-left: 20px;">
+                        <li>Book and manage therapy sessions</li>
+                        <li>Access session summaries and reports</li>
+                        <li>Communicate with your specialists</li>
+                        <li>Track your progress over time</li>
+                      </ul>
+                      
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:hey@little.care" style="color: #3f2e73; text-decoration: none;">hey@little.care</a> or +91-9539007766</p>
+                      
+                      <p style="color: #2d3748; font-size: 15px; margin: 0;">
+                        Best regards,<br>
+                        <strong style="color: #3f2e73;">The <span style="font-style: italic; color: #3f2e73;">Koott</span> Team</strong>
+                      </p>
+                    </td>
+                  </tr>
+                  
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
+                      <p style="color: #718096; font-size: 12px; margin: 0; line-height: 1.6;">
+                        © ${new Date().getFullYear()} Koott. All rights reserved.<br>
+                        This is an automated message. Please do not reply to this email.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+      `
+    };
+
+    const finalMailOptions = this.addEmailHeaders(mailOptions);
+    return this.transporter.sendMail(finalMailOptions);
+  }
+
+  /**
+   * Send welcome email to new psychologists with their temporary credentials.
+   * @param {{ to: string, psychologistName: string, tempPassword: string, loginUrl: string }} emailData
+   */
+  async sendWelcomePsychologistEmail(emailData) {
+    const { to, psychologistName, tempPassword, loginUrl } = emailData;
+    
+    const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
+    const firstName = psychologistName ? psychologistName.split(' ')[0] : 'Specialist';
+
+    const mailOptions = {
+      from: {
+        name: 'Koott',
+        address: 'noreply@little.care'
+      },
+      replyTo: 'hey@little.care',
+      to: to,
+      subject: 'Welcome to the Koott Team - Your Therapist Dashboard',
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f7fa;">
+          <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f7fa;">
+            <tr>
+              <td style="padding: 20px 10px;">
+                <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                  <!-- Header with Logo -->
+                  <tr>
+                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
+                        <tr>
+                          <td align="center" style="padding-bottom: 15px;">
+                            <img src="${logoUrl}" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          </td>
+                        </tr>
+                        <tr>
+                          <td align="center">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 600;">Welcome to the Team</h1>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  
+                  <!-- Main Content -->
+                  <tr>
+                    <td style="padding: 40px 30px;">
+                      <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hello Dr. ${firstName},</p>
+                      
+                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
+                        We are delighted to have you on board with <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Koott</span>. Your therapist account has been set up, and you can now access your dedicated dashboard.
+                      </p>
+                      
+                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">Your dashboard credentials:</p>
+                      
+                      <!-- Credentials Card -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0; background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
+                        <tr>
+                          <td style="padding: 24px;">
+                            <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                              <tr>
+                                <td style="padding: 8px 0; color: #64748b; font-size: 14px; width: 100px;">Login Email:</td>
+                                <td style="padding: 8px 0; color: #1e293b; font-size: 15px; font-weight: 600;">${to}</td>
+                              </tr>
+                              <tr>
+                                <td style="padding: 8px 0; color: #64748b; font-size: 14px;">Temp Password:</td>
+                                <td style="padding: 8px 0; color: #1e293b; font-size: 15px; font-weight: 600; font-family: monospace; letter-spacing: 0.5px;">${tempPassword}</td>
+                              </tr>
+                            </table>
+                          </td>
+                        </tr>
+                      </table>
+                      
+                      <!-- Login Button -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                        <tr>
+                          <td style="text-align: center;">
+                            <a href="${loginUrl}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;">
+                              Log In to Therapist Dashboard
+                            </a>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 30px 0; font-style: italic;">
+                        Please change your password immediately after your first login for security purposes.
+                      </p>
+                      
+                      <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 0 0 30px 0;" />
+
+                      <h3 style="color: #1a202c; font-size: 18px; font-weight: 600; margin: 0 0 15px 0;">Getting Started</h3>
+                      <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">
+                        As a specialist on our platform, you can:
+                      </p>
+                      
+                      <ul style="color: #4a5568; font-size: 14px; line-height: 1.8; margin: 0 0 30px 0; padding-left: 20px;">
+                        <li>Manage your session schedule and availability</li>
+                        <li>Access client history and intake forms</li>
+                        <li>Conduct secure online therapy sessions via Google Meet</li>
+                        <li>Record session summaries and track progress</li>
+                      </ul>
+                      
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you need any technical assistance, please reach out to our support team at <a href="mailto:hey@little.care" style="color: #3f2e73; text-decoration: none;">hey@little.care</a>.</p>
+                      
+                      <p style="color: #2d3748; font-size: 15px; margin: 0;">
+                        Welcome to the family!<br>
+                        <strong style="color: #3f2e73;">The Koott Operations Team</strong>
+                      </p>
+                    </td>
+                  </tr>
+                  
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
+                      <p style="color: #718096; font-size: 12px; margin: 0; line-height: 1.6;">
+                        © ${new Date().getFullYear()} Koott. All rights reserved.<br>
+                        Confidential Specialist Communication.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
+      `
+    };
+
+    const finalMailOptions = this.addEmailHeaders(mailOptions);
+    return this.transporter.sendMail(finalMailOptions);
   }
 }
 

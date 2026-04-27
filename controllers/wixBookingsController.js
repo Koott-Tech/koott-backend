@@ -3,6 +3,9 @@ const { fetchWixDiscover, extractBookingsList } = require('../utils/wixDiscoverC
 const { discoverRowToDb, discoverRowToSessionDb } = require('../utils/wixBookingMapper');
 const { resolveClientsForBookings } = require('../services/wixClientResolverService');
 const { resolvePsychologistsForBookings } = require('../services/wixPsychologistResolverService');
+const { processNewWixSessions } = require('../services/wixMeetNotifyService');
+const { linkPackageSessions } = require('../services/wixPackageLinkerService');
+const { fetchSessionInfoBatch } = require('../services/wixOrderEnrichmentService');
 
 const DEFAULT_WIX_SYNC_LIMIT = Number.parseInt(
   process.env.WIX_DISCOVER_BOOKING_LIMIT || '100',
@@ -11,6 +14,42 @@ const DEFAULT_WIX_SYNC_LIMIT = Number.parseInt(
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch wix_booking_ids that have been locally modified (edited/deleted by admin).
+ * These rows must be excluded from Wix sync upserts so local edits are never overwritten.
+ */
+async function getLocallyModifiedWixIds() {
+  try {
+    // Check wix_bookings table
+    const { data: wixData, error: wixError } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('wix_booking_id')
+      .eq('locally_modified', true);
+    
+    // Check sessions table
+    const { data: sessionData, error: sessionError } = await supabaseAdmin
+      .from('sessions')
+      .select('wix_booking_id')
+      .eq('locally_modified', true)
+      .not('wix_booking_id', 'is', null);
+
+    const ids = new Set();
+    
+    if (!wixError && wixData) {
+      wixData.forEach(r => { if (r.wix_booking_id) ids.add(r.wix_booking_id); });
+    }
+    
+    if (!sessionError && sessionData) {
+      sessionData.forEach(r => { if (r.wix_booking_id) ids.add(r.wix_booking_id); });
+    }
+
+    return ids;
+  } catch (err) {
+    console.warn('[getLocallyModifiedWixIds] error:', err.message || err);
+    return new Set();
+  }
 }
 
 /**
@@ -36,6 +75,15 @@ async function upsertEnrichedBookings(rawBookings) {
 
   rows = await applyMaxPriceGuard(rows);
 
+  // Sync protection: skip locally-modified bookings so admin edits are never overwritten
+  const locallyModifiedIds = await getLocallyModifiedWixIds();
+  if (locallyModifiedIds.size) {
+    rows = rows.filter((r) => !locallyModifiedIds.has(r.wix_booking_id));
+  }
+  if (!rows.length) {
+    return { upserted: 0, sessionsUpserted: 0, sessionMirrorSkipped: false };
+  }
+
   const { data, error } = await supabaseAdmin
     .from('wix_bookings')
     .upsert(rows, { onConflict: 'wix_booking_id' })
@@ -50,27 +98,36 @@ async function upsertEnrichedBookings(rawBookings) {
   let sessionsUpserted = 0;
   let sessionMirrorSkipped = false;
   if (sessionRows.length) {
-    const { data: sessionData, error: sessionError } = await supabaseAdmin
-      .from('sessions')
-      .upsert(sessionRows, { onConflict: 'wix_booking_id' })
-      .select('id,wix_booking_id');
-    if (sessionError) {
-      const msg = String(sessionError.message || '');
-      const recoverable =
-        msg.includes("Could not find the 'source' column") ||
-        msg.includes("Could not find the 'wix_booking_id' column") ||
-        msg.includes("Could not find the 'wix_payload' column") ||
-        msg.includes('no unique or exclusion constraint matching the ON CONFLICT specification');
-      if (recoverable) {
-        sessionMirrorSkipped = true;
-        console.warn('[upsertEnrichedBookings] sessions mirror skipped (run bridge migration)');
+    // Sync protection for sessions table
+    let filteredSessionRows = sessionRows;
+    if (locallyModifiedIds.size) {
+      filteredSessionRows = sessionRows.filter(r => !locallyModifiedIds.has(r.wix_booking_id));
+    }
+
+    if (filteredSessionRows.length > 0) {
+      const { data: sessionData, error: sessionError } = await supabaseAdmin
+        .from('sessions')
+        .upsert(filteredSessionRows, { onConflict: 'wix_booking_id' })
+        .select('id,wix_booking_id');
+      if (sessionError) {
+        require('fs').appendFileSync('scratch/log.txt', `[${new Date().toISOString()}] Sessions upsert FAILED: ${sessionError.message}\n`);
+        const msg = String(sessionError.message || '');
+        const recoverable =
+          msg.includes("Could not find the 'source' column") ||
+          msg.includes("Could not find the 'wix_booking_id' column") ||
+          msg.includes("Could not find the 'wix_payload' column") ||
+          msg.includes('no unique or exclusion constraint matching the ON CONFLICT specification');
+        if (recoverable) {
+          sessionMirrorSkipped = true;
+          console.warn('[upsertEnrichedBookings] sessions mirror skipped (run bridge migration)');
+        } else {
+          const err = new Error(sessionError.message || 'Sessions upsert failed');
+          err.code = sessionError.code;
+          throw err;
+        }
       } else {
-        const err = new Error(sessionError.message || 'Sessions upsert failed');
-        err.code = sessionError.code;
-        throw err;
+        sessionsUpserted = sessionData?.length ?? filteredSessionRows.length;
       }
-    } else {
-      sessionsUpserted = sessionData?.length ?? sessionRows.length;
     }
   }
 
@@ -90,6 +147,30 @@ async function upsertEnrichedBookings(rawBookings) {
     console.warn('[upsertEnrichedBookings] psychologist resolve non-blocking error:', err.message || err);
   }
 
+  const wixBookingIds = deduped.map((b) => b.id != null ? String(b.id) : null).filter(Boolean);
+
+  // Enrich bookings with exact session type/count from Wix eCommerce Order API
+  // (same data Zapier receives — e.g. "Individual 4-Session Pack")
+  if (wixBookingIds.length) {
+    enrichBookingsFromOrders(wixBookingIds).catch((err) => {
+      console.warn('[upsertEnrichedBookings] order enrichment non-blocking error:', err.message || err);
+    });
+  }
+
+  // Link zero-price promo sessions to their parent paid package session
+  if (wixBookingIds.length) {
+    linkPackageSessions(wixBookingIds).catch((err) => {
+      console.warn('[upsertEnrichedBookings] package linker non-blocking error:', err.message || err);
+    });
+  }
+
+  // Fire-and-forget: create Google Meet links + send WhatsApp for new Wix sessions
+  if (wixBookingIds.length) {
+    processNewWixSessions(wixBookingIds).catch((err) => {
+      console.warn('[upsertEnrichedBookings] meet+notify non-blocking error:', err.message || err);
+    });
+  }
+
   return {
     upserted: data?.length ?? rows.length,
     sessionsUpserted,
@@ -99,6 +180,64 @@ async function upsertEnrichedBookings(rawBookings) {
   };
 }
 
+/**
+ * Post-upsert enrichment: call Wix eCommerce Orders API to get the exact
+ * session type and count from order description lines (e.g. "Individual 4-Session Pack").
+ * Updates both wix_bookings and sessions tables with the correct values.
+ */
+async function enrichBookingsFromOrders(wixBookingIds) {
+  if (!wixBookingIds.length) return;
+
+  const infoMap = await fetchSessionInfoBatch(wixBookingIds);
+  if (!infoMap.size) return;
+
+  let updated = 0;
+  for (const [bookingId, info] of infoMap) {
+    try {
+      // Update wix_bookings with session type, count, and order ID
+      const wbUpdate = {
+        session_type: info.sessionType,
+        session_count: info.sessionCount,
+      };
+      if (info.orderId) wbUpdate.wix_order_id = info.orderId;
+      if (info.orderNumber) wbUpdate.wix_order_number = info.orderNumber;
+
+      const { error: wbErr } = await supabaseAdmin
+        .from('wix_bookings')
+        .update(wbUpdate)
+        .eq('wix_booking_id', bookingId);
+
+      if (wbErr) {
+        console.warn(`[enrichBookingsFromOrders] wix_bookings update failed for ${bookingId}:`, wbErr.message);
+        continue;
+      }
+
+      // Update sessions table too
+      const { error: sessErr } = await supabaseAdmin
+        .from('sessions')
+        .update({
+          session_type: info.sessionType,
+          session_count: info.sessionCount,
+        })
+        .eq('wix_booking_id', bookingId);
+
+      if (sessErr && !sessErr.message?.includes('0 rows')) {
+        console.warn(`[enrichBookingsFromOrders] sessions update failed for ${bookingId}:`, sessErr.message);
+      }
+
+      updated++;
+      console.log(
+        `[enrichBookingsFromOrders] ${bookingId} → ${info.sessionType} (${info.sessionCount} sessions) from "${info.descriptionLine}"`
+      );
+    } catch (err) {
+      console.warn(`[enrichBookingsFromOrders] error for ${bookingId}:`, err.message || err);
+    }
+  }
+
+  if (updated) {
+    console.log(`[enrichBookingsFromOrders] enriched ${updated}/${wixBookingIds.length} bookings from eCommerce API`);
+  }
+}
 function bookingDedupKey(b) {
   const schedule = b?.scheduleId || '';
   const session = b?.sessionId || '';
@@ -232,6 +371,24 @@ async function performWixSync() {
   // Never overwrite a previously-correct higher price with Wix's inconsistent lower value
   rows = await applyMaxPriceGuard(rows);
 
+  // Sync protection: skip locally-modified bookings
+  const locallyModifiedIds = await getLocallyModifiedWixIds();
+  if (locallyModifiedIds.size) {
+    const before = rows.length;
+    rows = rows.filter((r) => !locallyModifiedIds.has(r.wix_booking_id));
+    if (rows.length < before) {
+      console.log(`[performWixSync] skipped ${before - rows.length} locally-modified booking(s)`);
+    }
+  }
+  if (!rows.length) {
+    return {
+      upserted: 0,
+      sessionsUpserted: 0,
+      extractionTried,
+      fetchedAt: r.json?.fetchedAt || new Date().toISOString(),
+    };
+  }
+
   const { data, error } = await supabaseAdmin
     .from('wix_bookings')
     .upsert(rows, { onConflict: 'wix_booking_id' })
@@ -264,10 +421,22 @@ async function performWixSync() {
     );
   }
 
-  const { data: sessionData, error: sessionError } = await supabaseAdmin
-    .from('sessions')
-    .upsert(sessionRows, { onConflict: 'wix_booking_id' })
-    .select('id,wix_booking_id,status');
+  let filteredSessionRows = sessionRows;
+  if (locallyModifiedIds.size) {
+    filteredSessionRows = sessionRows.filter(r => !locallyModifiedIds.has(r.wix_booking_id));
+  }
+
+  let sessionData = null;
+  let sessionError = null;
+
+  if (filteredSessionRows.length > 0) {
+    const { data, error } = await supabaseAdmin
+      .from('sessions')
+      .upsert(filteredSessionRows, { onConflict: 'wix_booking_id' })
+      .select('id,wix_booking_id,status');
+    sessionData = data;
+    sessionError = error;
+  }
 
   if (sessionError) {
     const msg = String(sessionError.message || '');
@@ -303,6 +472,14 @@ async function performWixSync() {
     await resolveClientsForBookings(dedupedBookings);
   } catch (err) {
     console.warn('[performWixSync] client resolve non-blocking error:', err.message || err);
+  }
+
+  // Fire-and-forget: create Google Meet links + send WhatsApp for new Wix sessions
+  const wixBookingIds = dedupedBookings.map((b) => b.id != null ? String(b.id) : null).filter(Boolean);
+  if (wixBookingIds.length) {
+    processNewWixSessions(wixBookingIds).catch((err) => {
+      console.warn('[performWixSync] meet+notify non-blocking error:', err.message || err);
+    });
   }
 
   return {
@@ -370,11 +547,15 @@ async function listWixBookings(req, res) {
   try {
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || '10'), 10) || 10));
-    const { dateFrom, dateTo, search } = req.query;
+    const { dateFrom, dateTo, search, session_type } = req.query;
     const fromIdx = (page - 1) * limit;
     const toIdx = fromIdx + limit - 1;
 
     let q = supabaseAdmin.from('wix_bookings').select('*', { count: 'exact' });
+
+    if (session_type && session_type !== 'all') {
+      q = q.eq('session_type', session_type);
+    }
 
     if (dateFrom) {
       q = q.gte('start_time', `${dateFrom}T00:00:00+05:30`);
@@ -639,7 +820,25 @@ async function realtimeSyncFromWix(req, res) {
     const body = req.body || {};
     const eventType = body.eventType || 'unknown';
     const enriched = body.booking || null;
+    const rawEventPayload = body.eventPayload || null;
     const enrichedList = Array.isArray(body.bookings) ? body.bookings : enriched ? [enriched] : [];
+
+    // Merge variant/package data from the raw Wix event (same data Zapier receives)
+    // into the enriched booking so the mapper can detect package types.
+    if (rawEventPayload && enrichedList.length) {
+      const rawVariants =
+        rawEventPayload.selectedVariants ||
+        rawEventPayload.bookedEntity?.selectedVariants ||
+        rawEventPayload.formInfo?.variantSelections ||
+        rawEventPayload.variantSelections ||
+        null;
+      if (rawVariants) {
+        for (const eb of enrichedList) {
+          if (!eb.variantSelections) eb.variantSelections = rawVariants;
+        }
+        console.log(`[realtimeSyncFromWix] merged variant data from raw event:`, JSON.stringify(rawVariants).slice(0, 200));
+      }
+    }
 
     let directUpsert = { upserted: 0, sessionsUpserted: 0 };
     if (enrichedList.length) {
@@ -688,6 +887,192 @@ async function realtimeSyncFromWix(req, res) {
   }
 }
 
+/**
+ * GET /admin/wix/bookings/:id
+ * Return a single wix_bookings row by Supabase id (not wix_booking_id).
+ */
+async function getWixBookingDetails(req, res) {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ success: false, error: 'Wix booking not found' });
+    }
+    return res.json({ success: true, data: { booking: data } });
+  } catch (e) {
+    console.error('[getWixBookingDetails]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
+/**
+ * PATCH /admin/wix/bookings/:id
+ * Edit a wix_bookings row. Sets locally_modified = true so Wix sync won't overwrite.
+ */
+async function editWixBooking(req, res) {
+  try {
+    const { id } = req.params;
+    const updates = req.body || {};
+
+    // Sanitise: only allow editing known columns
+    const allowed = ['status', 'title', 'start_time', 'end_time', 'notes', 'price', 'currency', 'therapist_name'];
+    const safeUpdates = {};
+    for (const key of allowed) {
+      if (updates[key] !== undefined) safeUpdates[key] = updates[key];
+    }
+    safeUpdates.locally_modified = true;
+    safeUpdates.synced_at = new Date().toISOString();
+
+    const { data, error } = await supabaseAdmin
+      .from('wix_bookings')
+      .update(safeUpdates)
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    // Mirror to sessions if exists
+    if (data.wix_booking_id) {
+      const sessionUpdates = { locally_modified: true };
+      if (safeUpdates.status) sessionUpdates.status = safeUpdates.status;
+      if (safeUpdates.title) sessionUpdates.notes = safeUpdates.title;
+      if (safeUpdates.session_type) sessionUpdates.session_type = safeUpdates.session_type;
+      if (safeUpdates.price) {
+        sessionUpdates.price = safeUpdates.price;
+        sessionUpdates.amount = safeUpdates.price;
+      }
+      if (safeUpdates.start_time) {
+        sessionUpdates.scheduled_date = safeUpdates.start_time.split('T')[0];
+        sessionUpdates.scheduled_time = safeUpdates.start_time.split('T')[1]?.split('.')[0];
+      }
+      await supabaseAdmin.from('sessions').update(sessionUpdates).eq('wix_booking_id', data.wix_booking_id);
+    }
+
+    return res.json({ success: true, message: 'Wix booking updated', data: { booking: data } });
+  } catch (e) {
+    console.error('[editWixBooking]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
+/**
+ * DELETE /admin/wix/bookings/:id
+ * Soft-delete: sets status='deleted' + locally_modified=true so sync won't re-create.
+ */
+async function deleteWixBooking(req, res) {
+  try {
+    const { id } = req.params;
+    const updates = { status: 'deleted', locally_modified: true, synced_at: new Date().toISOString() };
+
+    let { data, error } = await supabaseAdmin
+      .from('wix_bookings')
+      .update(updates)
+      .eq('id', id)
+      .select('id, wix_booking_id')
+      .single();
+
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ success: false, error: 'Wix booking not found' });
+    }
+
+    // Mirror to sessions
+    if (data.wix_booking_id) {
+      await supabaseAdmin
+        .from('sessions')
+        .update({ status: 'cancelled', locally_modified: true })
+        .eq('wix_booking_id', data.wix_booking_id);
+    }
+
+    return res.json({ success: true, message: 'Wix booking deleted', data: { booking: data } });
+  } catch (e) {
+    console.error('[deleteWixBooking]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
+/**
+ * PATCH /admin/wix/bookings/:id/complete
+ * Mark a Wix booking as completed + locally_modified=true.
+ */
+async function completeWixBooking(req, res) {
+  try {
+    const { id } = req.params;
+    const updates = { status: 'completed', locally_modified: true, synced_at: new Date().toISOString() };
+
+    let { data, error } = await supabaseAdmin
+      .from('wix_bookings')
+      .update(updates)
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ success: false, error: 'Wix booking not found' });
+    }
+
+    // Mirror to sessions
+    if (data.wix_booking_id) {
+      await supabaseAdmin
+        .from('sessions')
+        .update({ status: 'completed', locally_modified: true })
+        .eq('wix_booking_id', data.wix_booking_id);
+    }
+
+    return res.json({ success: true, message: 'Wix booking marked as completed', data: { booking: data } });
+  } catch (e) {
+    console.error('[completeWixBooking]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
+/**
+ * PATCH /admin/wix/bookings/:id/no-show
+ * Mark a Wix booking as no-show + locally_modified=true.
+ */
+async function noShowWixBooking(req, res) {
+  try {
+    const { id } = req.params;
+    const updates = { status: 'no_show', locally_modified: true, synced_at: new Date().toISOString() };
+
+    let { data, error } = await supabaseAdmin
+      .from('wix_bookings')
+      .update(updates)
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (!data) return res.status(404).json({ success: false, error: 'Wix booking not found' });
+
+    // Mirror to sessions
+    if (data.wix_booking_id) {
+      await supabaseAdmin
+        .from('sessions')
+        .update({ status: 'no_show', locally_modified: true })
+        .eq('wix_booking_id', data.wix_booking_id);
+    }
+
+    return res.json({ success: true, message: 'Wix booking marked as no-show', data: { booking: data } });
+  } catch (e) {
+    console.error('[noShowWixBooking]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
 module.exports = {
   performWixSync,
   upsertEnrichedBookings,
@@ -696,4 +1081,9 @@ module.exports = {
   listWixTherapists,
   backfillWixClients,
   realtimeSyncFromWix,
+  getWixBookingDetails,
+  editWixBooking,
+  deleteWixBooking,
+  completeWixBooking,
+  noShowWixBooking,
 };

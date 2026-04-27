@@ -1188,9 +1188,9 @@ const bookFreeAssessment = async (req, res) => {
             totalAttendees: meetSessionData.attendees.length
           });
 
-          // Use Little Care Google account's OAuth credentials for real Meet link creation
-          // The FREE_ASSESSMENT_PSYCHOLOGIST_EMAIL should be set to your Little Care Google account
-          // This ensures calendar invites and Meet links come from Little Care, not assessment.koott@gmail.com
+          // Use Koott Google account's OAuth credentials for real Meet link creation
+          // The FREE_ASSESSMENT_PSYCHOLOGIST_EMAIL should be set to your Koott Google account
+          // This ensures calendar invites and Meet links come from Koott, not assessment.koott@gmail.com
           let userAuth = null;
           if (defaultPsychologistWithCredentials?.google_calendar_credentials) {
             const credentials = defaultPsychologistWithCredentials.google_calendar_credentials;
@@ -1206,7 +1206,7 @@ const bookFreeAssessment = async (req, res) => {
                   refresh_token: credentials.refresh_token,
                   expiry_date: credentials.expiry_date
                 };
-                console.log('✅ Using Little Care Google Calendar OAuth credentials for Meet link creation');
+                console.log('✅ Using Koott Google Calendar OAuth credentials for Meet link creation');
                 console.log('   📧 Meet link will be created from:', psychologistEmail);
               } else if (credentials.refresh_token) {
                 // Token expired but we have refresh token
@@ -1215,18 +1215,18 @@ const bookFreeAssessment = async (req, res) => {
                   refresh_token: credentials.refresh_token,
                   expiry_date: credentials.expiry_date
                 };
-                console.log('⚠️ Little Care OAuth token expired, but refresh token available - service will attempt refresh');
+                console.log('⚠️ Koott OAuth token expired, but refresh token available - service will attempt refresh');
               } else {
-                console.log('⚠️ Little Care OAuth credentials expired and no refresh token - will use fallback method');
+                console.log('⚠️ Koott OAuth credentials expired and no refresh token - will use fallback method');
               }
             }
           } else {
-            console.log('⚠️ Little Care Google account does not have Google Calendar connected');
+            console.log('⚠️ Koott Google account does not have Google Calendar connected');
             console.log('   💡 Please connect Google Calendar for the free assessment psychologist account');
-            console.log('   💡 Set FREE_ASSESSMENT_PSYCHOLOGIST_EMAIL to your Little Care Google account email');
+            console.log('   💡 Set FREE_ASSESSMENT_PSYCHOLOGIST_EMAIL to your Koott Google account email');
           }
 
-          // Create meet link using Little Care Google account OAuth (creates real Meet links)
+          // Create meet link using Koott Google account OAuth (creates real Meet links)
           const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
           let finalMeetLink = null;
           
@@ -1334,7 +1334,7 @@ const bookFreeAssessment = async (req, res) => {
               `⏰ Time: ${scheduledTime} (IST)\n\n` +
               `🔗 Google Meet: ${finalMeetLink}\n\n` +
               `🆔 Assessment ID: ${assessment.id}\n\n` +
-              `📞 For support or scheduling issues, contact Little Care support:\n` +
+              `📞 For support or scheduling issues, contact Koott support:\n` +
               `WhatsApp / Call: +91 95390 07766`;
 
             try {

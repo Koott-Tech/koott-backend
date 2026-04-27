@@ -477,7 +477,7 @@ const getSessions = async (req, res) => {
             first_name,
             last_name,
             area_of_expertise,
-            cover_image_url
+            profile_picture_url
           )
         `)
         .eq('client_id', clientId);
@@ -642,7 +642,7 @@ const getSessions = async (req, res) => {
               first_name,
               last_name,
               area_of_expertise,
-              cover_image_url
+              profile_picture_url
             )
           `)
           .eq('client_id', clientId);
@@ -1361,7 +1361,7 @@ const bookSession = async (req, res) => {
           
           const psychologistMessage =
             `Hey 👋\n\n` +
-            `New session booked with Little Care.\n\n` +
+            `New session booked with Koott.\n\n` +
             `${bullet}Client: ${clientName}\n` +
             `${bullet}Date: ${formattedDate}\n` +
             `${bullet}Time: ${formattedTime} (IST)\n` +
@@ -1369,7 +1369,7 @@ const bookSession = async (req, res) => {
             `Join link:\n${meetData.meetLink}\n\n` +
             `Please be ready 5 mins early.\n\n` +
             `For help: ${supportPhone}\n\n` +
-            `— Little Care 💜`;
+            `— Koott 💜`;
           
           const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
           if (psychologistWaResult?.success) {
@@ -1732,10 +1732,10 @@ const cancelSession = async (req, res) => {
         const bullet = '•⁠  ⁠';
         const psychologistMessage =
           `Hey 👋\n\n` +
-          `Session cancelled with Little Care.\n\n` +
+          `Session cancelled with Koott.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Date: ${sessionDateTime}\n\n` +
-          `— Little Care 💜`;
+          `— Koott 💜`;
 
         const psychologistResult = await sendWhatsAppTextWithRetry(psychologistDetails.phone, psychologistMessage);
         if (psychologistResult?.success) {
@@ -2137,10 +2137,10 @@ const rescheduleSession = async (req, res) => {
           }
         }
 
-        // Send email to admin and meet.littlecare@gmail.com (same template and style as other admin emails)
+        // Send email to admin and meet.koott@gmail.com (same template and style as other admin emails)
         const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
-        const meetLittleCareEmail = 'meet.littlecare@gmail.com';
-        const adminRecipients = [adminEmail, meetLittleCareEmail].filter(Boolean).join(', ');
+        const meetKoottEmail = 'meet.koott@gmail.com';
+        const adminRecipients = [adminEmail, meetKoottEmail].filter(Boolean).join(', ');
         if (adminRecipients) {
           try {
             const emailService = require('../utils/emailService');
@@ -2157,7 +2157,7 @@ const rescheduleSession = async (req, res) => {
               psychologistId: session.psychologist_id,
               reasonText: req.body.reason || null
             });
-            console.log('📧 Reschedule request email sent to admin and meet.littlecare@gmail.com');
+            console.log('📧 Reschedule request email sent to admin and meet.koott@gmail.com');
           } catch (emailError) {
             console.error('Error sending reschedule request email:', emailError);
             console.warn('⚠️ Reschedule request created but email notification failed');
@@ -2868,7 +2868,7 @@ const rescheduleSession = async (req, res) => {
           : '';
         const psychologistMessage =
           `Hey 👋\n\n` +
-          `${isFreeAssessment ? 'Free assessment' : 'Session'} rescheduled with Little Care.\n\n` +
+          `${isFreeAssessment ? 'Free assessment' : 'Session'} rescheduled with Koott.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Old: ${oldDateTime}\n` +
           `${bullet}New: ${newDateTime}\n` +
@@ -2877,7 +2877,7 @@ const rescheduleSession = async (req, res) => {
           meetLinkLine +
           `Please be ready 5 mins early.\n\n` +
           `For help: +91 95390 07766\n\n` +
-          `— Little Care 💜`;
+          `— Koott 💜`;
 
         const psychologistResult = await sendWhatsAppTextWithRetry(psychologistDetails.phone, psychologistMessage);
         if (psychologistResult?.success) {
@@ -4132,7 +4132,7 @@ const bookRemainingSession = async (req, res) => {
             
             const psychologistMessage =
               `Hey 👋\n\n` +
-              `New session booked with Little Care.\n\n` +
+              `New session booked with Koott.\n\n` +
               `${bullet}Client: ${clientName}\n` +
               packageLine +
               `${bullet}Date: ${formattedDate}\n` +
@@ -4141,7 +4141,7 @@ const bookRemainingSession = async (req, res) => {
               `Join link:\n${emailMeetLink}\n\n` +
               `Please be ready 5 mins early.\n\n` +
               `For help: ${supportPhone}\n\n` +
-              `— Little Care 💜`;
+              `— Koott 💜`;
             
             const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
             if (psychologistWaResult?.success) {
@@ -4925,7 +4925,7 @@ const bookSessionWithCredit = async (req, res) => {
           const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
           const psychologistMessage =
             `Hey 👋\n\n` +
-            `New session booked with Little Care.\n\n` +
+            `New session booked with Koott.\n\n` +
             `${bullet}Client: ${clientName}\n` +
             `${bullet}Date: ${formattedDateShort}\n` +
             `${bullet}Time: ${formattedTimeFriendly} (IST)\n` +
@@ -4933,7 +4933,7 @@ const bookSessionWithCredit = async (req, res) => {
             `Join link:\n${meetData.meetLink}\n\n` +
             `Please be ready 5 mins early.\n\n` +
             `For help: ${supportPhone}\n\n` +
-            `— Little Care 💜`;
+            `— Koott 💜`;
           await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
           console.log('✅ WhatsApp notification sent to psychologist (credit booking)');
         }

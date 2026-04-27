@@ -104,6 +104,7 @@ const createManualBooking = async (req, res) => {
       scheduled_date, 
       scheduled_time, 
       amount,
+      therapist_commission,
       payment_received_date,
       payment_method,
       notes 
@@ -421,6 +422,7 @@ const createManualBooking = async (req, res) => {
       status: 'booked',
       payment_id: payment.id,
       price: amount,
+      therapist_commission: therapist_commission ? parseFloat(therapist_commission) : 0,
       session_notes: notes || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -708,7 +710,7 @@ const createManualBooking = async (req, res) => {
         
           const message =
           `Hey 👋\n\n` +
-          `New session booked with Little Care.\n\n` +
+          `New session booked with Koott.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           sessionTypeLine +
           `${bullet}Date: ${formattedDate}\n` +
@@ -716,7 +718,7 @@ const createManualBooking = async (req, res) => {
           meetLinkLine +
           `Please be ready 5 mins early.\n\n` +
           `For help: ${supportPhone}\n\n` +
-          `— Little Care 💜`;
+          `— Koott 💜`;
         
           await sendWhatsAppTextWithRetry(psychologist.phone, message);
           console.log('✅ [MANUAL BOOKING] WhatsApp sent to psychologist');
@@ -825,6 +827,7 @@ const createRecordOnlyBooking = async (req, res) => {
       scheduled_date,
       scheduled_time,
       amount,
+      therapist_commission,
       payment_received_date,
       payment_method,
       notes,
@@ -959,7 +962,7 @@ const createRecordOnlyBooking = async (req, res) => {
     paymentRecord = payment;
 
     // Session data: no Meet creation; use meet_link from body if provided
-    const allowedStatuses = ['booked', 'completed', 'cancelled', 'no_show', 'rescheduled'];
+    const allowedStatuses = ['booked', 'completed', 'cancelled', 'no_show', 'rescheduled', 'refund_request'];
     const sessionStatus = (bodyStatus && allowedStatuses.includes(String(bodyStatus).toLowerCase()))
       ? String(bodyStatus).toLowerCase()
       : 'booked';
@@ -973,6 +976,7 @@ const createRecordOnlyBooking = async (req, res) => {
       status: sessionStatus,
       payment_id: payment.id,
       price: amount,
+      therapist_commission: therapist_commission ? parseFloat(therapist_commission) : 0,
       session_notes: notes || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -2953,6 +2957,7 @@ const updateSession = async (req, res) => {
       original_scheduled_date,
       status,
       price,
+      therapist_commission,
       payment_method,
       transaction_id,
       razorpay_order_id,
@@ -3229,13 +3234,22 @@ const updateSession = async (req, res) => {
     }
     if (status) updateData.status = status;
     if (price !== undefined) {
-      const parsed = price ? parseFloat(price) : null;
+      const parsed = price === null ? null : parseFloat(price);
       if (parsed !== null && !Number.isFinite(parsed)) {
         return res.status(400).json(
           errorResponse('Invalid price: must be a valid number')
         );
       }
       updateData.price = parsed;
+    }
+    if (therapist_commission !== undefined) {
+      const parsedComm = therapist_commission === null ? null : parseFloat(therapist_commission);
+      if (parsedComm !== null && !Number.isFinite(parsedComm)) {
+        return res.status(400).json(
+          errorResponse('Invalid commission: must be a valid number')
+        );
+      }
+      updateData.therapist_commission = parsedComm;
     }
 
     // Update session
@@ -3420,7 +3434,7 @@ const updateSession = async (req, res) => {
             }
             const psychologistMessage =
               `Hey 👋\n\n` +
-              `New session booked with Little Care.\n\n` +
+              `New session booked with Koott.\n\n` +
               `${bullet}Client: ${clientName}\n` +
               packageLine +
               `${bullet}Date: ${formattedDate}\n` +
@@ -3429,7 +3443,7 @@ const updateSession = async (req, res) => {
               `Join link:\n${meetLink}\n\n` +
               `Please be ready 5 mins early.\n\n` +
               `For help: +91 95390 07766\n\n` +
-              `— Little Care 💜`;
+              `— Koott 💜`;
             await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
             console.log('✅ [Admin] WhatsApp notification sent to new psychologist');
           }
@@ -3538,7 +3552,7 @@ const updateSession = async (req, res) => {
                 : '';
             const psychologistMessage =
               `Hey 👋\n\n` +
-              `A session has been rescheduled with Little Care.\n\n` +
+              `A session has been rescheduled with Koott.\n\n` +
               `${bullet}Client: ${clientName}\n` +
               `${bullet}Old: ${formatBookingDateShort(oldDate)} at ${formatFriendlyTime(oldTime)} (IST)\n` +
               `${bullet}New: ${formatBookingDateShort(newDate)} at ${formatFriendlyTime(newTime)} (IST)\n` +
@@ -3546,7 +3560,7 @@ const updateSession = async (req, res) => {
               `\n` +
               `${meetLink ? `Join link:\n${meetLink}\n\n` : ''}` +
               `Please be ready 5 mins early.\n\n` +
-              `— Little Care 💜`;
+              `— Koott 💜`;
 
             const psychWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
             if (psychWaResult?.success) {
@@ -3765,7 +3779,7 @@ const getPsychologistCalendarEvents = async (req, res) => {
       );
     }
 
-    // Get internal sessions (Little Care sessions)
+    // Get internal sessions (Koott sessions)
     const { data: internalSessions, error: sessionsError } = await supabaseAdmin
       .from('sessions')
       .select(`
@@ -3817,9 +3831,9 @@ const getPsychologistCalendarEvents = async (req, res) => {
             event.creator?.email === 'no-reply@littleminds' ||
             event.creator?.email === 'assessment.koott@gmail.com' ||
             event.extendedProperties?.private?.littleMindsEvent === 'true' ||
-            event.extendedProperties?.private?.littleCareEvent === 'true' ||
+            event.extendedProperties?.private?.koottEvent === 'true' ||
             event.source?.title === 'LittleMinds' ||
-            event.source?.title === 'Little Care';
+            event.source?.title === 'Koott';
           
           // Only exclude if positively identified as platform-created
           // Keep events when metadata is absent (fail-safe: don't exclude by summary text alone)
@@ -3864,7 +3878,7 @@ const getPsychologistCalendarEvents = async (req, res) => {
       },
       status: session.status,
       session_type: session.session_type,
-      source: 'little_care'
+      source: 'koott'
     })) || [];
 
     // Combine and sort all events
@@ -4250,7 +4264,7 @@ const bookPackageNextSession = async (req, res) => {
             const linkLine = effectiveMeetLink
               ? `\n\nJoin link:\n${effectiveMeetLink}\n\n`
               : '\n\nDue to some issue Google Meet didn\'t get created. Please contact our support.\n\n';
-            const msg = `Hey 👋\n\nNew session booked with Little Care.\n\n${bullet}Client: ${clientName}\n${bullet}Package: ${completedCount}/${totalSessions} sessions completed, ${updatedRemaining} remaining\n${bullet}Date: ${formatBookingDateShort(scheduled_date)}\n${bullet}Time: ${formatFriendlyTime(scheduled_time)} (IST)\n${bullet}Duration: ${nextPkgMeetMinutes} min${linkLine}Please be ready 5 mins early.\n\n— Little Care 💜`;
+            const msg = `Hey 👋\n\nNew session booked with Koott.\n\n${bullet}Client: ${clientName}\n${bullet}Package: ${completedCount}/${totalSessions} sessions completed, ${updatedRemaining} remaining\n${bullet}Date: ${formatBookingDateShort(scheduled_date)}\n${bullet}Time: ${formatFriendlyTime(scheduled_time)} (IST)\n${bullet}Duration: ${nextPkgMeetMinutes} min${linkLine}Please be ready 5 mins early.\n\n— Koott 💜`;
             await sendWhatsAppTextWithRetry(psychologistDetails.phone, msg);
           }
         } catch (waErr) {

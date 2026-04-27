@@ -6,6 +6,7 @@
 
 const { supabaseAdmin } = require('../config/supabase');
 const { hashPassword } = require('../utils/helpers');
+const emailService = require('../utils/emailService');
 
 function isMissingColumnError(err, columnName) {
   const msg = String(err?.message || '');
@@ -17,7 +18,7 @@ function isMissingColumnError(err, columnName) {
  * Returns clients.id or null (if no email available).
  */
 async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
-  if (!email || !email.trim()) return null;
+  if (!email || !email.trim()) return { clientId: null, isNew: false };
 
   const normalizedEmail = email.trim().toLowerCase();
 
@@ -26,14 +27,18 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
     .from('users')
     .select('id')
     .ilike('email', normalizedEmail)
-    .maybeSingle();
+    .limit(1);
 
   let userId;
-  if (existingUser) {
-    userId = existingUser.id;
+  let isNewUser = false;
+  if (existingUser?.[0]) {
+    userId = existingUser[0].id;
   } else {
-    // 2. Create a new user with a temp password (Wix-sourced client)
-    const tempPassword = `WixClient@${Math.random().toString(36).slice(-10)}`;
+    // 2. Create a new user with a deterministic temp password (Wix-sourced client)
+    //    Pattern: Welcome@<first 4 chars of email local part> — easy to communicate via WhatsApp
+    const localPart = normalizedEmail.split('@')[0] || 'user';
+    const suffix = localPart.slice(0, 4).toLowerCase();
+    const tempPassword = `Welcome@${suffix}`;
     const passwordHash = await hashPassword(tempPassword);
 
     const { data: newUser, error: createUserError } = await supabaseAdmin
@@ -49,20 +54,33 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
 
     if (createUserError) {
       console.error('[wixClientResolver] user insert failed:', createUserError.message || createUserError);
-      return null;
+      return { clientId: null, isNew: false };
     }
     userId = newUser.id;
+    isNewUser = true;
     console.log(`[wixClientResolver] created user ${normalizedEmail} (${userId})`);
+
+    // Send welcome email with login credentials (fire-and-forget)
+    const clientName = [firstName, lastName].filter(Boolean).join(' ') || normalizedEmail;
+    emailService.sendWelcomeEmail({
+      to: normalizedEmail,
+      clientName,
+      tempPassword,
+      loginUrl: 'https://www.little.care',
+    }).catch((err) => {
+      console.error(`[wixClientResolver] welcome email failed for ${normalizedEmail}:`, err?.message || err);
+    });
   }
 
   // 3. Find or create the clients row linked to this user
-  const { data: existingClient } = await supabaseAdmin
+  // Use .limit(1) instead of .maybeSingle() — maybeSingle errors when multiple rows exist
+  const { data: existingClients, error: lookupError } = await supabaseAdmin
     .from('clients')
     .select('id')
     .eq('user_id', userId)
-    .maybeSingle();
+    .limit(1);
 
-  if (existingClient) return existingClient.id;
+  if (existingClients?.length) return { clientId: existingClients[0].id, isNew: isNewUser };
 
   const baseInsert = {
     user_id: userId,
@@ -94,13 +112,23 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
       .single());
   }
 
+  // Race condition: another sync cycle may have inserted the same user_id concurrently
   if (createClientError) {
+    // Check if a row was created by another process
+    const { data: raceClient } = await supabaseAdmin
+      .from('clients')
+      .select('id')
+      .eq('user_id', userId)
+      .limit(1);
+    if (raceClient?.length) {
+      return { clientId: raceClient[0].id, isNew: isNewUser };
+    }
     console.error('[wixClientResolver] client insert failed:', createClientError.message || createClientError);
-    return null;
+    return { clientId: null, isNew: false };
   }
 
   console.log(`[wixClientResolver] created client for user ${userId} → client ${newClient.id}`);
-  return newClient.id;
+  return { clientId: newClient.id, isNew: true };
 }
 
 /**
@@ -113,8 +141,9 @@ async function resolveClientsForBookings(bookings) {
   if (!bookings?.length) return new Map();
 
   // De-duplicate by email so we only hit DB once per unique client
-  const emailToClientId = new Map();
   const wixIdToClientId = new Map();
+  const newClientWixIds = new Set();
+  const resolveCache = new Map(); // email -> Promise
 
   await Promise.all(
     bookings.map(async (b) => {
@@ -123,29 +152,29 @@ async function resolveClientsForBookings(bookings) {
       if (!email || !wixId) return;
 
       const normalizedEmail = email.trim().toLowerCase();
+      
       // Guard: only resolve each email once even in parallel
-      if (!emailToClientId.has(normalizedEmail)) {
-        // Seed with a Promise so concurrent bookings with same email wait for one resolve
-        const promise = resolveOrCreateWixClient({
+      if (!resolveCache.has(normalizedEmail)) {
+        // Seed with a Promise IMMEDIATELY so concurrent bookings with same email wait for one resolve
+        resolveCache.set(normalizedEmail, resolveOrCreateWixClient({
           email,
           firstName: b.client?.firstName || null,
           lastName: b.client?.lastName || null,
           phone: b.client?.phone || null,
-        });
-        emailToClientId.set(normalizedEmail, promise);
+        }));
       }
 
-      const clientId = await emailToClientId.get(normalizedEmail);
-      if (clientId) wixIdToClientId.set(wixId, clientId);
+      const result = await resolveCache.get(normalizedEmail);
+      // Handle both old format (plain id) and new format ({ clientId, isNew })
+      const clientId = result?.clientId ?? result;
+      const isNew = result?.isNew ?? false;
+      if (clientId) {
+        wixIdToClientId.set(wixId, clientId);
+        if (isNew) newClientWixIds.add(wixId);
+      }
     })
   );
 
-  // Resolve any Promises still in the map
-  for (const [email, maybePromise] of emailToClientId) {
-    if (maybePromise && typeof maybePromise.then === 'function') {
-      emailToClientId.set(email, await maybePromise);
-    }
-  }
 
   // Update sessions rows: set client_id where still null
   for (const [wixBookingId, clientId] of wixIdToClientId) {
@@ -162,6 +191,9 @@ async function resolveClientsForBookings(bookings) {
       );
     }
   }
+
+  // Attach newClientWixIds to the returned map so callers know which bookings got new accounts
+  wixIdToClientId._newClientWixIds = newClientWixIds;
 
   return wixIdToClientId;
 }

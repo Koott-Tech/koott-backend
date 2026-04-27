@@ -1,7 +1,7 @@
 {
-  "name": "littlecare-backend",
+  "name": "koott-backend",
   "version": "1.0.0",
-  "description": "Backend for Little Care Child Therapy Platform",
+  "description": "Backend for Koott Child Therapy Platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -16,7 +16,7 @@
     "express",
     "supabase"
   ],
-  "author": "Little Care Team",
+  "author": "Koott Team",
   "license": "MIT",
   "dependencies": {
     "@supabase/supabase-js": "^2.58.0",

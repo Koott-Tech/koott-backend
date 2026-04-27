@@ -550,7 +550,7 @@ const generateReceiptPDFFallback = async (receiptDetails) => {
       });
 
       // Add company logo/header
-      doc.fontSize(24).font('Helvetica-Bold').text('Little Care', { align: 'center' });
+      doc.fontSize(24).font('Helvetica-Bold').text('Koott', { align: 'center' });
       doc.fontSize(12).font('Helvetica').text('Mental Health & Wellness Platform', { align: 'center' });
       doc.moveDown();
 
@@ -621,7 +621,7 @@ const generateReceiptPDFFallback = async (receiptDetails) => {
       doc.moveDown();
 
       // Footer
-      doc.fontSize(10).font('Helvetica').text('Thank you for choosing Little Care for your mental health needs.', { align: 'center' });
+      doc.fontSize(10).font('Helvetica').text('Thank you for choosing Koott for your mental health needs.', { align: 'center' });
       doc.text('For any queries, please contact our support team.', { align: 'center' });
 
       doc.end();
@@ -1096,7 +1096,7 @@ const createPaymentOrder = async (req, res) => {
         amountInPaise: amountInPaise,
         currency: 'INR',
         keyId: razorpayConfig.keyId,
-        name: 'Little Care',
+        name: 'Koott',
         description: assessmentType === 'assessment' ? `Assessment Session - ${sessionType}` : `Therapy Session - ${sessionType}`,
         prefill: {
           name: clientName,
@@ -2579,7 +2579,7 @@ const handlePaymentSuccess = async (req, res) => {
         
         const psychologistMessage =
           `Hey 👋\n\n` +
-          `New session booked with Little Care.\n\n` +
+          `New session booked with Koott.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Date: ${formattedDate}\n` +
           `${bullet}Time: ${formattedTime} (IST)\n` +
@@ -2587,7 +2587,7 @@ const handlePaymentSuccess = async (req, res) => {
           `Join link:\n${meetData.meetLink}\n\n` +
           `Please be ready 5 mins early.\n\n` +
           `For help: ${supportPhone}\n\n` +
-          `— Little Care 💜`;
+          `— Koott 💜`;
         
         const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
         if (psychologistWaResult?.success) {

@@ -380,7 +380,7 @@ async function sendBookingConfirmation(toPhoneE164, details) {
   const receiptBlock = `For receipt: Click here\n${receiptLink}\n\n`;
 
   const specialistLine = isFreeAssessment
-    ? `${bullet}Little Care Specialist\n`
+    ? `${bullet}Koott Specialist\n`
     : `${bullet}Specialist: ${specialist}\n`;
 
   const bookingDurationMinutes = isFreeAssessment
@@ -391,7 +391,7 @@ async function sendBookingConfirmation(toPhoneE164, details) {
   // Format message - same structure for all session types
   const message =
     `Hey 👋\n\n` +
-    `Your session with Little Care is confirmed.\n` +
+    `Your session with Koott is confirmed.\n` +
     specialistLine +
     packageLine +
     `${bullet}Date: ${formattedDate}\n` +
@@ -402,7 +402,7 @@ async function sendBookingConfirmation(toPhoneE164, details) {
     `Please be ready 10 mins early with good internet, a quiet space, and a charged device.\n\n` +
     `For help: +91 95390 07766\n` +
     receiptBlock +
-    `— Little Care 💜`;
+    `— Koott 💜`;
 
   // Send exactly one message (clean + link-friendly)
   return await sendWhatsAppTextWithRetry(toPhoneE164, message);
@@ -482,7 +482,7 @@ async function sendRescheduleConfirmation(toPhoneE164, details) {
     durationLine +
     newLinkBlock +
     `We're looking forward to seeing you at the new time.\n\n` +
-    `— Little Care 💜`;
+    `— Koott 💜`;
 
   return await sendWhatsAppTextWithRetry(toPhoneE164, message);
 }
@@ -564,8 +564,8 @@ async function sendNoShowNotification(toPhoneE164, details) {
   const message =
     `Hey,\n\n` +
     `Your session with ${psychologistName || 'our specialist'} on ${formattedDate} at ${formattedTime} was missed.\n` +
-    `If you need support our Little Care team is here to help, ${supportPhoneDisplay}\n\n` +
-    `— Little Care 💜`;
+    `If you need support our Koott team is here to help, ${supportPhoneDisplay}\n\n` +
+    `— Koott 💜`;
 
   return await sendWhatsAppTextWithRetry(toPhoneE164, message);
 }
@@ -603,7 +603,7 @@ async function sendSessionCompletionNotification(toPhoneE164, details) {
       `It's time to book your next session: ${bookingLinkText}\n\n` +
       `We'd love your feedback on your last session:\n` +
       `How was it? Reply with 1–5 (1 = Poor, 5 = Excellent) or click here: ${feedbackLinkText}\n\n` +
-      `— Little Care 💜`;
+      `— Koott 💜`;
 
     return await sendWhatsAppTextWithRetry(toPhoneE164, message);
   }
@@ -618,7 +618,7 @@ async function sendSessionCompletionNotification(toPhoneE164, details) {
     `We'd love your feedback:\n` +
     `How was your session? Reply with 1–5 (1 = Poor, 5 = Excellent) or click here:\n` +
     `${feedbackLinkText}\n\n` +
-    `— Little Care 💜`;
+    `— Koott 💜`;
 
   return await sendWhatsAppTextWithRetry(toPhoneE164, message);
 }

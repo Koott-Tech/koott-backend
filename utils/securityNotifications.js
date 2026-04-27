@@ -221,7 +221,7 @@ class SecurityNotificationSystem extends EventEmitter {
           </div>
 
           <div class="footer">
-            <p>This is an automated security alert from Little Care Security System.</p>
+            <p>This is an automated security alert from Koott Security System.</p>
             <p>Please do not reply to this email.</p>
           </div>
         </div>
@@ -286,7 +286,7 @@ class SecurityNotificationSystem extends EventEmitter {
       return admins.map(admin => admin.email);
     } catch (error) {
       console.error('Failed to get admin emails:', error);
-      return [process.env.ADMIN_EMAIL || 'admin@littlecare.com'];
+      return [process.env.ADMIN_EMAIL || 'admin@koott.com'];
     }
   }
 

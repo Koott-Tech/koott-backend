@@ -9,57 +9,83 @@
  * Returns a normalised lowercase string like "individual", "package", "class", or null.
  */
 function sessionTypeFromBooking(b) {
-  if (!b) return null;
+  if (!b) return 'individual';
 
-  // 1. Explicit pricingPlanInfo → Wix Pricing Plan (package) booking
+  // 0. Pre-detected by Velo enrichBookingItem (uses variant selections + price ratio)
+  if (b.bookingType && b.bookingType !== 'individual') return b.bookingType;
+
+  const title = String(b.title || b.rawBookedEntity?.title || '').toLowerCase();
+  
+  // 1. Explicit Keywords in Title or Variants
+  const variantStr = JSON.stringify(b.variantSelections || b.rawFormInfo?.variantSelections || '').toLowerCase();
+  const fullText = `${title} ${variantStr}`;
+
+  if (fullText.includes('couple')) return 'couple';
+  if (fullText.includes('assessment')) return 'assessment';
+  if (fullText.includes('discovery')) return 'discovery';
+  if (fullText.includes('pack') || fullText.includes('bundle') || fullText.includes('membership') || fullText.includes('plan')) return 'package';
+
+  // 2. Pricing Plan check
   if (b.pricingPlanInfo) return 'package';
 
-  // 2. Price ratio: if the client paid ≥ 2× the per-session catalog rate
-  //    it means multiple sessions were bundled → treat as package.
-  //    Catalog rate lives in rawBookedEntity.rate.defaultVariedPrice.amount.
+  // 3. Fallback to Price Ratio — lowered to 1.3x to catch couple sessions (e.g. 2299/1499=1.53)
   const catalogRate = parseFloat(b.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 0);
-  const actualPaid  = parseFloat(b.paymentDetails?.balance?.finalPrice?.amount ?? 0);
-  if (catalogRate > 0 && actualPaid > 0 && actualPaid >= catalogRate * 2) {
+  const actualPaid  = parseFloat(b._resolvedPrice ?? b.paymentDetails?.balance?.finalPrice?.amount ?? b.price ?? 0);
+  if (catalogRate > 0 && actualPaid > 0 && actualPaid >= catalogRate * 1.3) {
     return 'package';
   }
 
-  // 3. Explicit bookingType from Velo enrichment
-  if (b.bookingType) {
-    const bt = String(b.bookingType).toLowerCase();
-    if (bt === 'package' || bt.includes('pack') || bt.includes('plan')) return 'package';
-  }
-
-  // 4. Tags (Wix INDIVIDUAL = private/one-on-one; COURSE = multi-session course)
-  const tags = Array.isArray(b.tags) ? b.tags : [];
-  for (const tag of tags) {
-    const t = String(tag || '').toLowerCase();
-    if (t === 'course' || t.includes('pack') || t.includes('bundle') || t.includes('membership')) return 'package';
-    if (t.includes('class') || t.includes('group') || t.includes('workshop')) return 'class';
-  }
-
-  // 5. Service title keywords
-  const title = String(b.title || b.rawBookedEntity?.title || '').toLowerCase();
-  if (title.includes('pack') || title.includes('bundle') || title.includes('membership') || title.includes('course')) return 'package';
-  if (title.includes('class') || title.includes('group') || title.includes('workshop')) return 'class';
-
-  // Default: individual (private one-on-one session)
   return 'individual';
 }
 
 /**
  * Estimate number of sessions purchased.
- * Only meaningful for package bookings (actualPaid >= 2× catalogRate).
- * Returns the rounded count for packages, 1 for individuals, null when data missing.
+ * Prioritizes text-based extraction (e.g. "Pack of 4") over math.
  */
 function sessionCountFromBooking(b) {
-  const catalogRate = parseFloat(b?.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 0);
-  const actualPaid  = parseFloat(b?.paymentDetails?.balance?.finalPrice?.amount ?? 0);
-  if (catalogRate <= 0 || actualPaid <= 0) return null;
-  // Only compute multi-session count when it clearly qualifies as a package
-  if (actualPaid >= catalogRate * 2) {
-    const count = Math.round(actualPaid / catalogRate);
-    return count >= 2 ? count : null;
+  if (!b) return 1;
+
+  // 0. Pre-detected by Velo enrichBookingItem
+  if (b.detectedSessionCount && b.detectedSessionCount > 1) return b.detectedSessionCount;
+
+  const title = String(b.title || b.rawBookedEntity?.title || '').toLowerCase();
+  const planName = String(b.pricingPlanInfo?.planName || '').toLowerCase();
+  const variantStr = JSON.stringify(b.variantSelections || b.rawFormInfo?.variantSelections || '').toLowerCase();
+  const combinedText = `${title} ${planName} ${variantStr}`;
+
+  // 1. Try to find a digit in "Pack of X" or "X sessions" pattern
+  const match = combinedText.match(/(\d+)\s*sessions?/i) || 
+                combinedText.match(/pack\s*of\s*(\d+)/i) ||
+                combinedText.match(/(\d+)\s*pack/i) ||
+                combinedText.match(/(\d+)\s*bundle/i);
+  
+  if (match && match[1]) {
+    const count = parseInt(match[1], 10);
+    if (count > 0) return count;
   }
+
+  // 2. Couple/assessment types are always 1 session per booking
+  if (combinedText.includes('couple') || combinedText.includes('assessment') || combinedText.includes('discovery')) {
+    return 1;
+  }
+
+  // 3. Price-ratio math
+  const catalogRate = parseFloat(b?.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 0);
+  const actualPaid  = parseFloat(b?._resolvedPrice ?? b?.paymentDetails?.balance?.finalPrice?.amount ?? b?.price ?? 0);
+  
+  if (catalogRate > 0 && actualPaid > 0) {
+    const ratio = actualPaid / catalogRate;
+    if (ratio >= 1.3) {
+      // Common discount patterns with real Koott data:
+      // 7499/1999 = 3.75 → 4 sessions | 3499/999 = 3.50 → 4 sessions
+      // 2499/749 = 3.33 → 4 sessions  | 2999/999 = 3.00 → 3 sessions
+      if (ratio > 3.1 && ratio < 4) return 4;
+      if (ratio > 2.1 && ratio < 3.1) return 3;
+      const count = Math.round(ratio);
+      return count >= 2 ? count : 2;
+    }
+  }
+
   return 1;
 }
 
@@ -101,10 +127,17 @@ function discoverRowToDb(booking) {
     b.pricingPlanInfo?.priceDetails?.currency ??
     b.pricingPlanInfo?.price?.currency ??
     null;
-  // Priority: actual charged (finalPrice) > pricing plan > catalog rate > payload price
-  const useFinal = finalPriceAmount != null && parseFloat(finalPriceAmount) > 0;
-  const resolvedPrice    = useFinal ? finalPriceAmount : (planPrice ?? b.price ?? rate?.amount ?? null);
-  const resolvedCurrency = useFinal ? finalPriceCurrency : (planCurrency || b.currency || rate?.currency || null);
+  const paymentState = String(b.paymentDetails?.state || '').toUpperCase();
+  const isZeroPayment = paymentState === 'UNDEFINED' || paymentState === 'FREE' || parseFloat(finalPriceAmount || '-1') === 0;
+
+  const resolvedPrice = isZeroPayment ? 0 : (finalPriceAmount != null && parseFloat(finalPriceAmount) > 0 ? finalPriceAmount : (planPrice ?? b.price ?? rate?.amount ?? null));
+  const resolvedCurrency = (finalPriceAmount != null && parseFloat(finalPriceAmount) > 0) ? finalPriceCurrency : (planCurrency || b.currency || rate?.currency || null);
+
+  // For type/count detection, inject the resolved price so ratio math uses
+  // the actual paid amount rather than the catalog rate stored in b.price.
+  const augmented = resolvedPrice != null && parseFloat(resolvedPrice) > 0
+    ? { ...b, _resolvedPrice: resolvedPrice }
+    : b;
 
   return {
     wix_booking_id: String(b.id),
@@ -114,8 +147,8 @@ function discoverRowToDb(booking) {
     contact_id: b.contactId || b.client?.contactId || null,
     status: normalizeWixStatusToSessionStatus(b.status),
     title: b.title != null ? String(b.title) : null,
-    session_type: sessionTypeFromBooking(b),
-    session_count: sessionCountFromBooking(b),
+    session_type: sessionTypeFromBooking(augmented),
+    session_count: sessionCountFromBooking(augmented),
     therapist_name: therapistNameFromBooking(b),
     tags: Array.isArray(b.tags) ? b.tags : b.tags != null ? b.tags : null,
     start_time: b.startTime || null,
@@ -151,17 +184,24 @@ function parseAmount(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function isoDate(isoLike) {
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // UTC+5:30
+
+function toIST(isoLike) {
   if (!isoLike) return null;
   const d = new Date(isoLike);
   if (Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + IST_OFFSET_MS);
+}
+
+function isoDate(isoLike) {
+  const d = toIST(isoLike);
+  if (!d) return null;
   return d.toISOString().slice(0, 10);
 }
 
 function isoTime(isoLike) {
-  if (!isoLike) return null;
-  const d = new Date(isoLike);
-  if (Number.isNaN(d.getTime())) return null;
+  const d = toIST(isoLike);
+  if (!d) return null;
   return d.toISOString().slice(11, 19);
 }
 
@@ -176,9 +216,11 @@ function discoverRowToSessionDb(booking) {
     b.pricingPlanInfo?.price?.value ??
     b.pricingPlanInfo?.totalPrice ??
     null;
-  const useFinalPaid = finalPaid != null && parseFloat(finalPaid) > 0;
-  const amount = parseAmount(
-    useFinalPaid ? finalPaid : (planPriceRaw ?? b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount)
+  const paymentState = String(b.paymentDetails?.state || '').toUpperCase();
+  const isZeroPayment = paymentState === 'UNDEFINED' || paymentState === 'FREE' || parseFloat(finalPaid || '-1') === 0;
+
+  const amount = isZeroPayment ? 0 : parseAmount(
+    (finalPaid != null && parseFloat(finalPaid) > 0) ? finalPaid : (planPriceRaw ?? b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount)
   );
   const createdAt = b.createdDate || new Date().toISOString();
   const updatedAt = new Date().toISOString();
@@ -187,6 +229,7 @@ function discoverRowToSessionDb(booking) {
     wix_booking_id: b.id != null ? String(b.id) : null,
     source: 'wix',
     session_type: sessionTypeFromBooking(b) || 'individual',
+    session_count: sessionCountFromBooking(b),
     status: normalizeWixStatusToSessionStatus(b.status),
     scheduled_date: isoDate(b.startTime),
     scheduled_time: isoTime(b.startTime),

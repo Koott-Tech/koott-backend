@@ -415,7 +415,7 @@ class MeetLinkService {
 
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
       if (adminEmail) pushUniqueEmail(adminEmail);
-      pushUniqueEmail('meet.littlecare@gmail.com');
+      pushUniqueEmail('meet.koott@gmail.com');
 
       const event = {
         summary: sessionData.summary || 'Therapy Session',
@@ -459,7 +459,7 @@ class MeetLinkService {
         calendarId: 'primary',
         resource: event,
         conferenceDataVersion: 1,
-        // Send calendar invites to all attendees so they get the event and notifications (client, psychologist, admin, meet.littlecare)
+        // Send calendar invites to all attendees so they get the event and notifications (client, psychologist, admin, meet.koott)
         sendUpdates: 'all'
       });
 

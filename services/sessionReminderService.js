@@ -315,7 +315,7 @@ class SessionReminderService {
       // Send reminder to client
       if (client.phone_number) {
         const bullet = '•⁠  ⁠';
-        const clientMessage = `See You Soon for Your Session,\nYour session with ${psychologistName} is scheduled in a little while.\n\n${bullet}${formattedDate}\n${bullet}${formattedTime} (IST)\n\nPlease join from a quiet space with good internet.\nWe're here for you.\n\n— Little Care 💜`;
+        const clientMessage = `See You Soon for Your Session,\nYour session with ${psychologistName} is scheduled in a little while.\n\n${bullet}${formattedDate}\n${bullet}${formattedTime} (IST)\n\nPlease join from a quiet space with good internet.\nWe're here for you.\n\n— Koott 💜`;
 
         reminderPromises.push(
           whatsappService.sendWhatsAppTextWithRetry(client.phone_number, clientMessage)
@@ -341,14 +341,14 @@ class SessionReminderService {
         
         const psychologistMessage =
           `Hey 👋\n\n` +
-          `Reminder: You have a session with Little Care.\n\n` +
+          `Reminder: You have a session with Koott.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Date: ${formattedDate}\n` +
           `${bullet}Time: ${formattedTime} (IST)\n\n` +
           meetLinkLine +
           `Please be ready 5 mins early.\n\n` +
           `For help: +91 95390 07766\n\n` +
-          `— Little Care 💜`;
+          `— Koott 💜`;
 
         reminderPromises.push(
           whatsappService.sendWhatsAppTextWithRetry(psychologist.phone, psychologistMessage)
@@ -486,7 +486,7 @@ class SessionReminderService {
       // Send reminder to client
       if (client.phone_number) {
         const bullet = '•⁠  ⁠';
-        const clientMessage = `See You Soon for Your Session,\nYour free assessment session is scheduled in a little while.\n\n${bullet}${formattedDate}\n${bullet}${formattedTime} (IST)\n\nPlease join from a quiet space with good internet.\nWe're here for you.\n\n— Little Care 💜`;
+        const clientMessage = `See You Soon for Your Session,\nYour free assessment session is scheduled in a little while.\n\n${bullet}${formattedDate}\n${bullet}${formattedTime} (IST)\n\nPlease join from a quiet space with good internet.\nWe're here for you.\n\n— Koott 💜`;
 
         reminderPromises.push(
           whatsappService.sendWhatsAppTextWithRetry(client.phone_number, clientMessage)
@@ -510,13 +510,13 @@ class SessionReminderService {
         const bullet = '•⁠  ⁠';
         const psychologistMessage =
           `Hey 👋\n\n` +
-          `Reminder: You have a free assessment session with Little Care.\n\n` +
+          `Reminder: You have a free assessment session with Koott.\n\n` +
           `${bullet}Client: ${clientName}\n` +
           `${bullet}Date: ${formattedDate}\n` +
           `${bullet}Time: ${formattedTime} (IST)\n\n` +
           `Please be ready 5 mins early.\n\n` +
           `For help: +91 95390 07766\n\n` +
-          `— Little Care 💜`;
+          `— Koott 💜`;
 
         reminderPromises.push(
           whatsappService.sendWhatsAppTextWithRetry(psychologist.phone, psychologistMessage)

@@ -184,7 +184,7 @@ async function sendAssessmentWhatsapps({ session, clientName, meetLink }) {
     
     const message =
       `Hey 👋\n\n` +
-      `New free assessment session booked with Little Care.\n\n` +
+      `New free assessment session booked with Koott.\n\n` +
       `${bullet}Client: ${clientName}\n` +
       `${bullet}Assessment: ${assessmentName}\n` +
       `${bullet}Date: ${formattedDate}\n` +
@@ -192,7 +192,7 @@ async function sendAssessmentWhatsapps({ session, clientName, meetLink }) {
       `Join link:\n${meetLink}\n\n` +
       `Please be ready 5 mins early.\n\n` +
       `For help: ${supportPhone}\n\n` +
-      `— Little Care 💜`;
+      `— Koott 💜`;
 
     try {
       await sendWhatsAppTextWithRetry(psychologistPhone, message);

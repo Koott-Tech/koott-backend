@@ -269,11 +269,11 @@ const register = async (req, res) => {
       profileData = newUser; // Admin users don't have separate profile tables
     }
 
-    // Send new user notification to admin and meet.littlecare@gmail.com (client and psychologist only)
+    // Send new user notification to admin and meet.koott@gmail.com (client and psychologist only)
     if (role === 'client' || role === 'psychologist') {
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
-      const meetLittleCareEmail = 'meet.littlecare@gmail.com';
-      const adminRecipients = [adminEmail, meetLittleCareEmail].filter(Boolean).join(', ');
+      const meetKoottEmail = 'meet.koott@gmail.com';
+      const adminRecipients = [adminEmail, meetKoottEmail].filter(Boolean).join(', ');
       if (adminRecipients) {
         try {
           const emailService = require('../utils/emailService');
@@ -293,7 +293,7 @@ const register = async (req, res) => {
             clientId: role === 'client' ? (user.client_id || client?.id) : null,
             createdAt: user.created_at || profileData.created_at
           });
-          console.log('📧 New user registration email sent to admin and meet.littlecare@gmail.com');
+          console.log('📧 New user registration email sent to admin and meet.koott@gmail.com');
         } catch (emailErr) {
           console.error('Error sending new user registration email:', emailErr);
         }

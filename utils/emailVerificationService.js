@@ -300,11 +300,11 @@ class EmailVerificationService {
    */
   getEmailSubject(verificationType) {
     const subjects = {
-      'registration': 'Verify Your Email - Little Care Account',
-      'password_reset': 'Reset Your Password - Little Care',
-      'email_change': 'Verify Your New Email - Little Care'
+      'registration': 'Verify Your Email - Koott Account',
+      'password_reset': 'Reset Your Password - Koott',
+      'email_change': 'Verify Your New Email - Koott'
     };
-    return subjects[verificationType] || 'Email Verification - Little Care';
+    return subjects[verificationType] || 'Email Verification - Koott';
   }
 
   /**
@@ -316,7 +316,7 @@ class EmailVerificationService {
    * @returns {string} HTML content
    */
   getEmailHTML(email, otp, verificationType, userRole) {
-    const platformName = 'Little Care';
+    const platformName = 'Koott';
     const verificationMessage = this.getVerificationMessage(verificationType, userRole);
     
     return `
@@ -385,7 +385,7 @@ class EmailVerificationService {
     const verificationMessage = this.getVerificationMessage(verificationType, userRole);
     
     return `
-Little Care - Child Therapy Platform
+Koott - Child Therapy Platform
 
 Email Verification Required
 
@@ -403,11 +403,11 @@ Important:
 If you didn't request this verification, please ignore this email.
 
 Best regards,
-The Little Care Team
+The Koott Team
 
 ---
 This is an automated message. Please do not reply to this email.
-© 2024 Little Care. All rights reserved.
+© 2024 Koott. All rights reserved.
     `;
   }
 
@@ -421,12 +421,12 @@ This is an automated message. Please do not reply to this email.
     const roleText = userRole === 'psychologist' ? 'psychologist' : 'client';
     
     const messages = {
-      'registration': `Thank you for registering as a ${roleText} on Little Care. To complete your registration and start using our platform, please verify your email address.`,
-      'password_reset': `You have requested to reset your password for your Little Care account. Please verify your email to proceed with password reset.`,
-      'email_change': `You have requested to change your email address for your Little Care account. Please verify your new email address to complete the change.`
+      'registration': `Thank you for registering as a ${roleText} on Koott. To complete your registration and start using our platform, please verify your email address.`,
+      'password_reset': `You have requested to reset your password for your Koott account. Please verify your email to proceed with password reset.`,
+      'email_change': `You have requested to change your email address for your Koott account. Please verify your new email address to complete the change.`
     };
     
-    return messages[verificationType] || 'Please verify your email address to continue using Little Care.';
+    return messages[verificationType] || 'Please verify your email address to continue using Koott.';
   }
 
   /**

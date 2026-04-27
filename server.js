@@ -202,7 +202,7 @@ app.use('/uploads', express.static('uploads'));
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'OK', 
-    message: 'Little Care Backend is running',
+    message: 'Koott Backend is running',
     timestamp: new Date().toISOString()
   });
 });
@@ -928,7 +928,7 @@ app.use((err, req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
-console.log(`🚀 Little Care Backend running on port ${PORT}`);
+console.log(`🚀 Koott Backend running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🔐 Environment: ${process.env.NODE_ENV}`);
 
