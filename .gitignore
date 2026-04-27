@@ -229,3 +229,7 @@ oauth-tokens.json
 **/tokens.json
 **/*.pem
 **/*.p12
+
+# Scratch files
+scratch/
+
