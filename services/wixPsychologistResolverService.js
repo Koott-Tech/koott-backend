@@ -3,11 +3,22 @@ const { hashPassword } = require('../utils/helpers');
 const emailService = require('../utils/emailService');
 
 function splitName(fullName) {
-  const raw = String(fullName || '').trim();
+  const raw = normalizeName(fullName);
   if (!raw) return { firstName: null, lastName: null };
   const parts = raw.split(/\s+/);
   if (parts.length === 1) return { firstName: parts[0], lastName: null };
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
+}
+
+function normalizeName(value) {
+  return String(value || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizedFullName(firstName, lastName) {
+  return normalizeName([firstName, lastName].filter(Boolean).join(' ')).toLowerCase();
 }
 
 function therapistFromBooking(booking) {
@@ -42,7 +53,7 @@ function therapistFromBooking(booking) {
  */
 async function resolveOrCreateWixPsychologist(booking) {
   const therapist = therapistFromBooking(booking);
-  const rawName = String(therapist.name || '').trim();
+  const rawName = normalizeName(therapist.name || '');
   const rawEmail = String(therapist.email || '').trim().toLowerCase();
   const rawPhone = String(therapist.phone || '').trim();
 
@@ -61,19 +72,26 @@ async function resolveOrCreateWixPsychologist(booking) {
   // 2. Try resolving by name (fallback)
   const { firstName, lastName } = splitName(rawName);
   if (firstName) {
+    const targetFullName = normalizedFullName(firstName, lastName);
     let query = supabaseAdmin
       .from('psychologists')
-      .select('id')
+      .select('id, first_name, last_name')
       .ilike('first_name', firstName);
-    
-    if (lastName) {
-      query = query.ilike('last_name', lastName);
-    } else {
-      query = query.is('last_name', null);
-    }
 
-    const { data: existingByName } = await query.limit(1);
-    if (existingByName?.[0]?.id) return { psychologistId: existingByName[0].id, isNew: false };
+    const { data: existingByName } = await query.limit(50);
+    if (existingByName?.length) {
+      const exactMatch = existingByName.find((row) =>
+        normalizedFullName(row.first_name, row.last_name) === targetFullName
+      );
+      if (exactMatch?.id) return { psychologistId: exactMatch.id, isNew: false };
+      if (lastName) {
+        const byLast = existingByName.find((row) =>
+          String(row.last_name || '').trim().toLowerCase() === String(lastName || '').trim().toLowerCase()
+        );
+        if (byLast?.id) return { psychologistId: byLast.id, isNew: false };
+      }
+      if (!lastName && existingByName[0]?.id) return { psychologistId: existingByName[0].id, isNew: false };
+    }
   }
 
   // Build a deterministic temp password
@@ -108,11 +126,18 @@ async function resolveOrCreateWixPsychologist(booking) {
     // Fetch again just in case
     const { data: retryCheck } = await supabaseAdmin
       .from('psychologists')
-      .select('id')
+      .select('id, first_name, last_name')
       .ilike('first_name', firstName)
-      .limit(1);
-    
-    if (retryCheck?.[0]?.id) return { psychologistId: retryCheck[0].id, isNew: false };
+      .limit(50);
+
+    if (retryCheck?.length) {
+      const targetFullName = normalizedFullName(firstName, lastName);
+      const exactMatch = retryCheck.find((row) =>
+        normalizedFullName(row.first_name, row.last_name) === targetFullName
+      );
+      if (exactMatch?.id) return { psychologistId: exactMatch.id, isNew: false };
+      if (retryCheck[0]?.id) return { psychologistId: retryCheck[0].id, isNew: false };
+    }
     
     console.warn('[wixPsychologistResolver] insert failed:', error.message || error);
     return { psychologistId: null, isNew: false };
@@ -125,7 +150,7 @@ async function resolveOrCreateWixPsychologist(booking) {
       to: rawEmail,
       psychologistName,
       tempPassword,
-      loginUrl: 'https://www.little.care',
+      loginUrl: process.env.CLIENT_SITE_URL || 'https://www.koott.in',
     }).catch((err) => {
       console.error(`[wixPsychologistResolver] welcome email failed for ${rawEmail}:`, err?.message || err);
     });

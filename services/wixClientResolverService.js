@@ -53,23 +53,41 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
       .single();
 
     if (createUserError) {
+      // Race-safe fallback: if another process inserted this user concurrently,
+      // resolve by email and continue instead of failing client mapping.
+      const msg = String(createUserError.message || '').toLowerCase();
+      if (createUserError.code === '23505' || msg.includes('duplicate') || msg.includes('unique')) {
+        const { data: raceUser } = await supabaseAdmin
+          .from('users')
+          .select('id')
+          .ilike('email', normalizedEmail)
+          .limit(1);
+        if (raceUser?.[0]?.id) {
+          userId = raceUser[0].id;
+        }
+      }
+    }
+
+    if (createUserError && !userId) {
       console.error('[wixClientResolver] user insert failed:', createUserError.message || createUserError);
       return { clientId: null, isNew: false };
     }
-    userId = newUser.id;
-    isNewUser = true;
-    console.log(`[wixClientResolver] created user ${normalizedEmail} (${userId})`);
+    if (!userId) {
+      userId = newUser.id;
+      isNewUser = true;
+      console.log(`[wixClientResolver] created user ${normalizedEmail} (${userId})`);
 
-    // Send welcome email with login credentials (fire-and-forget)
-    const clientName = [firstName, lastName].filter(Boolean).join(' ') || normalizedEmail;
-    emailService.sendWelcomeEmail({
-      to: normalizedEmail,
-      clientName,
-      tempPassword,
-      loginUrl: 'https://www.little.care',
-    }).catch((err) => {
-      console.error(`[wixClientResolver] welcome email failed for ${normalizedEmail}:`, err?.message || err);
-    });
+      // Send welcome email only for newly created users (fire-and-forget)
+      const clientName = [firstName, lastName].filter(Boolean).join(' ') || normalizedEmail;
+      emailService.sendWelcomeEmail({
+        to: normalizedEmail,
+        clientName,
+        tempPassword,
+        loginUrl: process.env.CLIENT_SITE_URL || 'https://www.koott.in',
+      }).catch((err) => {
+        console.error(`[wixClientResolver] welcome email failed for ${normalizedEmail}:`, err?.message || err);
+      });
+    }
   }
 
   // 3. Find or create the clients row linked to this user

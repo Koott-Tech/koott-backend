@@ -36,6 +36,7 @@ const dailyAvailabilityService = require('./services/dailyAvailabilityService');
 const dailyFreeAssessmentService = require('./services/dailyFreeAssessmentService');
 const dailyCalendarConflictAlert = require('./services/dailyCalendarConflictAlert');
 const wixRealtimeSyncService = require('./services/wixRealtimeSyncService');
+const monthlyFinanceSnapshotService = require('./services/monthlyFinanceSnapshotService');
 const googleCalendarRoutes = require('./routes/googleCalendar');
 const blogRoutes = require('./routes/blogs');
 const counsellingRoutes = require('./routes/counselling');
@@ -75,8 +76,10 @@ app.use(requestIdMiddleware);
 // Use same ALLOWED_ORIGINS as CSRF middleware: set in production (e.g. Render) as comma-separated list
 const DEFAULT_ORIGINS = [
   'https://kutikkal-one.vercel.app',
-  'https://www.little.care',
-  'https://little.care',
+  'https://www.koott.in',
+  'https://koott.in',
+  'https://www.koott.com',
+  'https://koott.com',
   'http://localhost:3000',
   'http://localhost:3001'
 ];
@@ -979,6 +982,9 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
   
   // Start Wix discover mirror sync service (near real-time fallback)
   wixRealtimeSyncService.start();
+
+  // Start monthly finance snapshot service (persists previous month automatically)
+  monthlyFinanceSnapshotService.start();
   
   // Start Recovery Job (recovers failed session creations, runs every 5 minutes)
   const { startRecoveryScheduler } = require('./jobs/recoveryJob');

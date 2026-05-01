@@ -5,6 +5,7 @@ const {
   formatDate,
   formatTime
 } = require('../utils/helpers');
+const { getSessionBookingCreatedAtIso } = require('../utils/sessionBookingCreatedAt');
 const assessmentSessionService = require('../services/assessmentSessionService');
 const {
   getRecurringBlocksForPsychologist,
@@ -248,9 +249,14 @@ const getSessions = async (req, res) => {
 
       const { data: sessions, error, count } = await query;
 
+      const enrichedRegular = (sessions || []).map((s) => ({
+        ...s,
+        booking_created_at: getSessionBookingCreatedAtIso(s),
+      }));
+
       // Attach package info and session index (e.g. "2/3") for package sessions
-      if (sessions && sessions.length > 0) {
-        const packageIds = [...new Set(sessions.map(s => s.package_id).filter(Boolean))];
+      if (enrichedRegular.length > 0) {
+        const packageIds = [...new Set(enrichedRegular.map(s => s.package_id).filter(Boolean))];
         if (packageIds.length > 0) {
           const { data: packages } = await supabaseAdmin
             .from('packages')
@@ -288,7 +294,7 @@ const getSessions = async (req, res) => {
               });
             });
           }
-          sessions.forEach(s => {
+          enrichedRegular.forEach(s => {
             if (s.package_id && sessionToPackageInfo[s.id]) {
               const info = sessionToPackageInfo[s.id];
               s.package = {
@@ -519,20 +525,22 @@ const getSessions = async (req, res) => {
 
       // Combine regular sessions and assessment sessions
       // Sort: pending sessions first (for scheduling), then by date
-      const allSessions = [...(sessions || []), ...assessmentSessions]
+      const allSessions = [...enrichedRegular, ...assessmentSessions]
         .sort((a, b) => {
           // Pending sessions (null dates) come first
           if (!a.scheduled_date && b.scheduled_date) return -1;
           if (a.scheduled_date && !b.scheduled_date) return 1;
           if (!a.scheduled_date && !b.scheduled_date) {
-            // Both pending, sort by created_at
-            return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+            // Both pending — order by booking instant when available (Wix), else created_at
+            const tb = getSessionBookingCreatedAtIso(b) || b.created_at;
+            const ta = getSessionBookingCreatedAtIso(a) || a.created_at;
+            return new Date(tb || 0) - new Date(ta || 0);
           }
           // Both have dates, sort by date descending
           return new Date(b.scheduled_date) - new Date(a.scheduled_date);
         });
 
-      console.log(`🔍 Total sessions returned: ${allSessions.length} (regular: ${sessions?.length || 0}, assessment: ${assessmentSessions.length})`);
+      console.log(`🔍 Total sessions returned: ${allSessions.length} (regular: ${enrichedRegular.length}, assessment: ${assessmentSessions.length})`);
       console.log(`🔍 Pending assessment sessions in response:`, allSessions.filter(s => 
         (s.session_type === 'assessment' || s.type === 'assessment') && s.status === 'pending'
       ).map(s => ({
@@ -1612,13 +1620,40 @@ const completeSession = async (req, res) => {
       const client = Array.isArray(regularSession.client) ? regularSession.client[0] : regularSession.client;
 
       // Update regular session
-      const { data: updatedSession, error } = await supabaseAdmin
+      let { data: updatedSession, error } = await supabaseAdmin
         .from('sessions')
         .update(updateData)
         .eq('id', sessionId)
         .eq('psychologist_id', psychologistId)
         .select('*')
         .single();
+
+      // Backward-compatible fallback for older schemas that may not have notes/summary columns.
+      if (error && String(error.message || '').includes("session_notes")) {
+        const retryPayload = { ...updateData };
+        delete retryPayload.session_notes;
+
+        ({ data: updatedSession, error } = await supabaseAdmin
+          .from('sessions')
+          .update(retryPayload)
+          .eq('id', sessionId)
+          .eq('psychologist_id', psychologistId)
+          .select('*')
+          .single());
+      }
+
+      if (error && String(error.message || '').includes("session_summary")) {
+        const retryPayload = { ...updateData };
+        delete retryPayload.session_summary;
+
+        ({ data: updatedSession, error } = await supabaseAdmin
+          .from('sessions')
+          .update(retryPayload)
+          .eq('id', sessionId)
+          .eq('psychologist_id', psychologistId)
+          .select('*')
+          .single());
+      }
 
       if (error) {
         console.error('Complete session error:', error);
@@ -1674,7 +1709,8 @@ const completeSession = async (req, res) => {
             const psychologistName = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim() || 'our specialist';
             const isFreeAssessment = regularSession.session_type === 'free_assessment';
             // Always use production URL in WhatsApp/email links (never localhost)
-            const PRODUCTION_SITE_URL = 'https://www.little.care';
+            const PRODUCTION_SITE_URL =
+              process.env.SITE_URL || process.env.PUBLIC_APP_URL || 'https://www.koott.in';
             const bookingLink = `${PRODUCTION_SITE_URL}/psychologists`;
             const feedbackLink = isFreeAssessment 
               ? `${PRODUCTION_SITE_URL}/profile/sessions?tab=completed`

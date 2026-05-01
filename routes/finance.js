@@ -27,6 +27,7 @@ router.get('/dashboard', financeController.getDashboard);
 
 // Sessions Management
 router.get('/sessions', financeController.getSessions);
+router.get('/doctors/:psychologistId/bookings', financeController.getDoctorBookings);
 router.get('/sessions/all', sessionController.getAllSessions); // Use same method as admin for consistency
 router.get('/sessions/:sessionId', financeController.getSessionDetails);
 

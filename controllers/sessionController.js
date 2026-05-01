@@ -6,6 +6,8 @@ const {
   formatTime,
   addMinutesToTime
 } = require('../utils/helpers');
+const { getSessionBookingCreatedAtIso } = require('../utils/sessionBookingCreatedAt');
+const { getBookingTimeColumnKey, appendBookingTimeSelectFragment } = require('../utils/sessionsBookingTimeColumn');
 const { createRealMeetLink } = require('../utils/meetEventHelper'); // Use real Meet link creation
 const meetLinkService = require('../utils/meetLinkService'); // New Meet Link Service
 const emailService = require('../utils/emailService');
@@ -88,9 +90,14 @@ const bookSession = async (req, res) => {
       );
     }
 
+    // TEMPORARY: disable auto Google Meet scheduling for new bookings.
+    const DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING = true;
+
     // Create real Google Meet link using Meet Link Service
     let meetData = null;
-    try {
+    if (DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING) {
+      console.log('ℹ️ Google Meet auto-scheduling is temporarily disabled (sessionController.bookSession).');
+    } else try {
       console.log('🔄 Creating real Google Meet link...');
 
       let creds = psychologistDetails.google_calendar_credentials;
@@ -239,114 +246,9 @@ const bookSession = async (req, res) => {
       // Continue even if availability update fails
     }
 
-    // Send confirmation emails to all parties
-    try {
-      await emailService.sendSessionConfirmation({
-        clientName: clientDetails.child_name || `${clientDetails.first_name} ${clientDetails.last_name}`,
-        psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
-        clientEmail: clientDetails.user?.email,
-        psychologistEmail: psychologistDetails.email,
-        scheduledDate: scheduled_date,
-        scheduledTime: scheduled_time,
-        googleMeetLink: meetData?.meetLink,
-        googleCalendarEventId: meetData?.eventId,
-        sessionId: session.id
-      });
-      console.log('✅ Session confirmation emails sent successfully');
-    } catch (emailError) {
-      console.error('Error sending confirmation emails:', emailError);
-      // Continue even if email sending fails
-    }
-
-    // Send WhatsApp notifications to both client and psychologist via Business API
-    try {
-      console.log('📱 Sending WhatsApp notifications via UltraMsg API...');
-      const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-      
-      const clientName = clientDetails.child_name || `${clientDetails.first_name} ${clientDetails.last_name}`.trim();
-      const psychologistName = `${psychologistDetails.first_name} ${psychologistDetails.last_name}`.trim();
-
-      // Send WhatsApp to client
-      const clientPhone = clientDetails.phone_number || null;
-      if (clientPhone && meetData?.meetLink) {
-        // Only include childName if child_name exists and is not empty/null/'Pending'
-        const childName = clientDetails.child_name && 
-          clientDetails.child_name.trim() !== '' && 
-          clientDetails.child_name.toLowerCase() !== 'pending'
-          ? clientDetails.child_name 
-          : null;
-        
-        const clientDetails_wa = {
-          childName: childName,
-          date: scheduled_date,
-          time: scheduled_time,
-          meetLink: meetData.meetLink,
-          psychologistName: psychologistName, // Add psychologist name to WhatsApp message
-        };
-        const clientWaResult = await sendBookingConfirmation(clientPhone, clientDetails_wa);
-        if (clientWaResult?.success) {
-          console.log('✅ WhatsApp confirmation sent to client via UltraMsg');
-        } else if (clientWaResult?.skipped) {
-          console.log('ℹ️ Client WhatsApp skipped:', clientWaResult.reason);
-        } else {
-          console.warn('⚠️ Client WhatsApp send failed');
-        }
-      } else {
-        console.log('ℹ️ No client phone or meet link; skipping client WhatsApp');
-      }
-
-      // Send WhatsApp to psychologist
-      const psychologistPhone = psychologistDetails.phone || null;
-      if (psychologistPhone && meetData?.meetLink) {
-        // Format date and time using the same functions as client messages
-        const { formatFriendlyTime } = require('../utils/whatsappService');
-        const formatBookingDateShort = (dateStr) => {
-          if (!dateStr) return '';
-          try {
-            const d = new Date(`${dateStr}T00:00:00+05:30`);
-            return d.toLocaleDateString('en-IN', {
-              weekday: 'short',
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric',
-              timeZone: 'Asia/Kolkata'
-            });
-          } catch {
-            return dateStr;
-          }
-        };
-        
-        const bullet = '•⁠  ⁠';
-        const formattedDate = formatBookingDateShort(scheduled_date);
-        const formattedTime = formatFriendlyTime(scheduled_time);
-        const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-        
-        const psychologistMessage =
-          `Hey 👋\n\n` +
-          `New session booked with Koott.\n\n` +
-          `${bullet}Client: ${clientName}\n` +
-          `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n` +
-          `${bullet}Duration: 50 min\n\n` +
-          `Join link:\n${meetData.meetLink}\n\n` +
-          `Please be ready 5 mins early.\n\n` +
-          `For help: ${supportPhone}\n\n` +
-          `— Koott 💜`;
-        
-        const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
-        if (psychologistWaResult?.success) {
-          console.log('✅ WhatsApp notification sent to psychologist via UltraMsg');
-        } else if (psychologistWaResult?.skipped) {
-          console.log('ℹ️ Psychologist WhatsApp skipped:', psychologistWaResult.reason);
-        } else {
-          console.warn('⚠️ Psychologist WhatsApp send failed');
-        }
-      } else {
-        console.log('ℹ️ No psychologist phone or meet link; skipping psychologist WhatsApp');
-      }
-    } catch (waError) {
-      console.error('❌ WhatsApp notification error:', waError);
-    }
+    // TEMPORARY: Auto booking notifications are disabled.
+    // (Disabled: email + WhatsApp on new booking)
+    console.log('ℹ️ Booking notifications are temporarily disabled (sessionController.bookSession).');
 
     res.status(201).json(
       successResponse({
@@ -376,7 +278,10 @@ const getAllSessions = async (req, res) => {
       );
     }
 
-    const { page = 1, limit = 10, status, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc' } = req.query;
+    const { supabaseAdmin } = require('../config/supabase');
+    const adminBookingTimeCol = await getBookingTimeColumnKey(supabaseAdmin);
+
+    const { page = 1, limit = 10, status, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc', search = '' } = req.query;
 
     // ?status=booked&status=rescheduled OR ?status=booked,rescheduled OR ?status=booked
     const normalizeStatusList = (raw) => {
@@ -402,7 +307,6 @@ const getAllSessions = async (req, res) => {
 
     // First, get the total count of sessions (without pagination)
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
-    const { supabaseAdmin } = require('../config/supabase');
     let countQuery = supabaseAdmin
       .from('sessions')
       .select('*', { count: 'exact', head: true })
@@ -419,11 +323,12 @@ const getAllSessions = async (req, res) => {
     if (date) {
       countQuery = countQuery.eq('scheduled_date', date);
     }
+    // Date range filter uses booking_created_at when the column exists, else created_at.
     if (dateFrom) {
-      countQuery = countQuery.gte('scheduled_date', dateFrom);
+      countQuery = countQuery.gte(adminBookingTimeCol, `${dateFrom}T00:00:00+05:30`);
     }
     if (dateTo) {
-      countQuery = countQuery.lte('scheduled_date', dateTo);
+      countQuery = countQuery.lte(adminBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
     }
     // Note: free_assessment exclusion already applied above
 
@@ -473,18 +378,20 @@ const getAllSessions = async (req, res) => {
     if (date) {
       query = query.eq('scheduled_date', date);
     }
+    // Filter by client booking time column (see getBookingTimeColumnKey).
     if (dateFrom) {
-      query = query.gte('scheduled_date', dateFrom);
+      query = query.gte(adminBookingTimeCol, `${dateFrom}T00:00:00+05:30`);
     }
     if (dateTo) {
-      query = query.lte('scheduled_date', dateTo);
+      query = query.lte(adminBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
     }
 
     // Apply sorting (scheduled_time as tiebreaker so "All" matches Booked-style ordering)
     if (sort && order) {
       const asc = order === 'asc';
-      query = query.order(sort, { ascending: asc });
-      if (sort === 'scheduled_date') {
+      const sortCol = sort === 'created_at' ? adminBookingTimeCol : sort;
+      query = query.order(sortCol, { ascending: asc });
+      if (sortCol === 'scheduled_date') {
         query = query.order('scheduled_time', { ascending: asc });
       }
     }
@@ -501,6 +408,12 @@ const getAllSessions = async (req, res) => {
           `Failed to fetch sessions: ${error.message || 'unknown'}${error.code ? ` [${error.code}]` : ''}${error.details ? ` — ${error.details}` : ''}`
         )
       );
+    }
+
+    if (sessions && sessions.length) {
+      sessions.forEach((s) => {
+        s.booking_created_at = getSessionBookingCreatedAtIso(s);
+      });
     }
 
     // Fetch package data for sessions that have package_id
@@ -521,11 +434,12 @@ const getAllSessions = async (req, res) => {
           }, {});
 
           // Fetch ALL sessions per package to determine session numbers and completed counts
+          const pkgBcf = appendBookingTimeSelectFragment(adminBookingTimeCol);
           const { data: allPackageSessions, error: allPackageSessionsError } = await supabaseAdmin
             .from('sessions')
-            .select('id, package_id, client_id, status, created_at')
+            .select(`id, package_id, client_id, status, created_at, ${pkgBcf} wix_payload, source`)
             .in('package_id', packageIds)
-            .order('created_at', { ascending: true });
+            .order(adminBookingTimeCol, { ascending: true });
 
           const completedCountsByClientPackage = {};
           const sessionNumberMap = {};
@@ -659,7 +573,77 @@ const getAllSessions = async (req, res) => {
         }
       }
 
-      const { data: assessData, error: assessError } = await assessQuery;
+      let { data: assessData, error: assessError } = await assessQuery;
+
+      // Schema fallback:
+      // If FK embed relationships are missing (assessment_sessions -> clients/psychologists/assessments),
+      // fetch flat rows and enrich manually.
+      if (assessError && String(assessError.message || '').includes('Could not find a relationship')) {
+        let flatQuery = supabaseAdmin
+          .from('assessment_sessions')
+          .select('id, assessment_id, assessment_slug, client_id, psychologist_id, scheduled_date, scheduled_time, status, amount, payment_id, session_number, created_at, updated_at');
+
+        flatQuery = applySessionStatusFilter(flatQuery);
+        if (psychologist_id) flatQuery = flatQuery.eq('psychologist_id', psychologist_id);
+        if (client_id) flatQuery = flatQuery.eq('client_id', client_id);
+        if (date) flatQuery = flatQuery.eq('scheduled_date', date);
+        if (dateFrom) flatQuery = flatQuery.gte('scheduled_date', dateFrom);
+        if (dateTo) flatQuery = flatQuery.lte('scheduled_date', dateTo);
+        if (sort && order) {
+          const asc = order === 'asc';
+          flatQuery = flatQuery.order(sort, { ascending: asc });
+          if (sort === 'scheduled_date') {
+            flatQuery = flatQuery.order('scheduled_time', { ascending: asc });
+          }
+        }
+
+        const { data: flatData, error: flatError } = await flatQuery;
+        if (!flatError && flatData) {
+          const clientIds = [...new Set(flatData.map(r => r.client_id).filter(Boolean))];
+          const psychIds = [...new Set(flatData.map(r => r.psychologist_id).filter(Boolean))];
+          const assessIds = [...new Set(flatData.map(r => r.assessment_id).filter(Boolean))];
+
+          let clients = [];
+          let psychologists = [];
+          let assessments = [];
+
+          if (clientIds.length) {
+            const { data } = await supabaseAdmin
+              .from('clients')
+              .select('id, user_id, first_name, last_name, child_name, child_age, phone_number')
+              .in('id', clientIds);
+            clients = data || [];
+          }
+          if (psychIds.length) {
+            const { data } = await supabaseAdmin
+              .from('psychologists')
+              .select('id, first_name, last_name, area_of_expertise, email')
+              .in('id', psychIds);
+            psychologists = data || [];
+          }
+          if (assessIds.length) {
+            const { data } = await supabaseAdmin
+              .from('assessments')
+              .select('id, slug, hero_title, seo_title')
+              .in('id', assessIds);
+            assessments = data || [];
+          }
+
+          const clientMap = new Map(clients.map(c => [c.id, c]));
+          const psychMap = new Map(psychologists.map(p => [p.id, p]));
+          const assessmentMap = new Map(assessments.map(a => [a.id, a]));
+
+          assessData = flatData.map(r => ({
+            ...r,
+            client: clientMap.get(r.client_id) || null,
+            psychologist: psychMap.get(r.psychologist_id) || null,
+            assessment: assessmentMap.get(r.assessment_id) || null
+          }));
+          assessError = null;
+        } else {
+          assessError = flatError || assessError;
+        }
+      }
 
       if (assessError) {
         console.error('Error fetching assessment sessions:', assessError);
@@ -740,7 +724,7 @@ const getAllSessions = async (req, res) => {
 
     const nowMs = Date.now();
 
-    const allSessions = [...(sessions || []), ...assessmentSessions]
+    let allSessions = [...(sessions || []), ...assessmentSessions]
       .sort((a, b) => {
         if (sort === 'scheduled_date') {
           const aMs = scheduledDateTimeMs(a);
@@ -755,17 +739,36 @@ const getAllSessions = async (req, res) => {
           return order === 'asc' ? aMs - bMs : bMs - aMs;
         }
         if (sort === 'created_at') {
-          const aVal = a[sort] ? new Date(a[sort]) : new Date(0);
-          const bVal = b[sort] ? new Date(b[sort]) : new Date(0);
+          const aIso = getSessionBookingCreatedAtIso(a) || a.created_at;
+          const bIso = getSessionBookingCreatedAtIso(b) || b.created_at;
+          const aVal = aIso ? new Date(aIso) : new Date(0);
+          const bVal = bIso ? new Date(bIso) : new Date(0);
           return order === 'asc' ? aVal - bVal : bVal - aVal;
         }
         return 0;
       });
 
+    // Apply search filtering after relation hydration to keep total count aligned with filters.
+    const searchTerm = String(search || '').trim().toLowerCase();
+    if (searchTerm) {
+      allSessions = allSessions.filter((s) => {
+        const sessionId = String(s?.id || '').toLowerCase();
+        const clientName = `${s?.client?.first_name || ''} ${s?.client?.last_name || ''}`.toLowerCase();
+        const clientEmail = String(s?.client?.user?.email || '').toLowerCase();
+        const psychologistName = `${s?.psychologist?.first_name || ''} ${s?.psychologist?.last_name || ''}`.toLowerCase();
+        return (
+          sessionId.includes(searchTerm) ||
+          clientName.includes(searchTerm) ||
+          clientEmail.includes(searchTerm) ||
+          psychologistName.includes(searchTerm)
+        );
+      });
+    }
+
     // Apply pagination to combined results
     // Note: Since we're combining two different tables, we need to paginate in memory
     // The total is the sum of both counts
-    const totalSessions = (sessionsCount || 0) + (assessmentSessionsCount || 0);
+    const totalSessions = allSessions.length;
     const startIndex = (page - 1) * parseInt(limit);
     const endIndex = startIndex + parseInt(limit);
     const paginatedSessions = allSessions.slice(startIndex, endIndex);
@@ -1010,7 +1013,8 @@ const getSessionById = async (req, res) => {
       const normalized = {
         ...assessSession,
         session_type: 'assessment',
-        type: 'assessment'
+        type: 'assessment',
+        booking_created_at: assessSession.created_at || null,
       };
       return res.json(successResponse({ session: normalized }));
     }
@@ -1103,6 +1107,8 @@ const getSessionById = async (req, res) => {
         completed_sessions: session.package.completed_sessions
       } : null
     });
+
+    session.booking_created_at = getSessionBookingCreatedAtIso(session);
 
     res.json(
       successResponse({ session })
@@ -2182,7 +2188,8 @@ const completeSession = async (req, res) => {
             ? 'our specialist'
             : `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim() || 'our specialist';
           // Always use production URL in WhatsApp/email links (never localhost)
-          const PRODUCTION_SITE_URL = 'https://www.little.care';
+          const PRODUCTION_SITE_URL =
+            process.env.SITE_URL || process.env.PUBLIC_APP_URL || 'https://www.koott.in';
           const bookingLink = `${PRODUCTION_SITE_URL}/psychologists`;
           const feedbackLink = isFreeAssessment 
             ? `${PRODUCTION_SITE_URL}/profile/sessions?tab=completed`

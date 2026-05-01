@@ -15,13 +15,9 @@ const { supabaseAdmin } = require('../config/supabase');
 const meetLinkService = require('../utils/meetLinkService');
 const { addMinutesToTime } = require('../utils/helpers');
 const { resolveSessionDurationMinutes } = require('../utils/sessionMeetDuration');
-const interakt = require('../utils/interaktService');
-const emailService = require('../utils/emailService');
 
 const LOG_PREFIX = '[wixMeetNotify]';
 
-// Dashboard URL for login links (env override or sensible default)
-const DASHBOARD_URL = process.env.FRONTEND_URL || 'https://koott.in';
 
 /**
  * Process newly upserted Wix sessions that don't yet have a Google Meet link.
@@ -74,6 +70,9 @@ async function processNewWixSessions(wixBookingIds) {
  * Returns 'processed' | 'skipped'.
  */
 async function processOneSession(session) {
+  // TEMPORARY: disable auto Google Meet scheduling for Wix-created bookings.
+  const DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING = true;
+
   // Skip cancelled sessions
   const status = String(session.status || '').toLowerCase();
   if (status === 'cancelled' || status === 'canceled') {
@@ -138,12 +137,6 @@ async function processOneSession(session) {
     : clientDetails.user;
   const clientEmail = clientUserData?.email;
 
-  // Detect newly created client account:
-  // If user was created within the last 60 seconds, it's a new account
-  const clientUserCreatedAt = clientUserData?.created_at;
-  const isNewClientAccount = clientUserCreatedAt
-    ? (Date.now() - new Date(clientUserCreatedAt).getTime()) < 60_000
-    : false;
 
   // ── Duration ──────────────────────────────────────────────────────────
   const meetDurationMinutes = resolveSessionDurationMinutes({
@@ -176,193 +169,58 @@ async function processOneSession(session) {
     };
   }
 
-  console.log(`${LOG_PREFIX} creating Meet link for session ${session.id} (wix: ${session.wix_booking_id})`);
-
-  const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
-
-  // ── Save Meet link to session ─────────────────────────────────────────
-  if (meetResult.success && meetResult.meetLink) {
-    // Try full update first; fall back to just google_meet_link if extra columns don't exist
-    let { error: updateError } = await supabaseAdmin
-      .from('sessions')
-      .update({
-        google_meet_link: meetResult.meetLink,
-        google_meet_join_url: meetResult.meetLink,
-        google_meet_start_url: meetResult.meetLink,
-        google_calendar_event_id: meetResult.eventId || null,
-      })
-      .eq('id', session.id);
-
-    // Fallback: if columns are missing, just save the meet link
-    if (updateError && updateError.message && updateError.message.includes('column')) {
-      console.warn(`${LOG_PREFIX} some columns missing, falling back to google_meet_link only`);
-      ({ error: updateError } = await supabaseAdmin
-        .from('sessions')
-        .update({ google_meet_link: meetResult.meetLink })
-        .eq('id', session.id));
-    }
-
-    if (updateError) {
-      console.error(`${LOG_PREFIX} failed to save Meet link for session ${session.id}:`, updateError.message);
-      // Still try to send notifications with the link we have
-    } else {
-      const method = meetResult.method || 'unknown';
-      console.log(`${LOG_PREFIX} ✅ Meet link saved for session ${session.id}:`, {
-        method,
-        meetLink: meetResult.meetLink,
-        hasOAuth: !!userAuth,
-      });
-    }
+  if (DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING) {
+    console.log(`${LOG_PREFIX} Google Meet auto-scheduling temporarily disabled for session ${session.id}`);
   } else {
-    console.warn(`${LOG_PREFIX} ⚠️ Meet link creation failed for session ${session.id}:`, {
-      error: meetResult.error,
-      method: meetResult.method,
-    });
-    // Continue to send WhatsApp even without a real Meet link
-  }
+    console.log(`${LOG_PREFIX} creating Meet link for session ${session.id} (wix: ${session.wix_booking_id})`);
 
-  const meetLink = meetResult.meetLink || null;
+    const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
 
-  // ── Send WhatsApp booking confirmation to client (via Interakt) ────────
-  try {
-    const clientPhone = clientDetails.phone_number || null;
+    // ── Save Meet link to session ─────────────────────────────────────────
+    if (meetResult.success && meetResult.meetLink) {
+      // Try full update first; fall back to just google_meet_link if extra columns don't exist
+      let { error: updateError } = await supabaseAdmin
+        .from('sessions')
+        .update({
+          google_meet_link: meetResult.meetLink,
+          google_meet_join_url: meetResult.meetLink,
+          google_meet_start_url: meetResult.meetLink,
+          google_calendar_event_id: meetResult.eventId || null,
+        })
+        .eq('id', session.id);
 
-    if (clientPhone) {
-      const waDetails = {
-        clientName,
-        psychologistName,
-        date: session.scheduled_date,
-        time: session.scheduled_time,
-        meetLink,
-      };
-
-      const clientWaResult = await interakt.sendBookingConfirmation(clientPhone, waDetails);
-      if (clientWaResult?.success) {
-        console.log(`${LOG_PREFIX} ✅ Interakt booking confirmation sent to client for session ${session.id}`);
-      } else if (clientWaResult?.skipped) {
-        console.log(`${LOG_PREFIX} ℹ️ Client WhatsApp skipped:`, clientWaResult.reason);
-      } else {
-        console.warn(`${LOG_PREFIX} ⚠️ Client WhatsApp failed:`, clientWaResult?.error || 'Unknown');
+      // Fallback: if columns are missing, just save the meet link
+      if (updateError && updateError.message && updateError.message.includes('column')) {
+        console.warn(`${LOG_PREFIX} some columns missing, falling back to google_meet_link only`);
+        ({ error: updateError } = await supabaseAdmin
+          .from('sessions')
+          .update({ google_meet_link: meetResult.meetLink })
+          .eq('id', session.id));
       }
-    } else {
-      console.log(`${LOG_PREFIX} ℹ️ No client phone for session ${session.id}; skipping client WhatsApp`);
-    }
-  } catch (waErr) {
-    console.error(`${LOG_PREFIX} client WhatsApp error for session ${session.id}:`, waErr.message || waErr);
-  }
 
-  // ── Send welcome credentials to newly created client (via Interakt) ───
-  if (isNewClientAccount && clientEmail) {
-    try {
-      const clientPhone = clientDetails.phone_number || null;
-
-      if (clientPhone) {
-        const localPart = clientEmail.split('@')[0] || 'user';
-        const suffix = localPart.slice(0, 4).toLowerCase();
-        const tempPassword = `Welcome@${suffix}`;
-
-        const welcomeResult = await interakt.sendWelcomeClient(clientPhone, {
-          email: clientEmail,
-          tempPassword,
-          loginUrl: `${DASHBOARD_URL}/login`,
+      if (updateError) {
+        console.error(`${LOG_PREFIX} failed to save Meet link for session ${session.id}:`, updateError.message);
+        // Still try to send notifications with the link we have
+      } else {
+        const method = meetResult.method || 'unknown';
+        console.log(`${LOG_PREFIX} ✅ Meet link saved for session ${session.id}:`, {
+          method,
+          meetLink: meetResult.meetLink,
+          hasOAuth: !!userAuth,
         });
-        if (welcomeResult?.success) {
-          console.log(`${LOG_PREFIX} ✅ Interakt welcome credentials sent to client for session ${session.id}`);
-        } else {
-          console.warn(`${LOG_PREFIX} ⚠️ Client welcome message failed:`, welcomeResult?.error || 'Unknown');
-        }
-      }
-    } catch (welcomeErr) {
-      console.error(`${LOG_PREFIX} client welcome WhatsApp error:`, welcomeErr.message || welcomeErr);
-    }
-  }
-
-  // ── Send WhatsApp session notification to psychologist (via Interakt) ─
-  try {
-    const psychologistPhone = psychologistDetails.phone || null;
-
-    if (psychologistPhone && meetLink) {
-      const notifResult = await interakt.sendSessionNotificationPsychologist(psychologistPhone, {
-        clientName,
-        date: session.scheduled_date,
-        time: session.scheduled_time,
-        durationMinutes: meetDurationMinutes,
-        meetLink,
-      });
-      if (notifResult?.success) {
-        console.log(`${LOG_PREFIX} ✅ Interakt session notification sent to psychologist for session ${session.id}`);
-      } else if (notifResult?.skipped) {
-        console.log(`${LOG_PREFIX} ℹ️ Psychologist WhatsApp skipped:`, notifResult.reason);
-      } else {
-        console.warn(`${LOG_PREFIX} ⚠️ Psychologist WhatsApp failed:`, notifResult?.error || 'Unknown');
       }
     } else {
-      if (!psychologistPhone) {
-        console.log(`${LOG_PREFIX} ℹ️ No psychologist phone for session ${session.id}; skipping psychologist WhatsApp`);
-      }
-      if (!meetLink) {
-        console.log(`${LOG_PREFIX} ℹ️ No Meet link for session ${session.id}; skipping psychologist WhatsApp`);
-      }
-    }
-  } catch (waErr) {
-    console.error(`${LOG_PREFIX} psychologist WhatsApp error for session ${session.id}:`, waErr.message || waErr);
-  }
-
-  // ── Send Emails ────────────────────────────────────────────────────────
-  try {
-    // 1. Send Session Confirmation Email
-    const sessionEmailData = {
-      clientName,
-      psychologistName,
-      clientEmail: clientEmail || null,
-      psychologistEmail: psychologistDetails.email || null,
-      scheduledDate: session.scheduled_date,
-      scheduledTime: session.scheduled_time,
-      googleMeetLink: meetLink,
-      sessionId: session.id,
-      price: session.price,
-      status: session.status,
-      psychologistId: session.psychologist_id,
-      clientId: session.client_id,
-      session_type: session.session_type,
-    };
-
-    // sendSessionConfirmation handles sending to client, psychologist, and admin
-    // Welcome email is sent by wixClientResolverService at account-creation time — not here.
-    await emailService.sendSessionConfirmation(sessionEmailData);
-    console.log(`${LOG_PREFIX} ✅ Session confirmation emails sent for session ${session.id}`);
-  } catch (emailErr) {
-    console.error(`${LOG_PREFIX} email sending error for session ${session.id}:`, emailErr.message || emailErr);
-  }
-
-  // ── Send welcome credentials to newly created psychologist (via Interakt) ─
-  const psychCreatedAt = psychologistDetails.created_at;
-  const isNewPsychAccount = psychCreatedAt
-    ? (Date.now() - new Date(psychCreatedAt).getTime()) < 60_000
-    : false;
-
-  if (isNewPsychAccount && psychologistDetails.email && psychologistDetails.phone) {
-    try {
-      const localPart = psychologistDetails.email.split('@')[0] || 'user';
-      const suffix = localPart.slice(0, 4).toLowerCase();
-      const tempPassword = `Welcome@${suffix}`;
-
-      const welcomeResult = await interakt.sendWelcomePsychologist(psychologistDetails.phone, {
-        email: psychologistDetails.email,
-        tempPassword,
-        loginUrl: `${DASHBOARD_URL}/psychologist/login`,
+      console.warn(`${LOG_PREFIX} ⚠️ Meet link creation failed for session ${session.id}:`, {
+        error: meetResult.error,
+        method: meetResult.method,
       });
-      if (welcomeResult?.success) {
-        console.log(`${LOG_PREFIX} ✅ Interakt welcome credentials sent to psychologist for session ${session.id}`);
-      } else {
-        console.warn(`${LOG_PREFIX} ⚠️ Psychologist welcome message failed:`, welcomeResult?.error || 'Unknown');
-      }
-
-      // Welcome email sent by wixPsychologistResolverService at account-creation time — not here.
-    } catch (welcomeErr) {
-      console.error(`${LOG_PREFIX} psychologist welcome WhatsApp error:`, welcomeErr.message || welcomeErr);
+      // Continue to send WhatsApp even without a real Meet link
     }
   }
+
+  // TEMPORARY: Disable all auto booking notifications for Wix-created sessions.
+  // (email + WhatsApp to client/psychologist)
+  console.log(`${LOG_PREFIX} notifications temporarily disabled for session ${session.id}`);
 
   return 'processed';
 }

@@ -471,6 +471,9 @@ class MeetLinkCreationQueue {
     const { addMinutesToTime } = require('../utils/helpers');
     const endTime = addMinutesToTime(slotLock.scheduled_time, meetDurationMinutes);
 
+    // TEMPORARY: disable auto Google Meet scheduling for new bookings.
+    const DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING = true;
+
     // Create Google Meet link
     // Handle client name: prefer child_name, but skip if it's "Pending" or empty
     let clientName = clientDetails.child_name;
@@ -512,55 +515,59 @@ class MeetLinkCreationQueue {
       };
     }
 
-    const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
-
-    if (meetResult.success && meetResult.meetLink) {
-      const { error: updateError } = await supabaseAdmin
-        .from('sessions')
-        .update({ 
-          google_meet_link: meetResult.meetLink,
-          google_meet_join_url: meetResult.meetLink,
-          google_meet_start_url: meetResult.meetLink,
-          google_calendar_event_id: meetResult.eventId || null
-        })
-        .eq('id', session.id);
-      
-      if (updateError) {
-        console.error('❌ Error updating session with meet link:', updateError);
-        throw new Error(`Failed to update session with meet link: ${updateError.message}`);
-      } else {
-        // Log which method was used to create the Meet link
-        const method = meetResult.method || 'unknown';
-        const isRealLink = method !== 'fallback' && meetResult.meetLink && !meetResult.meetLink.includes('meet.google.com/new');
-        const methodDescription = {
-          'oauth': '✅ Real Meet link created via OAuth (psychologist calendar)',
-          'oauth_calendar': '✅ Real Meet link created via OAuth (psychologist calendar)',
-          'calendar_service_account': '✅ Real Meet link created via Service Account (shared calendar)',
-          'service_account_limitation': '⚠️ Service account limitation - Meet link may require manual creation',
-          'calendar_error': '❌ Calendar API error - using fallback',
-          'fallback': '⚠️ Fallback Meet link (manual creation may be required)',
-          'unknown': '❓ Meet link created (method unknown)'
-        };
-        
-        console.log('✅ Meet link created and saved to session:', {
-          meetLink: meetResult.meetLink,
-          method: method,
-          isRealLink: isRealLink,
-          description: methodDescription[method] || methodDescription['unknown'],
-          eventId: meetResult.eventId || null,
-          eventLink: meetResult.eventLink || null,
-          hasOAuth: !!userAuth,
-          hasPsychologistCredentials: !!psychologistDetails.google_calendar_credentials,
-          error: meetResult.error || null
-        });
-      }
+    if (DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING) {
+      console.log('ℹ️ Google Meet auto-scheduling is temporarily disabled (sessionCreationService).');
     } else {
-      console.warn('⚠️ Meet link creation failed or returned fallback:', {
-        error: meetResult.error,
-        method: meetResult.method,
-        meetLink: meetResult.meetLink
-      });
-      // Don't throw - fallback link is acceptable
+      const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
+
+      if (meetResult.success && meetResult.meetLink) {
+        const { error: updateError } = await supabaseAdmin
+          .from('sessions')
+          .update({ 
+            google_meet_link: meetResult.meetLink,
+            google_meet_join_url: meetResult.meetLink,
+            google_meet_start_url: meetResult.meetLink,
+            google_calendar_event_id: meetResult.eventId || null
+          })
+          .eq('id', session.id);
+        
+        if (updateError) {
+          console.error('❌ Error updating session with meet link:', updateError);
+          throw new Error(`Failed to update session with meet link: ${updateError.message}`);
+        } else {
+          // Log which method was used to create the Meet link
+          const method = meetResult.method || 'unknown';
+          const isRealLink = method !== 'fallback' && meetResult.meetLink && !meetResult.meetLink.includes('meet.google.com/new');
+          const methodDescription = {
+            'oauth': '✅ Real Meet link created via OAuth (psychologist calendar)',
+            'oauth_calendar': '✅ Real Meet link created via OAuth (psychologist calendar)',
+            'calendar_service_account': '✅ Real Meet link created via Service Account (shared calendar)',
+            'service_account_limitation': '⚠️ Service account limitation - Meet link may require manual creation',
+            'calendar_error': '❌ Calendar API error - using fallback',
+            'fallback': '⚠️ Fallback Meet link (manual creation may be required)',
+            'unknown': '❓ Meet link created (method unknown)'
+          };
+          
+          console.log('✅ Meet link created and saved to session:', {
+            meetLink: meetResult.meetLink,
+            method: method,
+            isRealLink: isRealLink,
+            description: methodDescription[method] || methodDescription['unknown'],
+            eventId: meetResult.eventId || null,
+            eventLink: meetResult.eventLink || null,
+            hasOAuth: !!userAuth,
+            hasPsychologistCredentials: !!psychologistDetails.google_calendar_credentials,
+            error: meetResult.error || null
+          });
+        }
+      } else {
+        console.warn('⚠️ Meet link creation failed or returned fallback:', {
+          error: meetResult.error,
+          method: meetResult.method,
+          meetLink: meetResult.meetLink
+        });
+        // Don't throw - fallback link is acceptable
+      }
     }
 
     // Generate receipt before sending emails
@@ -602,166 +609,10 @@ class MeetLinkCreationQueue {
       // Continue even if receipt generation fails
     }
 
-    // Send confirmation emails with receipt
-    try {
-      // Use client_name from receiptDetails if available (first_name + last_name), otherwise use computed clientName
-      const emailClientName = receiptResult?.receiptDetails?.client_name || clientName;
-      
-      const emailResult = await emailService.sendSessionConfirmation({
-        clientName: emailClientName,
-        psychologistName: psychologistName,
-        clientEmail: clientEmail || clientDetails.user?.email,
-        psychologistEmail: psychologistDetails.email,
-        scheduledDate: slotLock.scheduled_date,
-        scheduledTime: slotLock.scheduled_time,
-        sessionDate: slotLock.scheduled_date,
-        sessionTime: slotLock.scheduled_time,
-        googleMeetLink: meetResult.meetLink,
-        meetLink: meetResult.meetLink,
-        googleCalendarEventId: meetResult.eventId,
-        sessionId: session.id,
-        price: paymentRecord.amount,
-        amount: paymentRecord.amount,
-        durationMinutes: meetDurationMinutes,
-        status: session.status || 'booked',
-        psychologistId: slotLock.psychologist_id,
-        clientId: slotLock.client_id,
-        packageInfo: packageInfo, // Include package details
-        receiptId: receiptResult?.receiptId || null, // Pass receipt ID for reference
-        receiptNumber: receiptResult?.receiptNumber || null,
-        receiptPdfBuffer: receiptResult?.pdfBuffer || null // Pass PDF buffer to attach to email
-      });
-      
-      if (emailResult) {
-        console.log('✅ Confirmation emails sent successfully');
-      } else {
-        console.warn('⚠️ Email sending returned false - check email service logs');
-      }
-    } catch (emailError) {
-      console.error('❌ Error sending confirmation emails:', emailError);
-      // Continue - don't block the process
-    }
-
-    // Send WhatsApp notifications to both client and psychologist
-    try {
-      console.log('📱 Sending WhatsApp notifications...');
-      const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-      
-      // Send WhatsApp to client
-      const clientPhone = clientDetails.phone_number || null;
-      if (clientPhone && meetResult.meetLink) {
-        // Only include childName if child_name exists and is not empty/null/'Pending'
-        const childName = clientDetails.child_name && 
-          clientDetails.child_name.trim() !== '' && 
-          clientDetails.child_name.toLowerCase() !== 'pending'
-          ? clientDetails.child_name 
-          : null;
-        
-        // Get client name from receiptDetails (first_name + last_name) for receipt filename
-        const receiptClientName = receiptResult?.receiptDetails?.client_name || 
-                                  `${clientDetails.first_name || ''} ${clientDetails.last_name || ''}`.trim() || null;
-        
-        const clientDetails_wa = {
-          childName: childName,
-          date: slotLock.scheduled_date,
-          time: slotLock.scheduled_time,
-          meetLink: meetResult.meetLink,
-          psychologistName: psychologistName,
-          durationMinutes: meetDurationMinutes,
-          packageInfo: packageInfo, // Include package details
-          receiptPdfBuffer: receiptResult?.pdfBuffer || null,
-          receiptNumber: receiptResult?.receiptNumber || null,
-          clientName: receiptClientName // Client name (first_name + last_name) for receipt filename
-        };
-        
-        const clientWaResult = await sendBookingConfirmation(clientPhone, clientDetails_wa);
-        if (clientWaResult?.success) {
-          console.log('✅ WhatsApp confirmation sent to client');
-        } else if (clientWaResult?.skipped) {
-          console.log('ℹ️ Client WhatsApp skipped:', clientWaResult.reason);
-        } else {
-          console.warn('⚠️ Client WhatsApp send failed:', clientWaResult?.error || 'Unknown error');
-        }
-      } else {
-        console.log('ℹ️ No client phone or meet link; skipping client WhatsApp');
-      }
-
-      // Send WhatsApp to psychologist
-      const psychologistPhone = psychologistDetails.phone || null;
-      if (psychologistPhone && meetResult.meetLink) {
-        // Format date and time using the same functions as client messages
-        const formatBookingDateShort = (dateStr) => {
-          if (!dateStr) return '';
-          try {
-            const d = new Date(`${dateStr}T00:00:00+05:30`);
-            return d.toLocaleDateString('en-IN', {
-              weekday: 'short',
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric',
-              timeZone: 'Asia/Kolkata'
-            });
-          } catch {
-            return dateStr;
-          }
-        };
-        
-        const formatFriendlyTime = (timeStr) => {
-          if (!timeStr) return '';
-          try {
-            const [h, m] = timeStr.split(':');
-            const hours = parseInt(h, 10);
-            const minutes = parseInt(m || '0', 10);
-            const period = hours >= 12 ? 'PM' : 'AM';
-            const displayHours = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
-            const displayMinutes = minutes.toString().padStart(2, '0');
-            return `${displayHours}:${displayMinutes} ${period}`;
-          } catch {
-            return timeStr;
-          }
-        };
-        
-        const bullet = '•⁠  ⁠';
-        const formattedDate = formatBookingDateShort(slotLock.scheduled_date);
-        const formattedTime = formatFriendlyTime(slotLock.scheduled_time);
-        
-        // Package line (only for package sessions)
-        let packageLine = '';
-        if (packageInfo && packageInfo.totalSessions) {
-          const total = packageInfo.totalSessions || 0;
-          const completed = packageInfo.completedSessions || 0;
-          const remaining = packageInfo.remainingSessions || 0;
-          packageLine = `${bullet}Package: ${completed}/${total} sessions completed, ${remaining} remaining\n`;
-        }
-        
-        const psychologistMessage =
-          `Hey 👋\n\n` +
-          `New session booked with Koott.\n\n` +
-          `${bullet}Client: ${clientName}\n` +
-          packageLine +
-          `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n` +
-          `${bullet}Duration: ${meetDurationMinutes} min\n\n` +
-          `Join link:\n${meetResult.meetLink}\n\n` +
-          `Please be ready 5 mins early.\n\n` +
-          `For help: +91 95390 07766\n\n` +
-          `— Koott 💜`;
-        
-        const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
-        if (psychologistWaResult?.success) {
-          console.log('✅ WhatsApp notification sent to psychologist');
-        } else if (psychologistWaResult?.skipped) {
-          console.log('ℹ️ Psychologist WhatsApp skipped:', psychologistWaResult.reason);
-        } else {
-          console.warn('⚠️ Psychologist WhatsApp send failed:', psychologistWaResult?.error || 'Unknown error');
-        }
-      } else {
-        console.log('ℹ️ No psychologist phone or meet link; skipping psychologist WhatsApp');
-      }
-    } catch (whatsappError) {
-      console.error('❌ Error sending WhatsApp notifications:', whatsappError);
-      // Continue - don't block the process
-    }
+    // TEMPORARY: Auto booking notifications are disabled.
+    // Keep the existing code in git history; re-enable when needed.
+    // (Disabled: email to client/psychologist + WhatsApp to client/psychologist)
+    console.log('ℹ️ Booking notifications are temporarily disabled (sessionCreationService).');
   }
 }
 

@@ -6,7 +6,7 @@
 
 /**
  * Convert absolute proxy URL to relative URL
- * Converts: https://www.little.care/api/images/... → /api/images/...
+ * Converts: https://www.koott.in/api/images/... → /api/images/...
  * Or: http://localhost:3000/api/images/... → /api/images/...
  * @param {string} url - Absolute URL
  * @returns {string} Relative URL
@@ -50,7 +50,7 @@ function normalizeImageUrl(imageUrl) {
   // If it's already relative, return as-is
   if (imageUrl.startsWith('/')) return imageUrl;
   
-  // If it's a proxy URL (little.care or localhost), convert to relative
+  // If it's a proxy URL (production site or localhost), convert to relative
   if (imageUrl.includes('/api/images/')) {
     return convertToRelativeUrl(imageUrl);
   }

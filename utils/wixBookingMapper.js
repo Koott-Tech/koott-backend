@@ -205,6 +205,24 @@ function isoTime(isoLike) {
   return d.toISOString().slice(11, 19);
 }
 
+/** Wix/client booking creation instant (when they paid / placed the booking), not our sync instant. */
+function wixBookingCreatedIso(b) {
+  if (!b || typeof b !== 'object') return null;
+  const candidates = [
+    b.createdDate,
+    b._createdDate,
+    b.createdAt,
+    b.rawBookedEntity?.createdDate,
+    b.rawBookedEntity?._createdDate,
+    b.booking?.createdDate,
+  ].filter(Boolean);
+  for (const c of candidates) {
+    const d = new Date(String(c));
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  return null;
+}
+
 function discoverRowToSessionDb(booking) {
   const b = booking || {};
   if (!b || b.id == null || b.id === '' || b.id === 'null' || b.id === 'undefined') {
@@ -222,7 +240,9 @@ function discoverRowToSessionDb(booking) {
   const amount = isZeroPayment ? 0 : parseAmount(
     (finalPaid != null && parseFloat(finalPaid) > 0) ? finalPaid : (planPriceRaw ?? b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount)
   );
-  const createdAt = b.createdDate || new Date().toISOString();
+  const fromWixInstant = wixBookingCreatedIso(b);
+  /** Keep sessions.created_at aligned with Wix booking time when payload provides it */
+  const createdAt = fromWixInstant || new Date().toISOString();
   const updatedAt = new Date().toISOString();
 
   return {
@@ -239,6 +259,7 @@ function discoverRowToSessionDb(booking) {
     price: amount,
     amount,
     wix_payload: b,
+    booking_created_at: fromWixInstant || createdAt,
     created_at: createdAt,
     updated_at: updatedAt,
   };
@@ -251,4 +272,5 @@ module.exports = {
   therapistNameFromBooking,
   sessionTypeFromBooking,
   sessionCountFromBooking,
+  wixBookingCreatedIso,
 };

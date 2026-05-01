@@ -215,8 +215,8 @@ class SecurityNotificationSystem extends EventEmitter {
             </div>
 
             <div class="actions">
-              <a href="https://www.little.care/admin/security" class="btn">View Dashboard</a>
-              <a href="https://www.little.care/admin/security/alerts" class="btn btn-danger">Manage Alerts</a>
+              <a href="${process.env.SITE_URL || process.env.CLIENT_SITE_URL || 'https://www.koott.in'}/admin/security" class="btn">View Dashboard</a>
+              <a href="${process.env.SITE_URL || process.env.CLIENT_SITE_URL || 'https://www.koott.in'}/admin/security/alerts" class="btn btn-danger">Manage Alerts</a>
             </div>
           </div>
 

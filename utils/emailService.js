@@ -1,8 +1,12 @@
 const nodemailer = require('nodemailer');
 const { resolveSessionDurationMinutes } = require('./sessionMeetDuration');
 
-// Always use production site in emails/links (never localhost)
-const PRODUCTION_SITE_URL = 'https://www.little.care';
+// Public site base for email assets and links (override with SITE_URL or PUBLIC_APP_URL)
+const PRODUCTION_SITE_URL = (
+  process.env.SITE_URL ||
+  process.env.PUBLIC_APP_URL ||
+  'https://www.koott.in'
+).replace(/\/+$/, '');
 
 // Shared helper: Format time string (HH:MM:SS or HH:MM) to 12-hour format (h:mm AM/PM IST)
 // Time is already stored in IST format, so no timezone conversion needed
@@ -43,9 +47,9 @@ class EmailService {
   addEmailHeaders(mailOptions) {
     return {
       ...mailOptions,
-      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'support@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'hey@koott.com',
       headers: {
-        'Message-ID': `<${Date.now()}-${Math.random().toString(36).substring(7)}@little.care>`,
+        'Message-ID': `<${Date.now()}-${Math.random().toString(36).substring(7)}@koott.com>`,
         'X-Mailer': 'Koott Platform',
         'List-Unsubscribe': process.env.EMAIL_UNSUBSCRIBE_URL || `<mailto:unsubscribe@koott.com>`,
         ...(mailOptions.headers || {})
@@ -385,7 +389,7 @@ class EmailService {
     const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
     
     // Contact information
-    const contactEmail = 'hey@little.care';
+    const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
 
     // Extract first name from clientName
@@ -413,10 +417,10 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care',
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com',
       to: to,
       subject: `Session Confirmed - ${scheduledDate} at ${scheduledTime}`,
       html: `
@@ -431,18 +435,19 @@ class EmailService {
             <tr>
               <td style="padding: 20px 10px;">
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-                  <!-- Header with Logo -->
+                  <!-- Header -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: #23153B; padding: 40px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
-                          <td align="center" style="padding-bottom: 15px;">
-                            <img src="${logoUrl}" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          <td align="center">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -1px;">KOOTT</h1>
+                            <p style="color: #ffffff; margin: 5px 0 0 0; font-size: 14px; opacity: 0.8; letter-spacing: 1px; text-transform: uppercase;">Professional Therapy</p>
                           </td>
                         </tr>
                         <tr>
-                          <td align="center">
-                            <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 600;">Session Confirmed</h1>
+                          <td align="center" style="padding-top: 25px;">
+                            <h2 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 600;">Session Confirmed</h2>
                           </td>
                         </tr>
                       </table>
@@ -455,7 +460,7 @@ class EmailService {
                       <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
-                        Your session with <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Koott</span> is scheduled.
+                        Your session with <span style="color: #23153B; font-weight: 600;">Koott</span> is scheduled.
                       </p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">Here are the details:</p>
@@ -475,11 +480,11 @@ class EmailService {
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="padding: 0 0 20px 0; text-align: center;">
-                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
+                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #23153B; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
                               Join Your Session
                             </a>
                             <p style="color: #4a5568; font-size: 13px; margin: 15px 0 0 0; word-break: break-all;">
-                              Or copy this link: <a href="${googleMeetLink}" style="color: #3f2e73; text-decoration: underline;">${googleMeetLink}</a>
+                              Or copy this link: <a href="${googleMeetLink}" style="color: #23153B; text-decoration: underline;">${googleMeetLink}</a>
                             </p>
                           </td>
                         </tr>
@@ -550,7 +555,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The <span style="font-style: italic; color: #3f2e73;">Koott</span> Team</strong>
+                        <strong style="color: #23153B;">The Koott Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -576,10 +581,10 @@ class EmailService {
       ...mailOptions,
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care'
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com'
     };
     
     return this.transporter.sendMail(finalMailOptions);
@@ -606,16 +611,16 @@ class EmailService {
     // Format price for display (convert to number if string, then format with commas)
     const formattedPrice = price ? (typeof price === 'number' ? price.toLocaleString('en-IN') : Number(price).toLocaleString('en-IN')) : null;
 
-    const contactEmail = 'hey@little.care';
+    const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
 
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care',
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com',
       to: to,
       subject: `New Session Scheduled - ${scheduledDate} at ${scheduledTime}`,
       html: `
@@ -630,18 +635,19 @@ class EmailService {
             <tr>
               <td style="padding: 20px 10px;">
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-                  <!-- Header with Logo -->
+                  <!-- Header -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: #23153B; padding: 40px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
-                          <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          <td align="center">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -1px;">KOOTT</h1>
+                            <p style="color: #ffffff; margin: 5px 0 0 0; font-size: 14px; opacity: 0.8; letter-spacing: 1px; text-transform: uppercase;">Therapist Dashboard</p>
                           </td>
                         </tr>
                         <tr>
-                          <td align="center">
-                            <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 600;">New Session Scheduled</h1>
+                          <td align="center" style="padding-top: 25px;">
+                            <h2 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 600;">New Session Scheduled</h2>
                           </td>
                         </tr>
                       </table>
@@ -816,7 +822,7 @@ class EmailService {
 
   async sendAdminNotification(emailData) {
     const { to, clientName, psychologistName, scheduledDate, scheduledTime, sessionId, clientId, packageId, packageInfo, price, isFreeAssessment, assessmentNumber } = emailData;
-    const contactEmail = 'hey@little.care';
+    const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
 
     // Session type and price for admin (free assessment, single, or package)
@@ -846,10 +852,10 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care',
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com',
       to: to,
       subject,
       html: `
@@ -870,7 +876,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1007,7 +1013,7 @@ class EmailService {
       reasonText
     } = emailData;
 
-    const contactEmail = 'hey@little.care';
+    const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
 
     // Format date for display (e.g. "Mon, 12 Jan 2026")
@@ -1035,10 +1041,10 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care',
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com',
       to: to,
       subject: `Reschedule Request - ${clientName} (${formattedFromDate} → ${formattedToDate})`,
       html: `
@@ -1059,7 +1065,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1194,7 +1200,7 @@ class EmailService {
       createdAt
     } = emailData;
 
-    const contactEmail = 'hey@little.care';
+    const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
 
     const roleLabel = role === 'client' ? 'Client' : role === 'psychologist' ? 'Psychologist' : role || 'User';
@@ -1206,10 +1212,10 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care',
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com',
       to: to,
       subject: `New ${roleLabel} Registered - ${fullName || email}`,
       html: `
@@ -1230,7 +1236,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1468,7 +1474,7 @@ class EmailService {
     const sessionType = isFreeAssessment ? 'free assessment' : 'therapy session';
     const sessionTypeTitle = isFreeAssessment ? 'Free Assessment' : 'Therapy Session';
 
-    const contactEmail = 'hey@little.care';
+    const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
 
     // Get logo URL - use favicon for email compatibility
@@ -1519,10 +1525,10 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care',
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com',
       to: to,
       subject: `Session Rescheduled - ${newDate} at ${newTime}`,
       html: `
@@ -1743,7 +1749,7 @@ class EmailService {
 
   async sendClientFreeAssessmentConfirmation(emailData) {
     const { to, clientName, psychologistName, assessmentDate, assessmentTime, assessmentNumber, googleMeetLink } = emailData;
-    const contactEmail = 'hey@little.care';
+    const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
     const totalAssessments = 3;
     const remainingAssessments = totalAssessments - assessmentNumber;
@@ -1751,10 +1757,10 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care',
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com',
       to: to,
       subject: `Free Assessment Confirmed - ${assessmentDate} at ${assessmentTime}`,
       html: `
@@ -1775,7 +1781,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1933,7 +1939,7 @@ Important Notes:
 - This is a free assessment session - no payment required
 - You have ${remainingAssessments} free assessment${remainingAssessments !== 1 ? 's' : ''} remaining
 
-If you need to cancel or reschedule, please contact us at least 24 hours in advance at hey@little.care or +91-9539007766.
+If you need to cancel or reschedule, please contact us at least 24 hours in advance at hey@koott.com or +91-9539007766.
 
 We look forward to meeting you!
 
@@ -1947,16 +1953,16 @@ The Koott Team
 
   async sendPsychologistFreeAssessmentNotification(emailData) {
     const { to, clientName, psychologistName, assessmentDate, assessmentTime, assessmentNumber, googleMeetLink } = emailData;
-    const contactEmail = 'hey@little.care';
+    const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
 
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'noreply@little.care',
-      sender: 'noreply@little.care',
+      replyTo: 'noreply@koott.com',
+      sender: 'noreply@koott.com',
       to: to,
       subject: `Free Assessment Scheduled - ${assessmentDate} at ${assessmentTime}`,
       html: `
@@ -1977,7 +1983,7 @@ The Koott Team
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -2120,10 +2126,10 @@ The Koott Team
       const mailOptions = {
         from: {
           name: 'Koott',
-          address: 'noreply@little.care'
+          address: 'noreply@koott.com'
         },
-        replyTo: 'noreply@little.care',
-        sender: 'noreply@little.care',
+        replyTo: 'noreply@koott.com',
+        sender: 'noreply@koott.com',
         to: to,
         subject: subject,
         html: html,
@@ -2160,16 +2166,16 @@ The Koott Team
 
       const recipientName = isPsychologist ? psychologistName : clientName;
       const otherParty = isPsychologist ? clientName : psychologistName;
-      const contactEmail = 'hey@little.care';
+      const contactEmail = 'hey@koott.com';
       const contactPhone = '+91-9539007766';
 
       const mailOptions = {
         from: {
           name: 'Koott',
-          address: 'noreply@little.care'
+          address: 'noreply@koott.com'
         },
-        replyTo: 'noreply@little.care',
-        sender: 'noreply@little.care',
+        replyTo: 'noreply@koott.com',
+        sender: 'noreply@koott.com',
         to: to,
         subject: 'Session Cancelled',
         html: `
@@ -2190,7 +2196,7 @@ The Koott Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2306,16 +2312,16 @@ The Koott Team
       });
       // Format time directly (no timezone conversion - time is already in IST)
       const formattedTime = formatTimeFromString(sessionTime);
-      const contactEmail = 'hey@little.care';
+      const contactEmail = 'hey@koott.com';
       const contactPhone = '+91-9539007766';
 
       const mailOptions = {
         from: {
           name: 'Koott',
-          address: 'noreply@little.care'
+          address: 'noreply@koott.com'
         },
-        replyTo: 'noreply@little.care',
-        sender: 'noreply@little.care',
+        replyTo: 'noreply@koott.com',
+        sender: 'noreply@koott.com',
         to: to,
         subject: 'No-Show Notice - Session Missed',
         html: `
@@ -2336,7 +2342,7 @@ The Koott Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2452,16 +2458,16 @@ The Koott Team
     clientEmail
   }) {
     try {
-      const contactEmail = 'hey@little.care';
+      const contactEmail = 'hey@koott.com';
       const contactPhone = '+91-9539007766';
 
       const mailOptions = {
         from: {
           name: 'Koott',
-          address: 'noreply@little.care'
+          address: 'noreply@koott.com'
         },
-        replyTo: 'noreply@little.care',
-        sender: 'noreply@little.care',
+        replyTo: 'noreply@koott.com',
+        sender: 'noreply@koott.com',
         to: clientEmail,
         subject: 'Session Completed - Summary & Report Available',
         html: `
@@ -2482,7 +2488,7 @@ The Koott Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2624,7 +2630,7 @@ The Koott Team
                     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                       <tr>
                         <td align="center" style="padding-bottom: 15px;">
-                          <img src="https://www.little.care/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                         </td>
                       </tr>
                       <tr>
@@ -2732,9 +2738,9 @@ The Koott Team
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'hey@little.care',
+      replyTo: 'hey@koott.com',
       to: to,
       subject: 'Welcome to Koott - Your Account Details',
       html: `
@@ -2824,7 +2830,7 @@ The Koott Team
                         <li>Track your progress over time</li>
                       </ul>
                       
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:hey@little.care" style="color: #3f2e73; text-decoration: none;">hey@little.care</a> or +91-9539007766</p>
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:hey@koott.com" style="color: #3f2e73; text-decoration: none;">hey@koott.com</a> or +91-9539007766</p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
@@ -2868,9 +2874,9 @@ The Koott Team
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@little.care'
+        address: 'noreply@koott.com'
       },
-      replyTo: 'hey@little.care',
+      replyTo: 'hey@koott.com',
       to: to,
       subject: 'Welcome to the Koott Team - Your Therapist Dashboard',
       html: `
@@ -2961,7 +2967,7 @@ The Koott Team
                         <li>Record session summaries and track progress</li>
                       </ul>
                       
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you need any technical assistance, please reach out to our support team at <a href="mailto:hey@little.care" style="color: #3f2e73; text-decoration: none;">hey@little.care</a>.</p>
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you need any technical assistance, please reach out to our support team at <a href="mailto:hey@koott.com" style="color: #3f2e73; text-decoration: none;">hey@koott.com</a>.</p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Welcome to the family!<br>

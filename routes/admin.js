@@ -62,6 +62,7 @@ router.get('/wix/discover-inspect', wixDiscoverController.discoverInspect);
 // Wix → Supabase mirror (`wix_bookings`)
 router.post('/wix/sync', wixBookingsController.syncWixBookings);
 router.get('/wix/bookings', wixBookingsController.listWixBookings);
+router.get('/wix/orphans', wixBookingsController.listWixOrphans);
 router.get('/wix/bookings/:id', wixBookingsController.getWixBookingDetails);
 router.patch('/wix/bookings/:id', wixBookingsController.editWixBooking);
 router.delete('/wix/bookings/:id', wixBookingsController.deleteWixBooking);

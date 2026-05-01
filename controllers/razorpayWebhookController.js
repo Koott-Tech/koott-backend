@@ -106,6 +106,8 @@ const handleRazorpayWebhook = async (req, res) => {
       return await handlePaymentCaptured(payload, eventId, res);
     } else if (event === 'payment.failed') {
       return await handlePaymentFailed(payload, eventId, res);
+    } else if (event === 'payment.refunded') {
+      return await handleRefundProcessed(payload, eventId, res);
     } else {
       console.log('ℹ️ Unhandled webhook event:', event);
       // Return 200 to acknowledge receipt (don't retry)
@@ -443,6 +445,94 @@ const handlePaymentCaptured = async (payload, eventId, res) => {
     return res.status(200).json(result);
   } else {
     return res.status(500).json(result);
+  }
+};
+
+/**
+ * Handle payment.refunded event
+ * 
+ * @param {Object} payload - Webhook payload
+ * @param {string} eventId - Event ID for logging
+ * @param {Object} res - Express response
+ */
+const handleRefundProcessed = async (payload, eventId, res) => {
+  try {
+    const payment = payload.payment?.entity;
+    const refund = payload.refund?.entity;
+    const paymentId = payment?.id || refund?.payment_id;
+    const orderId = payment?.order_id;
+
+    console.log('🔄 Refund processed:', {
+      paymentId,
+      orderId,
+      refundId: refund?.id,
+      amount: refund?.amount
+    });
+
+    if (paymentId) {
+      // 1. Update payment status
+      const { data: updatedPayment, error: paymentError } = await supabaseAdmin
+        .from('payments')
+        .update({
+          status: 'refunded',
+          updated_at: new Date().toISOString()
+        })
+        .eq('razorpay_payment_id', paymentId)
+        .select('id, session_id')
+        .maybeSingle();
+
+      if (!paymentError && updatedPayment) {
+        // 2. Update session status to refunded
+        if (updatedPayment.session_id) {
+          await supabaseAdmin
+            .from('sessions')
+            .update({
+              status: 'refunded',
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', updatedPayment.session_id);
+          
+          // 3. Delete or mark commission as refunded
+          await supabaseAdmin
+            .from('commission_history')
+            .delete()
+            .eq('session_id', updatedPayment.session_id);
+          
+          console.log(`✅ Session ${updatedPayment.session_id} and commission removed due to refund`);
+        }
+      }
+    } else if (orderId) {
+      // Fallback to order_id if payment_id not found
+       const { data: updatedPayment } = await supabaseAdmin
+        .from('payments')
+        .update({ status: 'refunded' })
+        .eq('razorpay_order_id', orderId)
+        .select('session_id')
+        .maybeSingle();
+      
+      if (updatedPayment?.session_id) {
+        await supabaseAdmin
+          .from('sessions')
+          .update({ status: 'refunded' })
+          .eq('id', updatedPayment.session_id);
+        
+        await supabaseAdmin
+          .from('commission_history')
+          .delete()
+          .eq('session_id', updatedPayment.session_id);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Refund processed and data updated'
+    });
+  } catch (error) {
+    console.error('❌ Exception in handleRefundProcessed:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
   }
 };
 

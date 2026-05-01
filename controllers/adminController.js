@@ -588,6 +588,12 @@ const createManualBooking = async (req, res) => {
     // ============================================
     // Send notifications asynchronously - don't block response
     (async () => {
+      const BOOKING_NOTIFICATIONS_TEMP_DISABLED = true;
+      if (BOOKING_NOTIFICATIONS_TEMP_DISABLED) {
+        console.log('ℹ️ [MANUAL BOOKING] Notifications temporarily disabled (email + WhatsApp)');
+        return;
+      }
+
       const sessionTypeLabel = packageData
         ? `Package of ${packageData.session_count}`
         : 'Individual session';
@@ -1565,8 +1571,24 @@ const getRecentBookings = async (req, res) => {
 
 const getAllPsychologists = async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin.from('psychologists').select('*').order('display_order', { ascending: true, nullsLast: true });
-    
+    let data = null;
+    let error = null;
+
+    // Primary sort for environments that have display_order.
+    ({ data, error } = await supabaseAdmin
+      .from('psychologists')
+      .select('*')
+      .order('display_order', { ascending: true, nullsLast: true }));
+
+    // Fallback for DBs where display_order column does not exist.
+    if (error && String(error.message || '').includes('display_order')) {
+      console.warn('display_order column missing; falling back to first_name ordering for psychologists list');
+      ({ data, error } = await supabaseAdmin
+        .from('psychologists')
+        .select('*')
+        .order('first_name', { ascending: true }));
+    }
+
     if (error) {
       console.error('Error fetching psychologists:', error);
       return res.status(500).json(errorResponse('Failed to fetch psychologists'));
@@ -1727,6 +1749,12 @@ const createPsychologist = async (req, res) => {
 
     if (psychologistError) {
       console.error('Psychologist creation error:', psychologistError);
+      const createMsg = String(psychologistError.message || '').toLowerCase();
+      if (psychologistError.code === '23505' || createMsg.includes('duplicate') || createMsg.includes('unique')) {
+        return res.status(400).json(
+          errorResponse('Psychologist with this email already exists')
+        );
+      }
       return res.status(500).json(
         errorResponse('Failed to create psychologist')
       );
@@ -1999,6 +2027,12 @@ const updatePsychologist = async (req, res) => {
 
       if (updateError) {
         console.error('Update psychologist error:', updateError);
+        const updateMsg = String(updateError.message || '').toLowerCase();
+        if (updateError.code === '23505' || updateMsg.includes('duplicate') || updateMsg.includes('unique')) {
+          return res.status(400).json(
+            errorResponse('Psychologist with this email already exists')
+          );
+        }
         // If error is PGRST116 (0 rows), it means the update didn't affect any rows
         // This can happen if the update data is invalid or the row doesn't exist
         if (updateError.code === 'PGRST116') {
@@ -4213,63 +4247,7 @@ const bookPackageNextSession = async (req, res) => {
         const clientName = clientDetails?.child_name || `${clientDetails?.first_name || ''} ${clientDetails?.last_name || ''}`.trim();
         const psychologistName = `${psychologistDetails?.first_name || ''} ${psychologistDetails?.last_name || ''}`.trim();
 
-        try {
-          const emailService = require('../utils/emailService');
-          await emailService.sendSessionConfirmation({
-            clientEmail: clientDetails?.user?.email || 'client@placeholder.com',
-            psychologistEmail: psychologistDetails?.email || 'psychologist@placeholder.com',
-            clientName,
-            psychologistName,
-            sessionId: session.id,
-            scheduledDate: scheduled_date,
-            scheduledTime: scheduled_time,
-            meetLink: effectiveMeetLink || undefined,
-            googleCalendarEventId: meetResult.success ? meetResult.eventId : null,
-            price: null,
-            status: 'booked',
-            psychologistId,
-            clientId: client_id,
-            packageInfo,
-            durationMinutes: nextPkgMeetMinutes
-          });
-        } catch (e) {
-          console.error('Book package next session email error:', e);
-        }
-
-        try {
-          const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-          if (clientDetails?.phone_number) {
-            const childName = clientDetails.child_name && clientDetails.child_name.trim() && clientDetails.child_name.toLowerCase() !== 'pending'
-              ? clientDetails.child_name : null;
-            await sendBookingConfirmation(clientDetails.phone_number, {
-              childName,
-              date: scheduled_date,
-              time: scheduled_time,
-              meetLink: effectiveMeetLink || undefined,
-              psychologistName,
-              packageInfo,
-              durationMinutes: nextPkgMeetMinutes
-            });
-          }
-          if (psychologistDetails?.phone) {
-            const formatBookingDateShort = (dateStr) => {
-              try {
-                const d = new Date(`${dateStr}T00:00:00+05:30`);
-                return d.toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
-              } catch {
-                return dateStr;
-              }
-            };
-            const bullet = '•⁠  ⁠';
-            const linkLine = effectiveMeetLink
-              ? `\n\nJoin link:\n${effectiveMeetLink}\n\n`
-              : '\n\nDue to some issue Google Meet didn\'t get created. Please contact our support.\n\n';
-            const msg = `Hey 👋\n\nNew session booked with Koott.\n\n${bullet}Client: ${clientName}\n${bullet}Package: ${completedCount}/${totalSessions} sessions completed, ${updatedRemaining} remaining\n${bullet}Date: ${formatBookingDateShort(scheduled_date)}\n${bullet}Time: ${formatFriendlyTime(scheduled_time)} (IST)\n${bullet}Duration: ${nextPkgMeetMinutes} min${linkLine}Please be ready 5 mins early.\n\n— Koott 💜`;
-            await sendWhatsAppTextWithRetry(psychologistDetails.phone, msg);
-          }
-        } catch (waErr) {
-          console.error('Book package next session WhatsApp error:', waErr);
-        }
+        console.log('ℹ️ [BOOK PACKAGE NEXT] Notifications temporarily disabled (email + WhatsApp)');
 
         try {
           const sessionReminderService = require('../services/sessionReminderService');

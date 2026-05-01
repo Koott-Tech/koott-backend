@@ -1,19 +1,47 @@
 const { supabaseAdmin } = require('../config/supabase');
+const { getBookingTimeColumnKey } = require('../utils/sessionsBookingTimeColumn');
 const { fetchWixDiscover, extractBookingsList } = require('../utils/wixDiscoverClient');
 const { discoverRowToDb, discoverRowToSessionDb } = require('../utils/wixBookingMapper');
 const { resolveClientsForBookings } = require('../services/wixClientResolverService');
+const { linkPackageSessions: linkWixBookingsPackages } = require('../services/wixPackageLinkingService');
 const { resolvePsychologistsForBookings } = require('../services/wixPsychologistResolverService');
 const { processNewWixSessions } = require('../services/wixMeetNotifyService');
 const { linkPackageSessions } = require('../services/wixPackageLinkerService');
 const { fetchSessionInfoBatch } = require('../services/wixOrderEnrichmentService');
+const { hydrateBareTherapistBookings } = require('../utils/wixBookingPayloadHydration');
 
 const DEFAULT_WIX_SYNC_LIMIT = Number.parseInt(
   process.env.WIX_DISCOVER_BOOKING_LIMIT || '100',
   10
 ) || 100;
 
+async function sessionRowsForSchema(sessionRows) {
+  const btc = await getBookingTimeColumnKey(supabaseAdmin);
+  if (btc === 'booking_created_at') return sessionRows;
+  return sessionRows.map(({ booking_created_at: _omit, ...r }) => r);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Used to classify psychologist rows that never show up as a therapist on mirrored Wix rows. */
+function bookingDisplayNameProbablySamePsychologist(bookingDisplayNameRaw, psychologist) {
+  const raw = String(bookingDisplayNameRaw || '')
+    .toLowerCase()
+    .replace(/^dr\.?\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!raw) return false;
+  const fn = String(psychologist.first_name || '')
+    .trim()
+    .toLowerCase();
+  const ln = String(psychologist.last_name || '')
+    .trim()
+    .toLowerCase();
+  const tokens = [fn, ln].filter(Boolean);
+  if (tokens.length === 0) return false;
+  return tokens.every((t) => (t.length <= 2 ? raw.includes(t) : raw.includes(t)));
 }
 
 /**
@@ -59,12 +87,13 @@ async function getLocallyModifiedWixIds() {
 async function upsertEnrichedBookings(rawBookings) {
   const list = Array.isArray(rawBookings) ? rawBookings : rawBookings ? [rawBookings] : [];
   const deduped = dedupeBookings(list);
+  const dedupedHydrated = await hydrateBareTherapistBookings(supabaseAdmin, deduped);
 
-  let rows = deduped
+  let rows = dedupedHydrated
     .map(discoverRowToDb)
     .filter(Boolean)
     .map((row) => Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined)));
-  const sessionRows = deduped
+  const sessionRows = dedupedHydrated
     .map(discoverRowToSessionDb)
     .filter(Boolean)
     .map((row) => Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined)));
@@ -105,9 +134,10 @@ async function upsertEnrichedBookings(rawBookings) {
     }
 
     if (filteredSessionRows.length > 0) {
+      const upsertSessions = await sessionRowsForSchema(filteredSessionRows);
       const { data: sessionData, error: sessionError } = await supabaseAdmin
         .from('sessions')
-        .upsert(filteredSessionRows, { onConflict: 'wix_booking_id' })
+        .upsert(upsertSessions, { onConflict: 'wix_booking_id' })
         .select('id,wix_booking_id');
       if (sessionError) {
         require('fs').appendFileSync('scratch/log.txt', `[${new Date().toISOString()}] Sessions upsert FAILED: ${sessionError.message}\n`);
@@ -116,6 +146,7 @@ async function upsertEnrichedBookings(rawBookings) {
           msg.includes("Could not find the 'source' column") ||
           msg.includes("Could not find the 'wix_booking_id' column") ||
           msg.includes("Could not find the 'wix_payload' column") ||
+          msg.includes("Could not find the 'booking_created_at' column") ||
           msg.includes('no unique or exclusion constraint matching the ON CONFLICT specification');
         if (recoverable) {
           sessionMirrorSkipped = true;
@@ -134,20 +165,30 @@ async function upsertEnrichedBookings(rawBookings) {
   // Resolve/create user+client rows and link them to sessions
   let clientsResolved = 0;
   try {
-    const m = await resolveClientsForBookings(list);
+    const m = await resolveClientsForBookings(dedupedHydrated);
     clientsResolved = m.size;
   } catch (err) {
     console.warn('[upsertEnrichedBookings] client resolve non-blocking error:', err.message || err);
   }
   let psychologistsResolved = 0;
   try {
-    const m = await resolvePsychologistsForBookings(list);
+    const m = await resolvePsychologistsForBookings(dedupedHydrated);
     psychologistsResolved = m.size;
   } catch (err) {
     console.warn('[upsertEnrichedBookings] psychologist resolve non-blocking error:', err.message || err);
   }
 
-  const wixBookingIds = deduped.map((b) => b.id != null ? String(b.id) : null).filter(Boolean);
+  // Link ₹0 follow-up sessions under their parent package booking (wix_bookings table)
+  try {
+    const r = await linkWixBookingsPackages();
+    if (r.childrenLinked > 0) {
+      console.log(`[upsertEnrichedBookings] linked ${r.childrenLinked} package children across ${r.packagesProcessed} packages`);
+    }
+  } catch (err) {
+    console.warn('[upsertEnrichedBookings] package linking non-blocking error:', err.message || err);
+  }
+
+  const wixBookingIds = dedupedHydrated.map((b) => b.id != null ? String(b.id) : null).filter(Boolean);
 
   // Enrich bookings with exact session type/count from Wix eCommerce Order API
   // (same data Zapier receives — e.g. "Individual 4-Session Pack")
@@ -342,7 +383,8 @@ async function performWixSync() {
 
   const { bookings, extractionTried } = extractBookingsList(r.json);
   const dedupedBookings = dedupeBookings(bookings);
-  if (!dedupedBookings.length) {
+  const dedupedHydratedBookings = await hydrateBareTherapistBookings(supabaseAdmin, dedupedBookings);
+  if (!dedupedHydratedBookings.length) {
     return {
       upserted: 0,
       sessionsUpserted: 0,
@@ -351,11 +393,11 @@ async function performWixSync() {
     };
   }
 
-  let rows = dedupedBookings
+  let rows = dedupedHydratedBookings
     .map(discoverRowToDb)
     .filter(Boolean)
     .map((row) => Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined)));
-  const sessionRows = dedupedBookings
+  const sessionRows = dedupedHydratedBookings
     .map(discoverRowToSessionDb)
     .filter(Boolean)
     .map((row) => Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined)));
@@ -430,9 +472,10 @@ async function performWixSync() {
   let sessionError = null;
 
   if (filteredSessionRows.length > 0) {
+    const upsertSessions = await sessionRowsForSchema(filteredSessionRows);
     const { data, error } = await supabaseAdmin
       .from('sessions')
-      .upsert(filteredSessionRows, { onConflict: 'wix_booking_id' })
+      .upsert(upsertSessions, { onConflict: 'wix_booking_id' })
       .select('id,wix_booking_id,status');
     sessionData = data;
     sessionError = error;
@@ -443,7 +486,8 @@ async function performWixSync() {
     const missingBridgeColumn =
       msg.includes("Could not find the 'source' column") ||
       msg.includes("Could not find the 'wix_booking_id' column") ||
-      msg.includes("Could not find the 'wix_payload' column");
+      msg.includes("Could not find the 'wix_payload' column") ||
+      msg.includes("Could not find the 'booking_created_at' column");
     const missingConflictConstraint =
       msg.includes('no unique or exclusion constraint matching the ON CONFLICT specification');
 
@@ -472,6 +516,16 @@ async function performWixSync() {
     await resolveClientsForBookings(dedupedBookings);
   } catch (err) {
     console.warn('[performWixSync] client resolve non-blocking error:', err.message || err);
+  }
+
+  // Link ₹0 follow-up sessions under their parent package booking (wix_bookings table)
+  try {
+    const r = await linkWixBookingsPackages();
+    if (r.childrenLinked > 0) {
+      console.log(`[performWixSync] linked ${r.childrenLinked} package children across ${r.packagesProcessed} packages`);
+    }
+  } catch (err) {
+    console.warn('[performWixSync] package linking non-blocking error:', err.message || err);
   }
 
   // Fire-and-forget: create Google Meet links + send WhatsApp for new Wix sessions
@@ -557,11 +611,12 @@ async function listWixBookings(req, res) {
       q = q.eq('session_type', session_type);
     }
 
+    // Filter by created_at (when the booking was made), not start_time (when the session happens)
     if (dateFrom) {
-      q = q.gte('start_time', `${dateFrom}T00:00:00+05:30`);
+      q = q.gte('created_at', `${dateFrom}T00:00:00+05:30`);
     }
     if (dateTo) {
-      q = q.lte('start_time', `${dateTo}T23:59:59.999+05:30`);
+      q = q.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
     }
 
     const term = typeof search === 'string' ? search.trim().replace(/,/g, '') : '';
@@ -609,6 +664,26 @@ async function listWixBookings(req, res) {
       __row: row,
     }))).map((x) => x.__row || x);
 
+    // Compute total *sessions* (a Package of 3 = 3 sessions, children of a package = 0)
+    // by aggregating session_count and package linkage across the same date range.
+    let totalSessions = count ?? 0;
+    try {
+      let aggQ = supabaseAdmin
+        .from('wix_bookings')
+        .select('session_type, session_count, package_parent_booking_id');
+      if (session_type && session_type !== 'all') aggQ = aggQ.eq('session_type', session_type);
+      if (dateFrom) aggQ = aggQ.gte('created_at', `${dateFrom}T00:00:00+05:30`);
+      if (dateTo)   aggQ = aggQ.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+      const { data: rowsForCount } = await aggQ;
+      if (Array.isArray(rowsForCount)) {
+        totalSessions = rowsForCount.reduce((sum, r) => {
+          if (r.package_parent_booking_id) return sum;            // child of a package — already counted under parent
+          if (r.session_type === 'package') return sum + (r.session_count || 1);
+          return sum + 1;
+        }, 0);
+      }
+    } catch { /* fall back to count */ }
+
     return res.json({
       success: true,
       data: {
@@ -618,6 +693,7 @@ async function listWixBookings(req, res) {
           limit,
           total: count ?? 0,
           totalPages: Math.max(1, Math.ceil((count || 0) / limit)),
+          totalSessions,
         },
       },
     });
@@ -627,6 +703,113 @@ async function listWixBookings(req, res) {
       success: false,
       error: e instanceof Error ? e.message : String(e),
     });
+  }
+}
+
+/**
+ * GET /admin/wix/orphans
+ * Detect suspicious bookings:
+ *   1. ₹0 rows that should be linked to a package but aren't
+ *   2. Duplicate bookings (same client + same start_time)
+ *   3. Children whose parent package no longer exists
+ *   4. Packages with more children than session_count - 1
+ */
+async function listWixOrphans(req, res) {
+  try {
+    const { data: all } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('wix_booking_id, client_email, client_full_name, therapist_name, price, currency, session_type, session_count, session_index, package_parent_booking_id, start_time, status, contact_id, service_id, payload')
+      .order('start_time', { ascending: true });
+
+    const rows = all || [];
+    const packages = rows.filter(r => r.session_type === 'package');
+    const orphans = [];
+
+    // 1. Eligible ₹0 rows that aren't linked
+    rows.forEach(r => {
+      if (r.package_parent_booking_id) return;
+      if (r.session_type === 'package') return;
+      if (parseFloat(r.price ?? 0) > 0) return;
+      const matchPkg = packages.find(p =>
+        p.client_email?.toLowerCase() === r.client_email?.toLowerCase() &&
+        (r.start_time || '') >= (p.start_time || '')
+      );
+      if (matchPkg) {
+        orphans.push({
+          ...r,
+          orphanReason: 'eligible-but-unlinked',
+          orphanDetail: `Free session that matches ${matchPkg.client_email}'s Package of ${matchPkg.session_count}, but linker did not pick it up (cap reached, or sync timing).`,
+        });
+      }
+    });
+
+    // 2. Duplicate bookings (same client_email + same start_time within 1 minute)
+    const byKey = {};
+    rows.forEach(r => {
+      const k = `${(r.client_email||'').toLowerCase()}|${r.start_time?.slice(0,16) || ''}`;
+      if (!k.replace('|','')) return;
+      (byKey[k] = byKey[k] || []).push(r);
+    });
+    Object.values(byKey).forEach(group => {
+      if (group.length > 1) {
+        // Skip the first (the "primary"); rest are duplicates
+        group.slice(1).forEach(r => orphans.push({
+          ...r,
+          orphanReason: 'duplicate-booking',
+          orphanDetail: `Same client + same start time as another booking. Wix appears to have created a duplicate.`,
+        }));
+      }
+    });
+
+    // 3. Children whose parent doesn't exist
+    const pkgIds = new Set(packages.map(p => p.wix_booking_id));
+    rows.forEach(r => {
+      if (r.package_parent_booking_id && !pkgIds.has(r.package_parent_booking_id)) {
+        orphans.push({
+          ...r,
+          orphanReason: 'dangling-child',
+          orphanDetail: `Linked to parent ${r.package_parent_booking_id} which doesn't exist.`,
+        });
+      }
+    });
+
+    // 4. Packages with too many children
+    packages.forEach(p => {
+      const childCount = rows.filter(r => r.package_parent_booking_id === p.wix_booking_id).length;
+      const cap = (p.session_count || 1) - 1;
+      if (childCount > cap) {
+        orphans.push({
+          ...p,
+          orphanReason: 'package-overflow',
+          orphanDetail: `Package of ${p.session_count} but has ${childCount} children (max should be ${cap}).`,
+        });
+      }
+    });
+
+    // Dedup by wix_booking_id keeping first reason
+    const seen = new Set();
+    const dedupedOrphans = orphans.filter(o => {
+      if (seen.has(o.wix_booking_id)) return false;
+      seen.add(o.wix_booking_id);
+      return true;
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        orphans: dedupedOrphans,
+        summary: {
+          total: dedupedOrphans.length,
+          eligibleButUnlinked: dedupedOrphans.filter(o => o.orphanReason === 'eligible-but-unlinked').length,
+          duplicateBookings: dedupedOrphans.filter(o => o.orphanReason === 'duplicate-booking').length,
+          danglingChildren: dedupedOrphans.filter(o => o.orphanReason === 'dangling-child').length,
+          packageOverflow: dedupedOrphans.filter(o => o.orphanReason === 'package-overflow').length,
+        },
+      },
+    });
+  } catch (e) {
+    console.error('[listWixOrphans]', e);
+    return res.status(500).json({ success: false, error: e instanceof Error ? e.message : String(e) });
   }
 }
 
@@ -691,42 +874,72 @@ async function backfillWixClients(req, res) {
  */
 async function listWixTherapists(req, res) {
   try {
-    const limit = Math.min(5000, Math.max(200, parseInt(String(req.query.limit || '2000'), 10) || 2000));
-    const { data: rows, error } = await supabaseAdmin
-      .from('wix_bookings')
-      .select('therapist_name,created_at,payload')
-      .order('created_at', { ascending: false })
-      .limit(limit);
-
-    if (error) {
-      return res.status(500).json({ success: false, error: error.message || 'Failed to read wix_bookings' });
-    }
+    const pageSize = Math.min(2000, Math.max(200, parseInt(String(req.query.page_size || '2000'), 10) || 2000));
+    const maxBookingsParsed = req.query.max_bookings != null ? parseInt(String(req.query.max_bookings), 10) : NaN;
+    const maxBookings =
+      Number.isFinite(maxBookingsParsed) && maxBookingsParsed > 0
+        ? Math.min(500000, maxBookingsParsed)
+        : null;
 
     const summary = new Map();
-    for (const r of rows || []) {
-      const payload = r.payload || {};
-      const t = payload.therapist || {};
-      const name = String(r.therapist_name || t.name || t.displayName || t.fullName || '').trim();
-      const email = String(t.email || '').trim().toLowerCase() || null;
-      const phone = String(t.phone || '').trim() || null;
-      if (!name && !email) continue;
-      const key = `${name.toLowerCase()}|${email || ''}`;
-      const existing = summary.get(key);
-      if (!existing) {
-        summary.set(key, {
-          name: name || null,
-          email,
-          phone,
-          bookingsCount: 1,
-          latestBookingAt: r.created_at || null,
-          psychologist: null,
-        });
-      } else {
-        existing.bookingsCount += 1;
-        if ((r.created_at || '') > (existing.latestBookingAt || '')) {
-          existing.latestBookingAt = r.created_at;
+    let bookingsScanned = 0;
+    let bookingRowsWithNoTherapistIdentity = 0;
+    let offset = 0;
+
+    while (true) {
+      const remainingBudget =
+        maxBookings == null ? pageSize : Math.min(pageSize, maxBookings - bookingsScanned);
+      if (remainingBudget <= 0) break;
+
+      const pageEnd = offset + remainingBudget - 1;
+
+      const { data: rows, error } = await supabaseAdmin
+        .from('wix_bookings')
+        .select('therapist_name,created_at,payload')
+        .order('id', { ascending: true })
+        .range(offset, pageEnd);
+
+      if (error) {
+        return res.status(500).json({ success: false, error: error.message || 'Failed to read wix_bookings' });
+      }
+
+      const batch = rows || [];
+      if (batch.length === 0) break;
+
+      for (const r of batch) {
+        const payload = r.payload || {};
+        const t = payload.therapist || {};
+        const name = String(r.therapist_name || t.name || t.displayName || t.fullName || '').trim();
+        const email = String(t.email || '').trim().toLowerCase() || null;
+        const phone = String(t.phone || '').trim() || null;
+        if (!name && !email) {
+          bookingRowsWithNoTherapistIdentity += 1;
+          continue;
+        }
+        const key = `${name.toLowerCase()}|${email || ''}`;
+        const existing = summary.get(key);
+        if (!existing) {
+          summary.set(key, {
+            name: name || null,
+            email,
+            phone,
+            bookingsCount: 1,
+            latestBookingAt: r.created_at || null,
+            psychologist: null,
+          });
+        } else {
+          existing.bookingsCount += 1;
+          if ((r.created_at || '') > (existing.latestBookingAt || '')) {
+            existing.latestBookingAt = r.created_at;
+          }
         }
       }
+
+      bookingsScanned += batch.length;
+      offset += batch.length;
+
+      if (batch.length < remainingBudget) break;
+      if (maxBookings != null && bookingsScanned >= maxBookings) break;
     }
 
     const therapists = Array.from(summary.values());
@@ -746,6 +959,13 @@ async function listWixTherapists(req, res) {
     } catch (_e) {
       // Non-blocking; list should still work from mirrored data.
     }
+    const { count: psychologistTableCount, error: psychCountErr } = await supabaseAdmin
+      .from('psychologists')
+      .select('*', { count: 'exact', head: true });
+    if (psychCountErr) {
+      console.warn('[listWixTherapists] psychologist count:', psychCountErr.message || psychCountErr);
+    }
+
     const { data: psychologists } = await supabaseAdmin
       .from('psychologists')
       .select('id,email,first_name,last_name,phone,designation,profile_picture_url,created_at')
@@ -760,7 +980,7 @@ async function listWixTherapists(req, res) {
       if (nameKey) psychByName.set(nameKey, p);
     }
 
-    const data = therapists
+    const mapped = therapists
       .map((t) => {
         const nameKey = String(t.name || '').trim().toLowerCase();
         const inferredEmail = t.email || staffEmailByName.get(nameKey) || null;
@@ -784,11 +1004,103 @@ async function listWixTherapists(req, res) {
       })
       .sort((a, b) => (b.latestBookingAt || '').localeCompare(a.latestBookingAt || ''));
 
+    // Final dedupe pass:
+    // 1) If linked to psychologist, dedupe by psychologist.id
+    // 2) Else dedupe by normalized name
+    const dedupedMap = new Map();
+    for (const row of mapped) {
+      const linkedPsychId = row?.psychologist?.id || null;
+      const normalizedName = String(row?.name || '').trim().toLowerCase();
+      const key = linkedPsychId ? `psych:${linkedPsychId}` : `name:${normalizedName}`;
+
+      if (!dedupedMap.has(key)) {
+        dedupedMap.set(key, { ...row });
+        continue;
+      }
+
+      const existing = dedupedMap.get(key);
+      existing.bookingsCount = (existing.bookingsCount || 0) + (row.bookingsCount || 0);
+      if ((row.latestBookingAt || '') > (existing.latestBookingAt || '')) {
+        existing.latestBookingAt = row.latestBookingAt;
+      }
+      // Prefer rows that have richer contact fields
+      if (!existing.email && row.email) existing.email = row.email;
+      if (!existing.phone && row.phone) existing.phone = row.phone;
+      if (!existing.psychologist && row.psychologist) existing.psychologist = row.psychologist;
+    }
+
+    const data = Array.from(dedupedMap.values()).sort((a, b) =>
+      (b.latestBookingAt || '').localeCompare(a.latestBookingAt || '')
+    );
+
+    const psychologistIdsLinkedFromBookingList = new Set(
+      data.map((row) => row.psychologist?.id).filter(Boolean)
+    );
+    const bookingTherapistEmails = new Set(
+      therapists.map((t) => String(t.email || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const bookingTherapistNamesLower = therapists
+      .map((t) => String(t.name || '').trim().toLowerCase())
+      .filter(Boolean);
+
+    const psychologistPresentInMirrorBookingFields = (p) => {
+      const em = String(p.email || '').trim().toLowerCase();
+      if (em && bookingTherapistEmails.has(em)) return true;
+      const nameKey =
+        `${String(p.first_name || '').trim().toLowerCase()} ${String(p.last_name || '').trim().toLowerCase()}`.trim();
+      if (nameKey.length >= 4 && bookingTherapistNamesLower.includes(nameKey)) return true;
+      return bookingTherapistNamesLower.some((bn) =>
+        bookingDisplayNameProbablySamePsychologist(bn, p)
+      );
+    };
+
+    /** Profiles that never appear linked (still may show UNLINKED on this page if their name/email appears on rows). */
+    const psychologistsWithoutGreenProfileLinkFromMirror = (psychologists || []).filter(
+      (p) => !psychologistIdsLinkedFromBookingList.has(p.id)
+    );
+
+    /** Best-effort “never appears as therapist on mirrored Wix rows” vs “might be an UNLINKED card above”. */
+    const psychologistsProbablyMissingFromBookingMirror = (psychologists || []).filter((p) => {
+      if (psychologistIdsLinkedFromBookingList.has(p.id)) return false;
+      return !psychologistPresentInMirrorBookingFields(p);
+    });
+
+    const psychologistsUnlinkedButPresentOnBookingList = psychologistsWithoutGreenProfileLinkFromMirror.filter((p) =>
+      psychologistPresentInMirrorBookingFields(p)
+    ).length;
+
+    const truncationWarning =
+      psychologistTableCount != null &&
+      (psychologists || []).length < psychologistTableCount;
+
     return res.json({
       success: true,
       data: {
         therapists: data,
         total: data.length,
+        meta: {
+          bookingsScanned,
+          bookingRowsWithNoTherapistIdentity,
+          distinctTherapistIdentitiesAfterDedupe: data.length,
+          psychologistProfilesLinkedMatched: psychologistIdsLinkedFromBookingList.size,
+          psychologistsTableCount:
+            psychologistTableCount == null ? null : Number(psychologistTableCount),
+          psychologistsLoadedForMatching: (psychologists || []).length,
+          psychologistsUnlinkedShowingOnPageEstimated: psychologistsUnlinkedButPresentOnBookingList,
+          psychologistsProbablyMissingFromSyncedWixBookings: psychologistsProbablyMissingFromBookingMirror.length,
+          samplePsychologistsProbablyMissingFromMirror: psychologistsProbablyMissingFromBookingMirror.slice(0, 20).map(
+            (p) => ({
+              id: p.id,
+              displayName:
+                `${p.first_name || ''} ${p.last_name || ''}`.trim() ||
+                (p.email ? p.email.split('@')[0] : 'Unknown'),
+              email: p.email || null,
+            })
+          ),
+          psychMatchListMayBeIncomplete: truncationWarning || false,
+          maxBookingsCap: maxBookings,
+          scanCompletesWholeMirror: maxBookings == null,
+        },
       },
     });
   } catch (e) {
@@ -1078,6 +1390,7 @@ module.exports = {
   upsertEnrichedBookings,
   syncWixBookings,
   listWixBookings,
+  listWixOrphans,
   listWixTherapists,
   backfillWixClients,
   realtimeSyncFromWix,

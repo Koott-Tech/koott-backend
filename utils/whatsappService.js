@@ -4,7 +4,7 @@ const { supabaseAdmin } = require('../config/supabase');
 const { resolveSessionDurationMinutes } = require('./sessionMeetDuration');
 
 // Always use production site in WhatsApp links (never localhost)
-const PRODUCTION_SITE_URL = 'https://www.little.care';
+const PRODUCTION_SITE_URL = 'https://www.koott.com';
 
 /**
  * WhatsApp messaging via WASenderApi

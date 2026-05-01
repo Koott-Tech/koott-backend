@@ -7,10 +7,10 @@
 /**
  * Convert Supabase storage URL to proxy URL
  * @param {string} supabaseUrl - Direct Supabase storage URL
- * @param {string} frontendUrl - Frontend URL (default: https://www.little.care)
+ * @param {string} frontendUrl - Frontend URL (default: https://www.koott.in)
  * @returns {string|null} Proxy URL or null if invalid
  */
-function convertToProxyUrl(supabaseUrl, frontendUrl = 'https://www.little.care') {
+function convertToProxyUrl(supabaseUrl, frontendUrl = 'https://www.koott.in') {
   if (!supabaseUrl || typeof supabaseUrl !== 'string') {
     return null;
   }
@@ -86,7 +86,7 @@ function convertToSupabaseUrl(proxyUrl, supabaseUrl) {
  * @param {string} frontendUrl - Frontend URL
  * @returns {string} Converted URL
  */
-function convertImageUrl(imageUrl, frontendUrl = 'https://www.little.care') {
+function convertImageUrl(imageUrl, frontendUrl = 'https://www.koott.in') {
   // Validate and coerce input to string
   if (!imageUrl) return '';
   if (typeof imageUrl !== 'string') {

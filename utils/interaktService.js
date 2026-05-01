@@ -252,7 +252,7 @@ async function sendBookingConfirmation(toPhone, details) {
  */
 async function sendWelcomeClient(toPhone, { email, tempPassword, loginUrl }) {
   return sendTemplateWithRetry(toPhone, TEMPLATES.WELCOME_CLIENT, 'en', {
-    bodyValues: [email, tempPassword, loginUrl || 'https://koott.in/login'],
+    bodyValues: [email, tempPassword, loginUrl || 'https://www.koott.com/login'],
     callbackData: 'wix_welcome_client',
   });
 }
@@ -313,7 +313,7 @@ async function sendSessionNotificationPsychologist(toPhone, details) {
  */
 async function sendWelcomePsychologist(toPhone, { email, tempPassword, loginUrl }) {
   return sendTemplateWithRetry(toPhone, TEMPLATES.WELCOME_PSYCHOLOGIST, 'en', {
-    bodyValues: [email, tempPassword, loginUrl || 'https://koott.in/psychologist/login'],
+    bodyValues: [email, tempPassword, loginUrl || 'https://www.koott.com/psychologist/login'],
     callbackData: 'wix_welcome_psychologist',
   });
 }
