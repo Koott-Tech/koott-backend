@@ -138,6 +138,8 @@ function discoverRowToDb(booking) {
   const augmented = resolvedPrice != null && parseFloat(resolvedPrice) > 0
     ? { ...b, _resolvedPrice: resolvedPrice }
     : b;
+  const createdAt = wixBookingCreatedIso(b) || new Date().toISOString();
+  const updatedAt = new Date().toISOString();
 
   return {
     wix_booking_id: String(b.id),
@@ -162,8 +164,9 @@ function discoverRowToDb(booking) {
     currency: resolvedCurrency || null,
     location: b.location != null ? String(b.location) : null,
     payload: b,
-    updated_at: new Date().toISOString(),
-    synced_at: new Date().toISOString(),
+    created_at: createdAt,
+    updated_at: updatedAt,
+    synced_at: updatedAt,
   };
 }
 

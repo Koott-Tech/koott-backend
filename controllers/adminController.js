@@ -20,6 +20,8 @@ const {
   isChildSpecialistEffective,
 } = require('../utils/childSpecialistPricing');
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
+const { getBookingTimeColumnKey } = require('../utils/sessionsBookingTimeColumn');
+const { getCalendarYmdInTimeZone } = require('../utils/sessionBookingCreatedAt');
 
 async function deleteChildSpecialistPackagesForPsychologist(psychologistId) {
   await deleteSyncedChildSpecialistPackages(supabaseAdmin, psychologistId);
@@ -1418,40 +1420,63 @@ const deactivateUser = async (req, res) => {
 
 const getPlatformStats = async (req, res) => {
   try {
-    // Today in YYYY-MM-DD (UTC) for upcoming filter
-    const today = new Date().toISOString().slice(0, 10);
+    const start_date = req.query.start_date;
+    const end_date = req.query.end_date;
 
-    // Count clients, psychologists, total sessions
-    const [clientsCount, psychologistsCount, sessionsCount] = await Promise.all([
+    // Today in IST calendar (matches Wix / finance dashboards for India site)
+    const today = getCalendarYmdInTimeZone(new Date().toISOString(), 'Asia/Kolkata');
+
+    const bookingTimeCol = await getBookingTimeColumnKey(supabaseAdmin);
+
+    const sessionsNoFreeSelect = () =>
+      supabaseAdmin.from('sessions').select('id', { count: 'exact', head: true }).neq('session_type', 'free_assessment');
+
+    /** YYYY-MM-DD params = IST midnight bounds (finance / Wix-aligned). */
+    const applyBookingDayRange = (q) => {
+      let x = q;
+      if (start_date) x = x.gte(bookingTimeCol, `${start_date}T00:00:00.000+05:30`);
+      if (end_date) x = x.lte(bookingTimeCol, `${end_date}T23:59:59.999+05:30`);
+      return x;
+    };
+
+    const scopedSessions = applyBookingDayRange(sessionsNoFreeSelect());
+
+    // Count clients & psychologists unchanged (lifetime); session metrics respect date range when provided.
+    const [clientsCount, psychologistsCount, sessionsCountAgg] = await Promise.all([
       supabaseAdmin.from('clients').select('id', { count: 'exact', head: true }),
       supabaseAdmin.from('psychologists').select('id', { count: 'exact', head: true }),
-      supabaseAdmin.from('sessions').select('id', { count: 'exact', head: true }).neq('session_type', 'free_assessment')
+      start_date || end_date ? scopedSessions : sessionsNoFreeSelect(),
     ]);
 
-    // Booking status counts (therapy sessions only, exclude free_assessment)
-    const sessionsBase = () => supabaseAdmin.from('sessions').select('id', { count: 'exact', head: true }).neq('session_type', 'free_assessment');
+    const countStatus = async (build) => {
+      const base = sessionsNoFreeSelect();
+      let q = build(base);
+      q = applyBookingDayRange(q);
+      const { count } = await q;
+      return count ?? 0;
+    };
 
     const [
-      completedCount,
-      rescheduledCount,
-      rescheduleRequestedCount,
-      noShowCount,
-      upcomingCount
+      completedN,
+      rescheduledN,
+      rescheduleRequestedN,
+      noShowN,
+      upcomingN,
     ] = await Promise.all([
-      sessionsBase().eq('status', 'completed'),
-      sessionsBase().eq('status', 'rescheduled'),
-      sessionsBase().eq('status', 'reschedule_requested'),
-      sessionsBase().in('status', ['no_show', 'noshow']),
-      sessionsBase().in('status', ['booked', 'rescheduled']).gte('scheduled_date', today)
+      countStatus((b) => b.eq('status', 'completed')),
+      countStatus((b) => b.eq('status', 'rescheduled')),
+      countStatus((b) => b.eq('status', 'reschedule_requested')),
+      countStatus((b) => b.in('status', ['no_show', 'noshow'])),
+      countStatus((b) => b.in('status', ['booked', 'rescheduled']).gte('scheduled_date', today)),
     ]);
 
     const bookingStatuses = {
-      upcoming: upcomingCount.count ?? 0,
-      rescheduled: rescheduledCount.count ?? 0,
-      rescheduleRequested: rescheduleRequestedCount.count ?? 0,
-      completed: completedCount.count ?? 0,
-      noShow: noShowCount.count ?? 0,
-      cancelled: 0 // optional; add count if needed
+      upcoming: upcomingN,
+      rescheduled: rescheduledN,
+      rescheduleRequested: rescheduleRequestedN,
+      completed: completedN,
+      noShow: noShowN,
+      cancelled: 0,
     };
 
     return res.json(successResponse({
@@ -1459,9 +1484,9 @@ const getPlatformStats = async (req, res) => {
       totalClients: clientsCount.count || 0,
       totalPsychologists: psychologistsCount.count || 0,
       totalDoctors: psychologistsCount.count || 0,
-      totalSessions: sessionsCount.count || 0,
-      totalBookings: sessionsCount.count || 0,
-      bookingStatuses
+      totalSessions: sessionsCountAgg.count || 0,
+      totalBookings: sessionsCountAgg.count || 0,
+      bookingStatuses,
     }));
   } catch (error) {
     console.error('Error getting platform stats:', error);

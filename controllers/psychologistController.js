@@ -2086,8 +2086,8 @@ const getMonthlyStats = async (req, res) => {
   try {
     const psychologistId = req.user.id;
 
-    // Get current month start and end dates (IST timezone)
-    const now = dayjs().tz('Asia/Kolkata');
+    // Current month boundaries in UTC calendar (aligned with finance / admin date presets).
+    const now = dayjs.utc();
     const monthStart = now.startOf('month').format('YYYY-MM-DD');
     const monthEnd = now.endOf('month').format('YYYY-MM-DD');
 
@@ -2104,7 +2104,7 @@ const getMonthlyStats = async (req, res) => {
       console.error('Error fetching completed sessions:', completedError);
     }
 
-    // Get upcoming sessions for current month (booked/rescheduled sessions from today onwards)
+    // Upcoming sessions: appointment date from UTC “today” through end of UTC month (operational calendar).
     const today = now.format('YYYY-MM-DD');
     const { count: upcomingCount, error: upcomingError } = await supabaseAdmin
       .from('sessions')

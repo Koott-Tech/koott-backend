@@ -1,8 +1,61 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { successResponse, errorResponse } = require('../utils/helpers');
 const auditLogger = require('../utils/auditLogger');
-const { getSessionBookingCreatedAtIso } = require('../utils/sessionBookingCreatedAt');
+const {
+  getSessionBookingCreatedAtIso,
+  getSessionBookingCreatedIstDateString,
+  countDistinctFinanceBookings,
+  getFinanceBookingDedupeKey,
+  getSessionFinanceRevenueAmount,
+} = require('../utils/sessionBookingCreatedAt');
+
+/** Rows counted for dashboard “total sessions / bookings”; excludes refunded to match headline revenue sessions. */
+const FINANCE_BOOKING_TOTAL_STATUSES = [
+  'completed',
+  'booked',
+  'rescheduled',
+  'reschedule_requested',
+  'no_show',
+  'noshow',
+  'cancelled',
+  'canceled',
+];
+
+/** IST calendar YYYY-MM-DD from API/query → inclusive timestamptz window on booking_created_at. */
+const IST_DAY_START_SUFFIX = 'T00:00:00.000+05:30';
+const IST_DAY_END_SUFFIX = 'T23:59:59.999+05:30';
 const { getBookingTimeColumnKey, appendBookingTimeSelectFragment } = require('../utils/sessionsBookingTimeColumn');
+
+const dayjs = require('dayjs');
+const timezone = require('dayjs/plugin/timezone');
+const utc = require('dayjs/plugin/utc');
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+const FINANCE_IST_TZ = 'Asia/Kolkata';
+
+/** Non-terminal sessions that still count as “pending fulfilment” on the dashboard card (excludes cancelled). */
+const PENDING_SESSION_CARD_STATUSES = new Set([
+  'booked',
+  'rescheduled',
+  'reschedule_requested',
+  'no_show',
+  'noshow',
+]);
+
+/** Max months behind range start carry-in backlog respects (override with FINANCE_PENDING_BACKLOG_MONTHS). */
+function getPendingCardBacklogMonths() {
+  const n = Number(process.env.FINANCE_PENDING_BACKLOG_MONTHS);
+  if (Number.isFinite(n) && n > 0 && n <= 120) return n;
+  return 36;
+}
+
+function subtractMonthsFromIstCalendarYmd(ymdStr, months) {
+  if (!ymdStr || typeof ymdStr !== 'string') return null;
+  const parsed = dayjs.tz(ymdStr.slice(0, 10), FINANCE_IST_TZ);
+  if (!parsed.isValid()) return null;
+  return parsed.subtract(months, 'month').format('YYYY-MM-DD');
+}
 
 /**
  * Store monthly finance dashboard snapshot
@@ -198,7 +251,7 @@ const getDashboard = async (req, res) => {
       const dashBcf = appendBookingTimeSelectFragment(dashBookingTimeCol);
       ({ data: sessions, error: sessionsError } = await supabaseAdmin
         .from('sessions')
-        .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
+        .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
         .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
         .neq('session_type', 'free_assessment'));
 
@@ -206,9 +259,27 @@ const getDashboard = async (req, res) => {
       if (sessionsError && String(sessionsError.message || '').includes('payment_id')) {
         ({ data: sessions, error: sessionsError } = await supabaseAdmin
           .from('sessions')
-          .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
+          .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
           .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
           .neq('session_type', 'free_assessment'));
+      }
+      // Optional column until migration applies — still derives booking time from wix_payload / created_at
+      if (sessionsError && /booking_created_at/i.test(String(sessionsError.message || ''))) {
+        ({ data: sessions, error: sessionsError } = await supabaseAdmin
+          .from('sessions')
+          .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
+          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+          .neq('session_type', 'free_assessment'));
+        if (
+          sessionsError &&
+          String(sessionsError.message || '').includes('payment_id')
+        ) {
+          ({ data: sessions, error: sessionsError } = await supabaseAdmin
+            .from('sessions')
+            .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
+            .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+            .neq('session_type', 'free_assessment'));
+        }
       }
 
       if (sessionsError) {
@@ -222,15 +293,32 @@ const getDashboard = async (req, res) => {
       sessionsData = [];
     }
 
+    const assessmentPsychIdForFinance = process.env.ASSESSMENT_PSYCHOLOGIST_ID || '00000000-0000-0000-0000-000000000000';
+    let financeDashboardPsychIds = [];
+    let financePsychIdSet = null;
+    try {
+      const { data: financePsychRows } = await supabaseAdmin
+        .from('psychologists')
+        .select('id')
+        .neq('id', assessmentPsychIdForFinance);
+      financeDashboardPsychIds = financePsychRows?.map((p) => p.id).filter(Boolean) || [];
+      if (financeDashboardPsychIds.length > 0) {
+        financePsychIdSet = new Set(financeDashboardPsychIds);
+      }
+    } catch (psychErr) {
+      console.error('Error fetching psychologists for finance dashboard:', psychErr);
+    }
+
     // Calculate revenue metrics
     // Include all sessions where payment was made (regardless of final status)
     // Statuses: completed, booked, rescheduled, reschedule_requested, no_show, cancelled
-    // IMPORTANT: Use original_scheduled_date for revenue calculation (when session was first booked)
-    // This ensures revenue is counted in the month when payment was received, not when rescheduled
-    const calculateRevenue = (sessions, fromDate, toDate) => {
+    // Dashboard picker (mtdFrom/mtdTo): IST calendar strings; booking-day rollups match Wix Admin India + DB +05:30 bounds below.
+    // QTD/YTD tiles: remain on therapy/scheduled date (original_scheduled_date) for fiscal-style rollups.
+    const calculateRevenue = (sessions, fromDate, toDate, opts = {}) => {
       if (!sessions || !Array.isArray(sessions)) {
         return { total: 0, count: 0, sessions: [] };
       }
+      const byBookingCreated = !!(opts && opts.byBookingCreated);
       const filtered = sessions.filter(s => {
         if (!s) return false;
         
@@ -240,20 +328,23 @@ const getDashboard = async (req, res) => {
           const paidStatuses = ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'];
           return paidStatuses.includes(s.status);
         }
-        
-        // Use original_scheduled_date if available (first booking date), fallback to scheduled_date for old sessions
-        const date = s.original_scheduled_date || s.scheduled_date;
-        if (!date) return false;
-        
-        // Extract date part (YYYY-MM-DD) from date string (handle both date-only and ISO timestamp formats)
-        const dateStr = typeof date === 'string' ? date.split('T')[0] : date;
+
+        let dateStr = '';
+        if (byBookingCreated) {
+          dateStr = getSessionBookingCreatedIstDateString(s);
+        } else {
+          const date = s.original_scheduled_date || s.scheduled_date;
+          if (!date) return false;
+          dateStr = typeof date === 'string' ? date.split('T')[0] : date;
+        }
+
         if (!dateStr || dateStr < fromDate || dateStr > toDate) return false;
         
         // Include all statuses where payment was made (these sessions exist only after successful payment)
         const paidStatuses = ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'];
         return paidStatuses.includes(s.status);
       });
-      const total = filtered.reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0);
+      const total = filtered.reduce((sum, s) => sum + getSessionFinanceRevenueAmount(s), 0);
       return {
         total,
         count: filtered.length,
@@ -261,7 +352,7 @@ const getDashboard = async (req, res) => {
       };
     };
 
-    const mtdRevenue = calculateRevenue(sessionsData, mtdFrom, mtdTo);
+    const mtdRevenue = calculateRevenue(sessionsData, mtdFrom, mtdTo, { byBookingCreated: true });
     const qtdRevenue = calculateRevenue(sessionsData, qtdFrom, qtdTo);
     const ytdRevenue = calculateRevenue(sessionsData, ytdFrom, ytdTo);
     
@@ -426,28 +517,20 @@ const getDashboard = async (req, res) => {
       pendingPayments = 0;
     }
 
-    // Get pending commission for the selected date range
-    // Filter by sessions scheduled/completed in the date range
+    // Get pending commission — sessions booked (status) whose customer booking falls in picker range (IST)
     let totalPendingCommission = 0;
     try {
-      // First, get session IDs that fall within the date range
-      // For pending commissions, we need sessions that are scheduled in the date range
-      let pendingSessionsQuery = supabaseAdmin
-        .from('sessions')
-        .select('id')
-        .eq('status', 'booked'); // Only booked (pending) sessions
-      
-      if (mtdFrom && mtdTo) {
-        // Filter by scheduled_date for pending sessions
-        pendingSessionsQuery = pendingSessionsQuery
-          .gte('scheduled_date', mtdFrom)
-          .lte('scheduled_date', mtdTo);
-      }
-      
-      const { data: pendingSessions, error: sessionsError } = await pendingSessionsQuery;
-      
-      if (!sessionsError && pendingSessions && pendingSessions.length > 0) {
-        const sessionIds = pendingSessions.map(s => s.id);
+      const pendingSessionsInRange =
+        mtdFrom && mtdTo
+          ? sessionsData.filter((s) => {
+              if (!s || s.status !== 'booked') return false;
+              const ymd = getSessionBookingCreatedIstDateString(s);
+              return !!(ymd && ymd >= mtdFrom && ymd <= mtdTo);
+            })
+          : sessionsData.filter((s) => s && s.status === 'booked');
+
+      if (pendingSessionsInRange.length > 0) {
+        const sessionIds = pendingSessionsInRange.map((s) => s.id);
         
         // Get commission_history for these sessions with pending status
         const { data: pendingCommission, error: commissionError } = await supabaseAdmin
@@ -472,27 +555,20 @@ const getDashboard = async (req, res) => {
       .in('status', ['booked'])
       .gte('scheduled_date', today.toISOString().split('T')[0]);
 
-    // Get total sessions count - exclude free assessments
-    // If date range is provided, count only sessions in that range
+    // Total sessions card: distinct bookings (packages share payment_id; Wix shares wix_payload.sessionId). IST booking day; same psych roster as doctors.
     let totalSessions = 0;
     try {
-      let totalSessionsQuery = supabaseAdmin
-        .from('sessions')
-        .select('id', { count: 'exact', head: true })
-        .neq('session_type', 'free_assessment')
-        .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled']);
-      
-      // Apply date filtering using mtdFrom/mtdTo (defaults to current month)
-      if (mtdFrom && mtdTo) {
-        totalSessionsQuery = totalSessionsQuery
-          .gte('scheduled_date', mtdFrom)
-          .lte('scheduled_date', mtdTo);
-      }
-      
-      const { count: totalSessionsCount } = await totalSessionsQuery;
-      totalSessions = totalSessionsCount || 0;
+      const rowsForCard = sessionsData.filter((s) => {
+        if (!s || s.session_type === 'free_assessment') return false;
+        if (!FINANCE_BOOKING_TOTAL_STATUSES.includes(s.status)) return false;
+        if (financePsychIdSet && !(s.psychologist_id && financePsychIdSet.has(s.psychologist_id))) return false;
+        if (!mtdFrom || !mtdTo) return true;
+        const ymd = getSessionBookingCreatedIstDateString(s);
+        return !!(ymd && ymd >= mtdFrom && ymd <= mtdTo);
+      });
+      totalSessions = countDistinctFinanceBookings(rowsForCard);
     } catch (err) {
-      console.error('Error fetching total sessions:', err);
+      console.error('Error computing total sessions for dashboard:', err);
       totalSessions = 0;
     }
 
@@ -553,19 +629,17 @@ const getDashboard = async (req, res) => {
       return paidStatuses.includes(s.status);
     };
 
-    // Filter sessions by date range for recent sessions and top doctors
-    // Use scheduled_date to match the rest of the dashboard filtering logic
-    // If no date filter is provided (mtdFrom/mtdTo are null), include all sessions
+    // Filter sessions for picker range: bookings created on an IST calendar day within range
+    // If no date filter (all time), keep prior behavior (any session with scheduled_date)
     const filteredSessionsForDisplay = sessionsData.filter(s => {
-      if (!s || !s.scheduled_date) return false;
-      
-      // If no date filter, include all sessions
+      if (!s) return false;
+
       if (!mtdFrom || !mtdTo) {
-        return true;
+        return !!(s.scheduled_date);
       }
-      
-      const scheduledDate = s.scheduled_date.split('T')[0]; // Get YYYY-MM-DD part
-      return scheduledDate >= mtdFrom && scheduledDate <= mtdTo;
+
+      const bookedYmd = getSessionBookingCreatedIstDateString(s);
+      return !!(bookedYmd && bookedYmd >= mtdFrom && bookedYmd <= mtdTo);
     });
 
     // Get revenue by session type (only if charts are needed)
@@ -748,23 +822,18 @@ const getDashboard = async (req, res) => {
     let pendingPayout = 0; // Doctor wallet pending payment (completed-unpaid)
     let payout = 0; // Doctor wallet already paid (from payouts table in range)
     let completedDoctorWalletInRange = 0; // Total doctor wallet from completed sessions in range
-    let pendingSessionsCount = 0; // Count of pending sessions scheduled in date range
+    let pendingSessionsCount = 0; // Distinct finance bookings still non-completed in range (matches total_sessions dedupe)
+    const pendingSessionsByFinanceBookingKey = new Set();
     let completedSessionsCount = 0; // Count of completed sessions scheduled in date range
     let rescheduledSessionsCount = 0; // Count of rescheduled sessions rescheduled FROM date range (original_scheduled_date in range)
     let rescheduleRequestedSessionsCount = 0; // Count of reschedule requested sessions scheduled in date range
     let noShowSessionsCount = 0; // Count of no show sessions scheduled in date range
-    let upcomingSessionsCount = 0; // Count of upcoming sessions scheduled TO date range (scheduled_date in range, status booked/rescheduled)
+    let upcomingSessionsCount = 0; // Distinct finance bookings with upcoming booked/rescheduled in range
+    const upcomingSessionsByFinanceBookingKey = new Set();
     
     try {
-      // Get all psychologists (exclude assessment specialist)
-      const assessmentPsychId = process.env.ASSESSMENT_PSYCHOLOGIST_ID || '00000000-0000-0000-0000-000000000000';
-      const { data: psychologists } = await supabaseAdmin
-        .from('psychologists')
-        .select('id')
-        .neq('id', assessmentPsychId);
-      
-      const allPsychIds = psychologists?.map(p => p.id).filter(Boolean) || [];
-      
+      const allPsychIds = financeDashboardPsychIds;
+
       if (allPsychIds.length > 0) {
         // Get all sessions (same as doctors page) - include all paid statuses
         // IMPORTANT: Don't filter by scheduled_date here - we need all sessions to properly calculate
@@ -772,7 +841,7 @@ const getDashboard = async (req, res) => {
         // We'll filter in the processing loop based on different criteria for each metric
         let allSessionsQuery = supabaseAdmin
           .from('sessions')
-          .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count')
+          .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
           .not('psychologist_id', 'is', null)
           .neq('session_type', 'free_assessment')
           .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
@@ -788,12 +857,32 @@ const getDashboard = async (req, res) => {
         if (allSessionsError && String(allSessionsError.message || '').includes('payment_id')) {
           allSessionsQuery = supabaseAdmin
             .from('sessions')
-            .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count')
+            .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
             .not('psychologist_id', 'is', null)
             .neq('session_type', 'free_assessment')
             .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
             .in('psychologist_id', allPsychIds);
           ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }));
+        }
+        if (allSessionsError && /booking_created_at/i.test(String(allSessionsError.message || ''))) {
+          allSessionsQuery = supabaseAdmin
+            .from('sessions')
+            .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, wix_payload, source')
+            .not('psychologist_id', 'is', null)
+            .neq('session_type', 'free_assessment')
+            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+            .in('psychologist_id', allPsychIds);
+          ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }));
+          if (allSessionsError && String(allSessionsError.message || '').includes('payment_id')) {
+            allSessionsQuery = supabaseAdmin
+              .from('sessions')
+              .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count, wix_payload, source')
+              .not('psychologist_id', 'is', null)
+              .neq('session_type', 'free_assessment')
+              .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+              .in('psychologist_id', allPsychIds);
+            ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }));
+          }
         }
         if (allSessionsError) throw allSessionsError;
         
@@ -913,11 +1002,14 @@ const getDashboard = async (req, res) => {
         // "Passed" statuses: rescheduled, no_show, reschedule_requested (forward to scheduled month, exclude from total)
         const passedStatuses = ['rescheduled', 'reschedule_requested', 'no_show', 'noshow'];
         const isPassedStatus = (st) => passedStatuses.includes(st);
+
+        const pendingCardBacklogFloorYmd =
+          mtdFrom && mtdTo ? subtractMonthsFromIstCalendarYmd(mtdFrom, getPendingCardBacklogMonths()) : null;
         
         for (const s of sessionsToProcess) {
           if (!s.psychologist_id) continue;
           
-          const sessionPrice = parseFloat(s.price) || 0;
+          const sessionPrice = getSessionFinanceRevenueAmount(s);
           const historyRecord = commissionHistoryMap[s.id];
           const isCompleted = s.status === 'completed';
           const isRefunded = s.status === 'refunded';
@@ -941,106 +1033,52 @@ const getDashboard = async (req, res) => {
           let origInRange = false;
           let schedInRange = false;
           if (mtdFrom && mtdTo) {
-            origInRange = origDate ? isInDateRange(origDate) : false;
-            schedInRange = s.scheduled_date ? isInDateRange(s.scheduled_date) : false;
-            
-            // REVENUE: Use original_scheduled_date for non-completed, completion_date for completed sessions
-            // This ensures revenue is counted in the month when session was originally booked, not when rescheduled
-            if (isCompleted && s.completion_date) {
-              // Completed sessions: use completion_date if available
-              shouldIncludeForRevenue = isInDateRange(s.completion_date);
-            } else {
-              // Non-completed sessions: use original_scheduled_date (where it was originally booked)
-              // This prevents revenue from being counted in current month when session was rescheduled from last month
-              shouldIncludeForRevenue = origInRange;
-            }
-            
-            // TOTAL SESSIONS: Count sessions BOOKED in this month (original_scheduled_date), NOT rescheduled to this month
-            // For completed sessions: use completion_date
-            // For non-completed sessions: use original_scheduled_date (where it was originally booked)
-            if (isCompleted && s.completion_date) {
-              // Completed sessions: use completion_date if available
-              shouldIncludeForTotal = isInDateRange(s.completion_date);
-            } else {
-              // Non-completed sessions: use original_scheduled_date (booked in this month)
-              shouldIncludeForTotal = origInRange;
-            }
-            
-            
-            // Rescheduled: count if rescheduled FROM this month (original_scheduled_date in range)
-            // This shows rescheduled count in the month where the session was originally booked
-            if (s.status === 'rescheduled') {
-              shouldIncludeForRescheduledCount = origInRange;
-            }
-            
-            // No show / Reschedule requested: use scheduled_date, separate buckets
-            if (s.status === 'no_show' || s.status === 'noshow') {
-              shouldIncludeForNoShowCount = schedInRange;
-            }
-            if (s.status === 'reschedule_requested') {
-              shouldIncludeForRescheduleRequestedCount = schedInRange;
-            }
-            
-            // Upcoming sessions: scheduled TO this month (scheduled_date in range, status booked or rescheduled)
-            if ((s.status === 'booked' || s.status === 'rescheduled') && schedInRange) {
+            const bookedCreatedYmd = getSessionBookingCreatedIstDateString(s);
+            const bookingCreatedInRange = !!(bookedCreatedYmd && bookedCreatedYmd >= mtdFrom && bookedCreatedYmd <= mtdTo);
+            origInRange = bookingCreatedInRange;
+            schedInRange = bookingCreatedInRange;
+
+            // Revenue & totals: customer booking created in picker range (IST day)
+            shouldIncludeForRevenue = bookingCreatedInRange;
+            shouldIncludeForTotal = bookingCreatedInRange;
+
+            if (s.status === 'rescheduled') shouldIncludeForRescheduledCount = bookingCreatedInRange;
+            if (s.status === 'no_show' || s.status === 'noshow') shouldIncludeForNoShowCount = bookingCreatedInRange;
+            if (s.status === 'reschedule_requested') shouldIncludeForRescheduleRequestedCount = bookingCreatedInRange;
+
+            if ((s.status === 'booked' || s.status === 'rescheduled') && bookingCreatedInRange) {
               shouldIncludeForUpcoming = true;
             }
-            
-            // COMPLETED payouts: Use completion_date if available, otherwise use original scheduled date
-            // This allows admins to set when a session was actually completed for accurate finance reporting
+
+            const bookedInPreviousWindow = !!(bookedCreatedYmd && mtdFrom && bookedCreatedYmd < mtdFrom);
+
             if (isCompleted) {
-              // Use completion_date if set, otherwise fall back to original scheduled date
-              const completionDate = s.completion_date || origDate;
-              const completionInRange = completionDate ? isInDateRange(completionDate) : false;
-              shouldIncludeForCompleted = completionInRange;
-              // Count uses completion date for accurate monthly reporting
-              shouldIncludeForCompletedCount = completionInRange;
-              
-              // Also check if this completed session was pending during this month
-              // (i.e., completed AFTER this month, so it was pending during this month)
+              shouldIncludeForCompleted = bookingCreatedInRange;
+              shouldIncludeForCompletedCount = bookingCreatedInRange;
+
               if (s.completion_date) {
                 const completionDateStr = s.completion_date.split('T')[0];
                 const wasPendingInThisMonth = completionDateStr > mtdTo;
-                const bookedInThisMonth = origInRange;
-                const bookedInPreviousMonth = origDate && mtdFrom && origDate < mtdFrom;
-                
-                // If completed after this month and was booked in this month or before, include in pending payout
-                if (wasPendingInThisMonth && (bookedInThisMonth || bookedInPreviousMonth)) {
+                const bookedInThisMonth = bookingCreatedInRange;
+
+                if (wasPendingInThisMonth && (bookedInThisMonth || bookedInPreviousWindow)) {
                   shouldIncludeForPending = true;
-                  shouldIncludeForPendingCount = bookedInThisMonth; // Only count if booked in this month
+                  shouldIncludeForPendingCount = bookedInThisMonth;
                 }
               }
             } else {
-              // PENDING payout: Forward to next months if still pending, preserve historical data
-              // Include if:
-              // 1. Session was booked in this month (original_scheduled_date in range) - preserve original month
-              // 2. OR session was booked in a previous month and was pending in this month - forward to current month
-              // Revenue/profit remain isolated per month (not forwarded)
-              
-              // Check if session was booked in this month
-              const bookedInThisMonth = origInRange;
-              
-              // Check if session was booked in a previous month (before mtdFrom)
-              const bookedInPreviousMonth = origDate && mtdFrom && origDate < mtdFrom;
-              
-              // Still pending, was pending in this month if booked before or in this month
-              const wasPendingInThisMonth = bookedInPreviousMonth || bookedInThisMonth;
-              
+              const bookedInThisMonth = bookingCreatedInRange;
+              const wasPendingInThisMonth = bookedInPreviousWindow || bookedInThisMonth;
+
               if (bookedInThisMonth) {
-                // Session booked in this month - include in pending payout
                 shouldIncludeForPending = true;
-                shouldIncludeForPendingCount = true; // Count pending sessions booked in this month
-              } else if (bookedInPreviousMonth && wasPendingInThisMonth) {
-                // Session booked in previous month and was pending during this month
-                // Forward pending payout to current month (preserve historical data)
-                // But don't count it in pending_sessions (it's already counted in original month)
+                shouldIncludeForPendingCount = true;
+              } else if (bookedInPreviousWindow && wasPendingInThisMonth) {
                 shouldIncludeForPending = true;
-                shouldIncludeForPendingCount = false; // Don't count - already counted in original month
+                shouldIncludeForPendingCount = false;
               } else if (schedInRange && wasPendingInThisMonth) {
-                // Fallback: if scheduled in this month and was pending, include
                 shouldIncludeForPending = true;
-                // Only count if booked in this month (origInRange), not if rescheduled to this month
-                shouldIncludeForPendingCount = origInRange;
+                shouldIncludeForPendingCount = bookingCreatedInRange;
               }
             }
           } else {
@@ -1083,7 +1121,8 @@ const getDashboard = async (req, res) => {
           
           // Count upcoming sessions scheduled TO this month (scheduled_date in range, status booked/rescheduled)
           if (shouldIncludeForUpcoming) {
-            upcomingSessionsCount++;
+            const ubk = getFinanceBookingDedupeKey(s);
+            if (ubk) upcomingSessionsByFinanceBookingKey.add(ubk);
           }
           
           if (isRefunded) {
@@ -1215,9 +1254,6 @@ const getDashboard = async (req, res) => {
               toDoctorWallet = Math.min(sessionPrice, Math.max(0, doctorCommission));
 
               // Pending payout amount should be based on completed-unpaid only.
-              if (shouldIncludeForPendingCount && !isCompleted) {
-                pendingSessionsCount++;
-              }
             } else {
               // Individual/couple session
               const isCoupleSession = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
@@ -1265,11 +1301,6 @@ const getDashboard = async (req, res) => {
                   'totalDoctorWalletBefore': totalDoctorWallet
                 });
               }
-              
-              // Count pending sessions: that month booked only (original_scheduled_date), exclude passed
-              if (shouldIncludeForPendingCount && !isCompleted) {
-                pendingSessionsCount++;
-              }
             }
           }
           
@@ -1284,11 +1315,41 @@ const getDashboard = async (req, res) => {
             totalDoctorWallet += toDoctorWallet;
             totalRevenueFromSessions += sessionPrice; // Sum all session prices for total revenue
           }
+
+          /* Pending sessions card:
+           * − Bookings **created** in [mtdFrom, mtdTo] that are still open (same cohort as totals), and
+           * − **carry-in**: booked before mtdFrom but still open (e.g. 5 left last month appear when viewing June),
+           *   limited to FINANCE_PENDING_BACKLOG_MONTHS (default 36) so ancient rows stay out. */
+          const pendingCardKey = getFinanceBookingDedupeKey(s);
+          if (
+            pendingCardKey &&
+            !isCompleted &&
+            !isRefunded &&
+            PENDING_SESSION_CARD_STATUSES.has(String(s.status || '').toLowerCase())
+          ) {
+            const pendYmd = getSessionBookingCreatedIstDateString(s);
+            if (pendYmd) {
+              if (!mtdFrom || !mtdTo) {
+                if (shouldIncludeForPendingCount) pendingSessionsByFinanceBookingKey.add(pendingCardKey);
+              } else if (pendYmd >= mtdFrom && pendYmd <= mtdTo) {
+                pendingSessionsByFinanceBookingKey.add(pendingCardKey);
+              } else if (
+                pendYmd < mtdFrom &&
+                pendingCardBacklogFloorYmd &&
+                pendYmd >= pendingCardBacklogFloorYmd
+              ) {
+                pendingSessionsByFinanceBookingKey.add(pendingCardKey);
+              }
+            }
+          }
           
           // Note: pendingPayout and payout are already being added above in their respective sections
           // pendingPayout includes pending sessions scheduled in date range (uses scheduled_date for booked sessions) - this is correct
           // payout includes only sessions completed in date range (uses completion_date) - this is correct
         }
+
+        pendingSessionsCount = pendingSessionsByFinanceBookingKey.size;
+        upcomingSessionsCount = upcomingSessionsByFinanceBookingKey.size;
 
         // Paid payout amount in selected range.
         // Source of truth: commission_history payment_status for completed sessions in range.
@@ -1300,16 +1361,16 @@ const getDashboard = async (req, res) => {
             .from('sessions')
             .select('id, price, updated_at, completion_date, status')
             .eq('status', 'completed')
-            .gte('updated_at', `${mtdFrom}T00:00:00.000Z`)
-            .lte('updated_at', `${mtdTo}T23:59:59.999Z`));
+            .gte('updated_at', `${mtdFrom}${IST_DAY_START_SUFFIX}`)
+            .lte('updated_at', `${mtdTo}${IST_DAY_END_SUFFIX}`));
 
           if (completedInRangeErr && String(completedInRangeErr.message || '').includes('updated_at')) {
             ({ data: completedInRange, error: completedInRangeErr } = await supabaseAdmin
               .from('sessions')
               .select('id, price, completion_date, status')
               .eq('status', 'completed')
-              .gte('completion_date', `${mtdFrom}T00:00:00.000Z`)
-              .lte('completion_date', `${mtdTo}T23:59:59.999Z`));
+              .gte('completion_date', `${mtdFrom}${IST_DAY_START_SUFFIX}`)
+              .lte('completion_date', `${mtdTo}${IST_DAY_END_SUFFIX}`));
           }
 
           if (completedInRangeErr) throw completedInRangeErr;
@@ -1400,16 +1461,16 @@ const getDashboard = async (req, res) => {
             .from('sessions')
             .select('id, price, updated_at, completion_date, status')
             .eq('status', 'completed')
-            .gte('updated_at', `${mtdFrom}T00:00:00.000Z`)
-            .lte('updated_at', `${mtdTo}T23:59:59.999Z`));
+            .gte('updated_at', `${mtdFrom}${IST_DAY_START_SUFFIX}`)
+            .lte('updated_at', `${mtdTo}${IST_DAY_END_SUFFIX}`));
 
           if (completedInRangeErr && String(completedInRangeErr.message || '').includes('updated_at')) {
             ({ data: completedInRange, error: completedInRangeErr } = await supabaseAdmin
               .from('sessions')
               .select('id, price, completion_date, status')
               .eq('status', 'completed')
-              .gte('completion_date', `${mtdFrom}T00:00:00.000Z`)
-              .lte('completion_date', `${mtdTo}T23:59:59.999Z`));
+              .gte('completion_date', `${mtdFrom}${IST_DAY_START_SUFFIX}`)
+              .lte('completion_date', `${mtdTo}${IST_DAY_END_SUFFIX}`));
           }
 
           if (!completedInRangeErr) {
@@ -1477,21 +1538,17 @@ const getDashboard = async (req, res) => {
           pendingPayout = Math.max(0, completedDoctorWalletInRange - payout);
         }
         
-        // Total sessions: count sessions BOOKED in this month (original_scheduled_date), NOT rescheduled to this month
-        // Always use original_scheduled_date to count sessions booked in that month, regardless of current status
-        // This ensures sessions booked in last month show in last month's total, even if rescheduled/completed later
-        if (mtdFrom && mtdTo) {
-          // Count sessions that were booked in this month (use original_scheduled_date for all sessions)
-          totalSessions = sessionsToProcess.filter(s => {
-            if (!s) return false;
-            // Always use original_scheduled_date to count where session was originally booked
-            const dateToCheck = (s.original_scheduled_date || s.scheduled_date || '').split('T')[0];
-            if (!dateToCheck) return false;
-            return dateToCheck >= mtdFrom && dateToCheck <= mtdTo;
-          }).length;
-        } else {
-          totalSessions = sessionsToProcess.length;
-        }
+        // Same definition as total sessions card: distinct bookings, FINANCE_BOOKING_TOTAL_STATUSES, IST booking day in range
+        const rowsForTotalSessions = sessionsToProcess.filter((s) => {
+          if (!s || s.session_type === 'free_assessment') return false;
+          if (!FINANCE_BOOKING_TOTAL_STATUSES.includes(s.status)) return false;
+          if (mtdFrom && mtdTo) {
+            const ymd = getSessionBookingCreatedIstDateString(s);
+            return !!(ymd && ymd >= mtdFrom && ymd <= mtdTo);
+          }
+          return true;
+        });
+        totalSessions = countDistinctFinanceBookings(rowsForTotalSessions);
       }
     } catch (err) {
       console.error('Error calculating commission totals:', err);
@@ -1537,18 +1594,24 @@ const getDashboard = async (req, res) => {
     const netProfitForSelectedRange = netRevenueExcludingRefunds + incomeForSelectedRange - totalDoctorWallet - expensesForSelectedRange;
     
     // For MTD/QTD/YTD metrics, use totalCompanyCommission (sessions originally booked in those periods)
-    const calculateRefundTotal = (sessions, fromDate, toDate) => {
+    const calculateRefundTotal = (sessions, fromDate, toDate, opts = {}) => {
+      const byBookingCreated = !!(opts && opts.byBookingCreated);
       if (!sessions || !Array.isArray(sessions)) return 0;
       return sessions.reduce((sum, s) => {
         if (!s || s.status !== 'refunded') return sum;
-        if (!fromDate || !toDate) return sum + (parseFloat(s.price) || 0);
-        const date = s.original_scheduled_date || s.scheduled_date;
-        const dateStr = typeof date === 'string' ? date.split('T')[0] : date;
+        if (!fromDate || !toDate) return sum + getSessionFinanceRevenueAmount(s);
+        let dateStr = '';
+        if (byBookingCreated) {
+          dateStr = getSessionBookingCreatedIstDateString(s);
+        } else {
+          const date = s.original_scheduled_date || s.scheduled_date;
+          dateStr = typeof date === 'string' ? date.split('T')[0] : date;
+        }
         if (!dateStr || dateStr < fromDate || dateStr > toDate) return sum;
-        return sum + (parseFloat(s.price) || 0);
+        return sum + getSessionFinanceRevenueAmount(s);
       }, 0);
     };
-    const mtdRefundTotal = calculateRefundTotal(sessionsData, mtdFrom, mtdTo);
+    const mtdRefundTotal = calculateRefundTotal(sessionsData, mtdFrom, mtdTo, { byBookingCreated: true });
     const qtdRefundTotal = calculateRefundTotal(sessionsData, qtdFrom, qtdTo);
     const ytdRefundTotal = calculateRefundTotal(sessionsData, ytdFrom, ytdTo);
     const mtdNetProfit = (mtdRevenue.total - mtdRefundTotal) + mtdIncome - totalDoctorWallet - mtdExpenses;
@@ -2188,14 +2251,14 @@ const getSessions = async (req, res) => {
     // Apply filters
     if (dateFrom) {
       if (normalizedDateBasis === 'booked') {
-        query = query.gte(bookingTimeCol, `${dateFrom}T00:00:00.000+05:30`);
+        query = query.gte(bookingTimeCol, `${dateFrom}${IST_DAY_START_SUFFIX}`);
       } else {
         query = query.gte('scheduled_date', dateFrom);
       }
     }
     if (dateTo) {
       if (normalizedDateBasis === 'booked') {
-        query = query.lte(bookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
+        query = query.lte(bookingTimeCol, `${dateTo}${IST_DAY_END_SUFFIX}`);
       } else {
         query = query.lte('scheduled_date', dateTo);
       }
@@ -2424,14 +2487,14 @@ const getDoctorBookings = async (req, res) => {
 
     if (dateFrom) {
       if (normalizedDateBasis === 'booked') {
-        query = query.gte(docBookingTimeCol, `${dateFrom}T00:00:00.000+05:30`);
+        query = query.gte(docBookingTimeCol, `${dateFrom}${IST_DAY_START_SUFFIX}`);
       } else {
         query = query.gte('scheduled_date', dateFrom);
       }
     }
     if (dateTo) {
       if (normalizedDateBasis === 'booked') {
-        query = query.lte(docBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
+        query = query.lte(docBookingTimeCol, `${dateTo}${IST_DAY_END_SUFFIX}`);
       } else {
         query = query.lte('scheduled_date', dateTo);
       }
@@ -2534,7 +2597,19 @@ const getSessionDetails = async (req, res) => {
       .select(`
         *,
         psychologist:psychologists(*),
-        client:clients(*)
+        client:clients(
+          id,
+          first_name,
+          last_name,
+          child_name,
+          child_age,
+          phone_number,
+          date_of_birth,
+          gender,
+          user:users(
+            email
+          )
+        )
       `)
       .eq('id', sessionId)
       .single();
@@ -3395,20 +3470,6 @@ function parseFinanceDoctorDateBasis(query) {
   return raw === 'scheduled' ? 'scheduled' : 'booked';
 }
 
-function istYmdFromIsoTimestamp(ts) {
-  if (!ts) return '';
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return '';
-  const s = d.toLocaleString('en-US', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-  const [mm, dd, yyyy] = String(s).split('/').map((x) => String(x).padStart(2, '0'));
-  return `${yyyy}-${mm}-${dd}`;
-}
-
 /**
  * Get Doctor Commissions
  * GET /api/finance/commissions
@@ -3648,8 +3709,8 @@ const getCommissions = async (req, res) => {
           .gte('scheduled_date', dateFrom)
           .lte('scheduled_date', dateTo);
       } else {
-        const createdFrom = `${dateFrom}T00:00:00.000+05:30`;
-        const createdTo = `${dateTo}T23:59:59.999+05:30`;
+        const createdFrom = `${dateFrom}${IST_DAY_START_SUFFIX}`;
+        const createdTo = `${dateTo}${IST_DAY_END_SUFFIX}`;
         allSessionsQuery = allSessionsQuery
           .gte(commissionBookingTimeCol, createdFrom)
           .lte(commissionBookingTimeCol, createdTo);
@@ -3663,8 +3724,8 @@ const getCommissions = async (req, res) => {
           .lte('scheduled_date', endDate);
       } else {
         allSessionsQuery = allSessionsQuery
-          .gte(commissionBookingTimeCol, `${startDate}T00:00:00.000+05:30`)
-          .lte(commissionBookingTimeCol, `${endDate}T23:59:59.999+05:30`);
+          .gte(commissionBookingTimeCol, `${startDate}${IST_DAY_START_SUFFIX}`)
+          .lte(commissionBookingTimeCol, `${endDate}${IST_DAY_END_SUFFIX}`);
       }
     }
 
@@ -3941,7 +4002,7 @@ const getCommissions = async (req, res) => {
       // Monthly breakdown buckets: align with doctorDateBasis (booked vs therapy month)
       const bucketYmd =
         doctorDateBasis === 'booked'
-          ? istYmdFromIsoTimestamp(s.created_at)
+          ? getSessionBookingCreatedIstDateString(s)
           : (s.scheduled_date || '').split('T')[0].slice(0, 10);
 
       if (bucketYmd && bucketYmd.length >= 7) {
@@ -4514,8 +4575,8 @@ const getPendingPayouts = async (req, res) => {
 
     // Get completed sessions by completion timestamp (updated_at) for payout month.
     // This keeps pending payout aligned with "session marked complete" behavior.
-    const rangeStartTs = `${monthStart}T00:00:00.000Z`;
-    const rangeEndTs = `${monthEnd}T23:59:59.999Z`;
+    const rangeStartTs = `${monthStart}${IST_DAY_START_SUFFIX}`;
+    const rangeEndTs = `${monthEnd}${IST_DAY_END_SUFFIX}`;
 
     let completedSessions = null;
     let sessionsError = null;

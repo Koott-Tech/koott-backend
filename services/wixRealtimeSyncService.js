@@ -4,6 +4,7 @@ let timer = null;
 let isRunning = false;
 let runStartedAt = 0;
 let blockedTickCount = 0;
+let serviceStartedAtIso = null;
 
 function getIntervalMs() {
   const sec = Number.parseInt(String(process.env.WIX_SYNC_INTERVAL_SECONDS || '60'), 10);
@@ -42,7 +43,9 @@ async function runOnce(source = 'interval') {
   runStartedAt = Date.now();
   blockedTickCount = 0;
   try {
-    const result = await performWixSync();
+    const result = await performWixSync({
+      createdAfter: process.env.WIX_SYNC_CREATED_AFTER || process.env.WIX_SYNC_OLDEST_DATE || serviceStartedAtIso,
+    });
     const tookMs = Date.now() - runStartedAt;
     console.log(
       `[wixRealtimeSyncService] ${source}: synced ${result.upserted} booking(s) in ${tookMs}ms`
@@ -68,6 +71,7 @@ function start() {
   if (timer) return;
 
   const intervalMs = getIntervalMs();
+  serviceStartedAtIso = new Date().toISOString();
   console.log(`[wixRealtimeSyncService] started (interval ${intervalMs / 1000}s)`);
   runOnce('startup').catch(() => {});
   timer = setInterval(() => {

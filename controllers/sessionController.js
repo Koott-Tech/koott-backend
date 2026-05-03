@@ -14,6 +14,10 @@ const emailService = require('../utils/emailService');
 const availabilityService = require('../utils/availabilityCalendarService');
 const { assertClientPackageHasAvailableSlot } = require('../services/packageService');
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
+const {
+  enrichSessionRowDisplayFields,
+  hydrateSessionsWixPayloadFromMirror,
+} = require('../utils/wixSessionRowEnrichment');
 
 // Book a new session
 const bookSession = async (req, res) => {
@@ -416,6 +420,16 @@ const getAllSessions = async (req, res) => {
       });
     }
 
+    // Replace Velo therapist-only stubs on sessions.wix_payload with full payload from wix_bookings when present
+    if (sessions && sessions.length) {
+      await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, sessions);
+    }
+
+    // Wix rows may lack client/psychologist FKs and DB date/price; derive from wix_payload for list UIs
+    if (sessions && sessions.length) {
+      sessions.forEach((s) => enrichSessionRowDisplayFields(s));
+    }
+
     // Fetch package data for sessions that have package_id
     // Since there's no direct foreign key relationship, fetch separately
     if (sessions && sessions.length > 0) {
@@ -494,11 +508,14 @@ const getAllSessions = async (req, res) => {
       if (date) {
         assessCountQuery = assessCountQuery.eq('scheduled_date', date);
       }
+      // Use created_at (booking creation date) for date-range filtering — consistent with
+      // therapy sessions which filter on booking_created_at. This ensures "today's sessions"
+      // counts bookings made today, not appointments scheduled today.
       if (dateFrom) {
-        assessCountQuery = assessCountQuery.gte('scheduled_date', dateFrom);
+        assessCountQuery = assessCountQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`);
       }
       if (dateTo) {
-        assessCountQuery = assessCountQuery.lte('scheduled_date', dateTo);
+        assessCountQuery = assessCountQuery.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
       }
 
       const { count: assessCount, error: assessCountError } = await assessCountQuery;
@@ -558,10 +575,10 @@ const getAllSessions = async (req, res) => {
         assessQuery = assessQuery.eq('scheduled_date', date);
       }
       if (dateFrom) {
-        assessQuery = assessQuery.gte('scheduled_date', dateFrom);
+        assessQuery = assessQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`);
       }
       if (dateTo) {
-        assessQuery = assessQuery.lte('scheduled_date', dateTo);
+        assessQuery = assessQuery.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
       }
 
       // Apply sorting (match therapy sessions: date + time)
@@ -587,8 +604,8 @@ const getAllSessions = async (req, res) => {
         if (psychologist_id) flatQuery = flatQuery.eq('psychologist_id', psychologist_id);
         if (client_id) flatQuery = flatQuery.eq('client_id', client_id);
         if (date) flatQuery = flatQuery.eq('scheduled_date', date);
-        if (dateFrom) flatQuery = flatQuery.gte('scheduled_date', dateFrom);
-        if (dateTo) flatQuery = flatQuery.lte('scheduled_date', dateTo);
+        if (dateFrom) flatQuery = flatQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`);
+        if (dateTo) flatQuery = flatQuery.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
         if (sort && order) {
           const asc = order === 'asc';
           flatQuery = flatQuery.order(sort, { ascending: asc });
@@ -698,9 +715,10 @@ const getAllSessions = async (req, res) => {
 
     // Combine regular sessions and assessment sessions
     // Wall-clock date+time are interpreted as Asia/Kolkata (same as admin date filters / product).
+    /** Millis for wall-clock sort; missing date → null (caller sorts those last — avoids bare stubs on page 1). */
     const scheduledDateTimeMs = (s) => {
       const d = s?.scheduled_date;
-      if (!d) return 0;
+      if (!d) return null;
       const dateOnly = String(d).slice(0, 10);
       const rawT = s.scheduled_time != null ? String(s.scheduled_time) : '00:00:00';
       const t = rawT.split('.')[0].trim();
@@ -711,7 +729,15 @@ const getAllSessions = async (req, res) => {
       const ms = new Date(`${dateOnly}T${hh}:${mm}:${ss}+05:30`).getTime();
       if (Number.isFinite(ms)) return ms;
       const fallback = new Date(`${dateOnly}T00:00:00+05:30`).getTime();
-      return Number.isFinite(fallback) ? fallback : 0;
+      return Number.isFinite(fallback) ? fallback : null;
+    };
+
+    const scheduledSortKey = (s) => {
+      const ms = scheduledDateTimeMs(s);
+      if (ms != null && Number.isFinite(ms)) return ms;
+      return sort === 'scheduled_date' && order === 'asc'
+        ? Number.POSITIVE_INFINITY
+        : Number.NEGATIVE_INFINITY;
     };
 
     // Admin "Upcoming" (booked + rescheduled) and Rescheduled tab: show next session from now first,
@@ -727,14 +753,20 @@ const getAllSessions = async (req, res) => {
     let allSessions = [...(sessions || []), ...assessmentSessions]
       .sort((a, b) => {
         if (sort === 'scheduled_date') {
-          const aMs = scheduledDateTimeMs(a);
-          const bMs = scheduledDateTimeMs(b);
+          const aMs = scheduledSortKey(a);
+          const bMs = scheduledSortKey(b);
           if (nearestFirstUpcomingView) {
-            const aPast = aMs < nowMs;
-            const bPast = bMs < nowMs;
+            const aEff = scheduledDateTimeMs(a);
+            const bEff = scheduledDateTimeMs(b);
+            const aMissing = aEff == null || !Number.isFinite(aEff);
+            const bMissing = bEff == null || !Number.isFinite(bEff);
+            if (aMissing !== bMissing) return aMissing ? 1 : -1;
+            if (aMissing && bMissing) return 0;
+            const aPast = aEff < nowMs;
+            const bPast = bEff < nowMs;
             if (aPast !== bPast) return aPast ? 1 : -1;
-            if (aPast && bPast) return bMs - aMs;
-            return aMs - bMs;
+            if (aPast && bPast) return bEff - aEff;
+            return aEff - bEff;
           }
           return order === 'asc' ? aMs - bMs : bMs - aMs;
         }
@@ -772,6 +804,33 @@ const getAllSessions = async (req, res) => {
     const startIndex = (page - 1) * parseInt(limit);
     const endIndex = startIndex + parseInt(limit);
     const paginatedSessions = allSessions.slice(startIndex, endIndex);
+
+    // Commission / net revenue (finance sessions table)
+    try {
+      const pageIds = paginatedSessions
+        .filter((s) => s.session_type !== 'assessment' && s.type !== 'assessment')
+        .map((s) => s.id)
+        .filter(Boolean);
+      if (pageIds.length) {
+        const { data: commRows, error: commErr } = await supabaseAdmin
+          .from('commission_history')
+          .select('session_id, commission_amount, company_revenue, net_company_revenue')
+          .in('session_id', pageIds);
+        if (!commErr && commRows?.length) {
+          const bySession = new Map(commRows.map((c) => [c.session_id, c]));
+          for (const s of paginatedSessions) {
+            const c = s?.id && bySession.get(s.id);
+            if (c) {
+              s.commission_amount = c.commission_amount ?? 0;
+              s.company_revenue = c.company_revenue ?? 0;
+              s.net_company_revenue = c.net_company_revenue ?? 0;
+            }
+          }
+        }
+      }
+    } catch (commEx) {
+      console.warn('[getAllSessions] commission attach non-blocking:', commEx?.message || commEx);
+    }
 
     console.log('Pagination summary:', {
       sessionsCount: sessionsCount || 0,

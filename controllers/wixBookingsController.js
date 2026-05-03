@@ -1,7 +1,7 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { getBookingTimeColumnKey } = require('../utils/sessionsBookingTimeColumn');
 const { fetchWixDiscover, extractBookingsList } = require('../utils/wixDiscoverClient');
-const { discoverRowToDb, discoverRowToSessionDb } = require('../utils/wixBookingMapper');
+const { discoverRowToDb, discoverRowToSessionDb, wixBookingCreatedIso } = require('../utils/wixBookingMapper');
 const { resolveClientsForBookings } = require('../services/wixClientResolverService');
 const { linkPackageSessions: linkWixBookingsPackages } = require('../services/wixPackageLinkingService');
 const { resolvePsychologistsForBookings } = require('../services/wixPsychologistResolverService');
@@ -23,6 +23,71 @@ async function sessionRowsForSchema(sessionRows) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function parseSyncCreatedAfter(value) {
+  if (value == null || value === '') return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const dateOnly = raw.match(/^(\d{4}-\d{2}-\d{2})$/);
+  const d = dateOnly ? new Date(`${dateOnly[1]}T00:00:00.000+05:30`) : new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function getSyncCreatedAfter(options = {}) {
+  return (
+    parseSyncCreatedAfter(options.createdAfter) ||
+    parseSyncCreatedAfter(process.env.WIX_SYNC_CREATED_AFTER) ||
+    parseSyncCreatedAfter(process.env.WIX_SYNC_OLDEST_DATE)
+  );
+}
+
+function filterBookingsCreatedAfter(bookings, createdAfterIso) {
+  const list = Array.isArray(bookings) ? bookings : [];
+  if (!createdAfterIso) {
+    return { bookings: list, skippedOlder: 0, skippedMissingCreatedAt: 0 };
+  }
+
+  const floorMs = new Date(createdAfterIso).getTime();
+  if (!Number.isFinite(floorMs)) {
+    return { bookings: list, skippedOlder: 0, skippedMissingCreatedAt: 0 };
+  }
+
+  let skippedOlder = 0;
+  let skippedMissingCreatedAt = 0;
+  const filtered = list.filter((b) => {
+    const createdIso = wixBookingCreatedIso(b);
+    if (!createdIso) {
+      skippedMissingCreatedAt += 1;
+      return false;
+    }
+    const createdMs = new Date(createdIso).getTime();
+    if (!Number.isFinite(createdMs) || createdMs < floorMs) {
+      skippedOlder += 1;
+      return false;
+    }
+    return true;
+  });
+
+  return { bookings: filtered, skippedOlder, skippedMissingCreatedAt };
+}
+
+function syncFilterMeta(createdAfterIso, stats) {
+  if (!createdAfterIso) return {};
+  return {
+    createdAfter: createdAfterIso,
+    skippedOlder: stats?.skippedOlder || 0,
+    skippedMissingCreatedAt: stats?.skippedMissingCreatedAt || 0,
+  };
+}
+
+function istDateFromIso(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 /** Used to classify psychologist rows that never show up as a therapist on mirrored Wix rows. */
@@ -84,9 +149,31 @@ async function getLocallyModifiedWixIds() {
  * Upsert an already-enriched booking object (from Velo webhook) directly.
  * Skips discover re-fetch and avoids the Wix index eventual-consistency gap.
  */
-async function upsertEnrichedBookings(rawBookings) {
+async function upsertEnrichedBookings(rawBookings, options = {}) {
+  const shouldSync = String(process.env.WIX_SYNC_AUTOSTART || 'true').toLowerCase() !== 'false';
+  if (!shouldSync) {
+    console.log('[upsertEnrichedBookings] skipped: WIX_SYNC_AUTOSTART is false');
+    return { upserted: 0, sessionsUpserted: 0, sessionMirrorSkipped: false };
+  }
+
   const list = Array.isArray(rawBookings) ? rawBookings : rawBookings ? [rawBookings] : [];
-  const deduped = dedupeBookings(list);
+  const createdAfter = options.skipCreatedAfterFilter ? null : getSyncCreatedAfter(options);
+  const filterStats = filterBookingsCreatedAfter(list, createdAfter);
+  const listToSync = filterStats.bookings;
+
+  if (!listToSync.length && list.length > 0) {
+    console.log(
+      `[upsertEnrichedBookings] skipped all ${list.length} booking(s) before createdAfter=${createdAfter}`
+    );
+    return {
+      upserted: 0,
+      sessionsUpserted: 0,
+      sessionMirrorSkipped: false,
+      ...syncFilterMeta(createdAfter, filterStats),
+    };
+  }
+
+  const deduped = dedupeBookings(listToSync);
   const dedupedHydrated = await hydrateBareTherapistBookings(supabaseAdmin, deduped);
 
   let rows = dedupedHydrated
@@ -218,6 +305,7 @@ async function upsertEnrichedBookings(rawBookings) {
     clientsResolved,
     psychologistsResolved,
     sessionMirrorSkipped,
+    ...syncFilterMeta(createdAfter, filterStats),
   };
 }
 
@@ -371,7 +459,13 @@ async function applyMaxPriceGuard(rows) {
   });
 }
 
-async function performWixSync() {
+async function performWixSync(options = {}) {
+  const shouldSync = String(process.env.WIX_SYNC_AUTOSTART || 'true').toLowerCase() !== 'false';
+  if (!shouldSync) {
+    console.log('[performWixSync] skipped: WIX_SYNC_AUTOSTART is false');
+    return { upserted: 0, sessionsUpserted: 0 };
+  }
+
   const r = await fetchWixDiscover({
     limit: process.env.WIX_DISCOVER_BOOKING_LIMIT || DEFAULT_WIX_SYNC_LIMIT,
   });
@@ -382,7 +476,18 @@ async function performWixSync() {
   }
 
   const { bookings, extractionTried } = extractBookingsList(r.json);
-  const dedupedBookings = dedupeBookings(bookings);
+
+  const createdAfter = getSyncCreatedAfter(options);
+  const filterStats = filterBookingsCreatedAfter(bookings, createdAfter);
+  if (createdAfter) {
+    console.log(
+      `[performWixSync] filtering Wix bookings created >= ${createdAfter} (${istDateFromIso(createdAfter)} IST): ` +
+        `${filterStats.bookings.length}/${bookings.length} kept`
+    );
+  }
+  const filteredBookings = filterStats.bookings;
+
+  const dedupedBookings = dedupeBookings(filteredBookings);
   const dedupedHydratedBookings = await hydrateBareTherapistBookings(supabaseAdmin, dedupedBookings);
   if (!dedupedHydratedBookings.length) {
     return {
@@ -390,6 +495,7 @@ async function performWixSync() {
       sessionsUpserted: 0,
       extractionTried,
       fetchedAt: r.json?.fetchedAt || new Date().toISOString(),
+      ...syncFilterMeta(createdAfter, filterStats),
     };
   }
 
@@ -407,6 +513,7 @@ async function performWixSync() {
       sessionsUpserted: 0,
       extractionTried,
       fetchedAt: r.json?.fetchedAt || new Date().toISOString(),
+      ...syncFilterMeta(createdAfter, filterStats),
     };
   }
 
@@ -428,6 +535,7 @@ async function performWixSync() {
       sessionsUpserted: 0,
       extractionTried,
       fetchedAt: r.json?.fetchedAt || new Date().toISOString(),
+      ...syncFilterMeta(createdAfter, filterStats),
     };
   }
 
@@ -503,6 +611,7 @@ async function performWixSync() {
         sessionMirrorSkipped: true,
         extractionTried,
         fetchedAt: r.json?.fetchedAt || new Date().toISOString(),
+        ...syncFilterMeta(createdAfter, filterStats),
       };
     }
 
@@ -544,6 +653,7 @@ async function performWixSync() {
     sessionMirrorSkipped: false,
     extractionTried,
     fetchedAt: r.json?.fetchedAt || new Date().toISOString(),
+    ...syncFilterMeta(createdAfter, filterStats),
   };
 }
 
@@ -553,7 +663,13 @@ async function performWixSync() {
  */
 async function syncWixBookings(req, res) {
   try {
-    const result = await performWixSync();
+    const requestedCreatedAfter =
+      req.body?.createdAfter ||
+      req.query?.createdAfter ||
+      (req.body?.syncFromTrigger === false || req.query?.syncFromTrigger === 'false'
+        ? null
+        : new Date().toISOString());
+    const result = await performWixSync({ createdAfter: requestedCreatedAfter });
 
     return res.json({
       success: true,
@@ -566,6 +682,9 @@ async function syncWixBookings(req, res) {
         sessionMirrorSkipped: Boolean(result.sessionMirrorSkipped),
         extractionTried: result.extractionTried,
         fetchedAt: result.fetchedAt,
+        createdAfter: result.createdAfter || null,
+        skippedOlder: result.skippedOlder || 0,
+        skippedMissingCreatedAt: result.skippedMissingCreatedAt || 0,
       },
     });
   } catch (e) {
@@ -595,7 +714,9 @@ async function syncWixBookings(req, res) {
 
 /**
  * GET /admin/wix/bookings?page=1&limit=10&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&search=
- * List mirrored rows from Supabase (IST date boundaries when dates provided).
+ * List mirrored rows. Date params are interpreted as UTC calendar days (frontend presets).
+ * Date bounds use IST midnight (Asia/Kolkata) on `created_at` to mirror Wix “today”.
+ * Note: column is mirror first-sync time; payload.createdDate is the Wix creation instant for display.
  */
 async function listWixBookings(req, res) {
   try {
@@ -613,7 +734,7 @@ async function listWixBookings(req, res) {
 
     // Filter by created_at (when the booking was made), not start_time (when the session happens)
     if (dateFrom) {
-      q = q.gte('created_at', `${dateFrom}T00:00:00+05:30`);
+      q = q.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
     }
     if (dateTo) {
       q = q.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
@@ -672,8 +793,8 @@ async function listWixBookings(req, res) {
         .from('wix_bookings')
         .select('session_type, session_count, package_parent_booking_id');
       if (session_type && session_type !== 'all') aggQ = aggQ.eq('session_type', session_type);
-      if (dateFrom) aggQ = aggQ.gte('created_at', `${dateFrom}T00:00:00+05:30`);
-      if (dateTo)   aggQ = aggQ.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+      if (dateFrom) aggQ = aggQ.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
+      if (dateTo) aggQ = aggQ.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
       const { data: rowsForCount } = await aggQ;
       if (Array.isArray(rowsForCount)) {
         totalSessions = rowsForCount.reduce((sum, r) => {
@@ -1119,6 +1240,7 @@ async function listWixTherapists(req, res) {
  */
 async function realtimeSyncFromWix(req, res) {
   try {
+    const syncTriggeredAt = new Date().toISOString();
     const expected = process.env.WIX_WEBHOOK_SECRET || process.env.WIX_DISCOVER_API_KEY || '';
     const given = req.headers['x-wix-webhook-key'] || req.headers['X-Wix-Webhook-Key'];
 
@@ -1178,7 +1300,7 @@ async function realtimeSyncFromWix(req, res) {
       for (const d of delays) {
         try {
           await sleep(d);
-          const r = await performWixSync();
+          const r = await performWixSync({ createdAfter: syncTriggeredAt });
           console.log(
             `[realtimeSyncFromWix] reconcile(+${d}ms): synced ${r.upserted} booking(s)`
           );
