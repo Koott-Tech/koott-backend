@@ -7,8 +7,8 @@ let blockedTickCount = 0;
 let serviceStartedAtIso = null;
 
 function getIntervalMs() {
-  const sec = Number.parseInt(String(process.env.WIX_SYNC_INTERVAL_SECONDS || '60'), 10);
-  const saneSeconds = Number.isFinite(sec) ? Math.min(3600, Math.max(15, sec)) : 60;
+  const sec = Number.parseInt(String(process.env.WIX_SYNC_INTERVAL_SECONDS || '600'), 10);
+  const saneSeconds = Number.isFinite(sec) ? Math.min(86400, Math.max(15, sec)) : 600;
   return saneSeconds * 1000;
 }
 

@@ -109,6 +109,8 @@ const createManualBooking = async (req, res) => {
       therapist_commission,
       payment_received_date,
       payment_method,
+      receipt_url,
+      payment_screenshot_url,
       notes 
     } = req.body;
 
@@ -290,6 +292,10 @@ const createManualBooking = async (req, res) => {
     // ============================================
     const transactionId = `MANUAL-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const normalizedPaymentMethod = (payment_method || 'cash').toLowerCase();
+    const normalizedReceiptUrl =
+      (typeof receipt_url === 'string' && receipt_url.trim()) ||
+      (typeof payment_screenshot_url === 'string' && payment_screenshot_url.trim()) ||
+      null;
 
     const { data: payment, error: paymentError } = await supabaseAdmin
       .from('payments')
@@ -303,6 +309,7 @@ const createManualBooking = async (req, res) => {
         session_type: packageData ? 'package' : 'individual',
         status: 'success',
         payment_method: normalizedPaymentMethod,
+        receipt_url: normalizedReceiptUrl,
         razorpay_params: {
           notes: {
             manual: true,
@@ -310,7 +317,8 @@ const createManualBooking = async (req, res) => {
             admin_created: true,
             created_by: req.user.id,
             created_at: new Date().toISOString(),
-            payment_received_date: payment_received_date
+            payment_received_date: payment_received_date,
+            payment_screenshot_uploaded: Boolean(normalizedReceiptUrl)
           }
         },
         completed_at: payment_received_date,
@@ -838,6 +846,8 @@ const createRecordOnlyBooking = async (req, res) => {
       therapist_commission,
       payment_received_date,
       payment_method,
+      receipt_url,
+      payment_screenshot_url,
       notes,
       meet_link,
       status: bodyStatus
@@ -933,6 +943,10 @@ const createRecordOnlyBooking = async (req, res) => {
     // Create payment record
     const transactionId = `RECORD-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const normalizedPaymentMethod = (payment_method || 'cash').toLowerCase();
+    const normalizedReceiptUrl =
+      (typeof receipt_url === 'string' && receipt_url.trim()) ||
+      (typeof payment_screenshot_url === 'string' && payment_screenshot_url.trim()) ||
+      null;
 
     const { data: payment, error: paymentError } = await supabaseAdmin
       .from('payments')
@@ -946,6 +960,7 @@ const createRecordOnlyBooking = async (req, res) => {
         session_type: packageData ? 'package' : 'individual',
         status: 'success',
         payment_method: normalizedPaymentMethod,
+        receipt_url: normalizedReceiptUrl,
         razorpay_params: {
           notes: {
             record_only: true,
@@ -953,7 +968,8 @@ const createRecordOnlyBooking = async (req, res) => {
             admin_created: true,
             created_by: req.user?.id,
             created_at: new Date().toISOString(),
-            payment_received_date: paymentReceivedDate
+            payment_received_date: paymentReceivedDate,
+            payment_screenshot_uploaded: Boolean(normalizedReceiptUrl)
           }
         },
         completed_at: paymentReceivedDate,

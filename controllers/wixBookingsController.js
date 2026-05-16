@@ -254,6 +254,7 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
   try {
     const m = await resolveClientsForBookings(dedupedHydrated);
     clientsResolved = m.size;
+    var tempPasswordMap = m._wixIdToTempPassword;
   } catch (err) {
     console.warn('[upsertEnrichedBookings] client resolve non-blocking error:', err.message || err);
   }
@@ -294,7 +295,7 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
 
   // Fire-and-forget: create Google Meet links + send WhatsApp for new Wix sessions
   if (wixBookingIds.length) {
-    processNewWixSessions(wixBookingIds).catch((err) => {
+    processNewWixSessions(wixBookingIds, tempPasswordMap).catch((err) => {
       console.warn('[upsertEnrichedBookings] meet+notify non-blocking error:', err.message || err);
     });
   }
@@ -554,6 +555,7 @@ async function performWixSync(options = {}) {
   try {
     const wixIdToClientId = await resolveClientsForBookings(dedupedBookings);
     clientsResolved = wixIdToClientId.size;
+    var tempPasswordMapSync = wixIdToClientId._wixIdToTempPassword;
   } catch (clientResolveError) {
     console.warn(
       '[performWixSync] client auto-provision skipped:',
@@ -640,7 +642,7 @@ async function performWixSync(options = {}) {
   // Fire-and-forget: create Google Meet links + send WhatsApp for new Wix sessions
   const wixBookingIds = dedupedBookings.map((b) => b.id != null ? String(b.id) : null).filter(Boolean);
   if (wixBookingIds.length) {
-    processNewWixSessions(wixBookingIds).catch((err) => {
+    processNewWixSessions(wixBookingIds, tempPasswordMapSync).catch((err) => {
       console.warn('[performWixSync] meet+notify non-blocking error:', err.message || err);
     });
   }
@@ -726,7 +728,7 @@ async function listWixBookings(req, res) {
     const fromIdx = (page - 1) * limit;
     const toIdx = fromIdx + limit - 1;
 
-    let q = supabaseAdmin.from('wix_bookings').select('*', { count: 'exact' });
+    let q = supabaseAdmin.from('wix_bookings').select('*');
 
     if (session_type && session_type !== 'all') {
       q = q.eq('session_type', session_type);
@@ -749,30 +751,42 @@ async function listWixBookings(req, res) {
       );
     }
 
-    // Newest Wix bookings on top. `created_at` is the row insert time (stable
-    // across re-upserts), so it reflects when we first saw the booking.
-    // `synced_at` is re-written on every poll and would collapse to ~same
-    // timestamp for all rows — do not use it for ordering.
+    // Newest Wix bookings on top
     q = q
       .order('created_at', { ascending: false, nullsFirst: false })
-      .order('start_time', { ascending: false, nullsFirst: false })
-      .range(fromIdx, toIdx);
+      .order('start_time', { ascending: false, nullsFirst: false });
 
-    const { data, error, count } = await q;
+    const { data: bookingsData, error: bookingsError } = await q;
 
-    if (error) {
-      console.error('[listWixBookings]', error);
+    if (bookingsError) {
+      console.error('[listWixBookings]', bookingsError);
       return res.status(500).json({
         success: false,
-        error: error.message || 'Failed to list wix_bookings',
+        error: bookingsError.message || 'Failed to list wix_bookings',
         hint:
-          error.code === '42P01'
+          bookingsError.code === '42P01'
             ? 'Table wix_bookings missing — run the migration in supabase/migrations/20260420120000_wix_bookings.sql'
             : undefined,
       });
     }
 
-    const dedupedData = dedupeBookings((data || []).map((row) => ({
+    // Manually fetch session IDs to avoid missing FK relationship error
+    const wixBookingIds = bookingsData.map(b => b.wix_booking_id).filter(Boolean);
+    let sessionMap = new Map();
+    if (wixBookingIds.length > 0) {
+      const { data: sessionsData } = await supabaseAdmin
+        .from('sessions')
+        .select('id, wix_booking_id')
+        .in('wix_booking_id', wixBookingIds);
+      
+      if (sessionsData) {
+        sessionsData.forEach(s => {
+          sessionMap.set(s.wix_booking_id, s.id);
+        });
+      }
+    }
+
+    const allVisibleRows = dedupeBookings((bookingsData || []).map((row) => ({
       id: row.wix_booking_id,
       status: row.status,
       createdDate: row.payload?.createdDate || row.created_at,
@@ -782,26 +796,36 @@ async function listWixBookings(req, res) {
       title: row.title,
       contactId: row.contact_id,
       client: { email: row.client_email, contactId: row.contact_id },
+      session_id: sessionMap.get(row.wix_booking_id) || null,
       __row: row,
-    }))).map((x) => x.__row || x);
+    })))
+      .map((x) => x.__row || x)
+      .filter((row) => {
+        // Match finance sessions page logic: only exclude deleted rows and
+        // UNDEFINED-state rows (no wix_session_id). Package children are real
+        // sessions and must be counted (finance counts them too via sessions table).
+        return row.status !== 'deleted' && !!row.wix_session_id;
+      });
+
+    const totalVisible = allVisibleRows.length;
+    const dedupedData = allVisibleRows.slice(fromIdx, toIdx + 1);
 
     // Compute total *sessions* (a Package of 3 = 3 sessions, children of a package = 0)
     // by aggregating session_count and package linkage across the same date range.
-    let totalSessions = count ?? 0;
+    let totalSessions = totalVisible;
     try {
       let aggQ = supabaseAdmin
         .from('wix_bookings')
-        .select('session_type, session_count, package_parent_booking_id');
+        .select('session_type, session_count, package_parent_booking_id, package_session_number, status, wix_session_id, wix_order_number, price');
       if (session_type && session_type !== 'all') aggQ = aggQ.eq('session_type', session_type);
       if (dateFrom) aggQ = aggQ.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
       if (dateTo) aggQ = aggQ.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
       const { data: rowsForCount } = await aggQ;
       if (Array.isArray(rowsForCount)) {
-        totalSessions = rowsForCount.reduce((sum, r) => {
-          if (r.package_parent_booking_id) return sum;            // child of a package — already counted under parent
-          if (r.session_type === 'package') return sum + (r.session_count || 1);
-          return sum + 1;
-        }, 0);
+        // Same logic as allVisibleRows filter: exclude deleted + no wix_session_id only
+        totalSessions = rowsForCount.filter(
+          (r) => r.status !== 'deleted' && !!r.wix_session_id
+        ).length;
       }
     } catch { /* fall back to count */ }
 
@@ -812,8 +836,8 @@ async function listWixBookings(req, res) {
         pagination: {
           page,
           limit,
-          total: count ?? 0,
-          totalPages: Math.max(1, Math.ceil((count || 0) / limit)),
+          total: totalVisible,
+          totalPages: Math.max(1, Math.ceil(totalVisible / limit)),
           totalSessions,
         },
       },
@@ -1281,6 +1305,13 @@ async function realtimeSyncFromWix(req, res) {
         console.log(
           `[realtimeSyncFromWix] ${eventType}: direct upsert ${directUpsert.upserted} booking(s)`
         );
+
+        // Trigger notifications immediately if something was upserted
+        if (directUpsert.upserted > 0 || directUpsert.sessionsUpserted > 0) {
+          processNewWixSessions().catch(err => {
+            console.error('[realtimeSyncFromWix] Notification trigger failed:', err);
+          });
+        }
       } catch (err) {
         console.error('[realtimeSyncFromWix] direct upsert failed:', err.message || err);
       }
@@ -1521,4 +1552,39 @@ module.exports = {
   deleteWixBooking,
   completeWixBooking,
   noShowWixBooking,
+  handleWixWebhook,
 };
+
+/**
+ * POST /api/wix/webhook/booking
+ * Wix Velo Webhook handler for instant sync.
+ */
+async function handleWixWebhook(req, res) {
+  try {
+    const { booking, bookingId } = req.body;
+    console.log(`[WixWebhook] Received booking event for ID: ${bookingId || booking?.id}`);
+
+    if (!booking) {
+      return res.status(400).json({ success: false, error: 'Missing booking object in payload' });
+    }
+
+    // 1. Sync the booking to Supabase immediately
+    const syncResult = await upsertEnrichedBookings(booking, { skipCreatedAfterFilter: true });
+    console.log(`[WixWebhook] Sync completed: ${syncResult.upserted} upserted`);
+
+    // 2. Trigger the notification service immediately (Meet link + Email/WA)
+    // This runs in the background so the webhook returns quickly
+    processNewWixSessions().catch(err => {
+      console.error('[WixWebhook] Notification trigger failed:', err);
+    });
+
+    return res.json({ 
+      success: true, 
+      message: 'Webhook processed and sync triggered',
+      bookingId: bookingId || booking?.id 
+    });
+  } catch (e) {
+    console.error('[handleWixWebhook] Error:', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}

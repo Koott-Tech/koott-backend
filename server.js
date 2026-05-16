@@ -48,6 +48,7 @@ const careerRoutes = require('./routes/careers');
 // const securityRoutes = require('./routes/security');
 const betterParentingRoutes = require('./routes/betterParenting');
 const financeRoutes = require('./routes/finance');
+const wixWebhookRoutes = require('./routes/wixWebhooks');
 const { isChildSpecialistEffective } = require('./utils/childSpecialistPricing');
 
 const app = express();
@@ -896,6 +897,7 @@ app.use('/api/assessments', assessmentsRoutes);
 app.use('/api/better-parenting', betterParentingRoutes);
 app.use('/api/careers', careerRoutes);
 app.use('/api/finance', financeRoutes);
+app.use('/api/wix/webhook', wixWebhookRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

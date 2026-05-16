@@ -15,17 +15,19 @@ const { supabaseAdmin } = require('../config/supabase');
 const meetLinkService = require('../utils/meetLinkService');
 const { addMinutesToTime } = require('../utils/helpers');
 const { resolveSessionDurationMinutes } = require('../utils/sessionMeetDuration');
+const emailService = require('../utils/emailService');
+const interaktService = require('../utils/interaktService');
 
 const LOG_PREFIX = '[wixMeetNotify]';
-
 
 /**
  * Process newly upserted Wix sessions that don't yet have a Google Meet link.
  *
  * @param {string[]} wixBookingIds – the wix_booking_id values just upserted
+ * @param {Map} tempPasswordMap – Map of wix_booking_id to temporary password
  * @returns {Promise<{processed: number, skipped: number, errors: number}>}
  */
-async function processNewWixSessions(wixBookingIds) {
+async function processNewWixSessions(wixBookingIds, tempPasswordMap = new Map()) {
   if (!wixBookingIds?.length) {
     return { processed: 0, skipped: 0, errors: 0 };
   }
@@ -33,7 +35,7 @@ async function processNewWixSessions(wixBookingIds) {
   // Fetch sessions that were just upserted and still lack a Meet link
   const { data: sessions, error } = await supabaseAdmin
     .from('sessions')
-    .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, wix_payload, source')
+    .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, wix_payload, source, price, amount')
     .in('wix_booking_id', wixBookingIds)
     .is('google_meet_link', null);
 
@@ -52,7 +54,8 @@ async function processNewWixSessions(wixBookingIds) {
 
   for (const session of sessions) {
     try {
-      const result = await processOneSession(session);
+      const tempPassword = tempPasswordMap.get(session.wix_booking_id) || null;
+      const result = await processOneSession(session, tempPassword);
       if (result === 'processed') processed++;
       else if (result === 'skipped') skipped++;
     } catch (err) {
@@ -69,9 +72,9 @@ async function processNewWixSessions(wixBookingIds) {
  * Process a single Wix session: create Meet link + send notifications.
  * Returns 'processed' | 'skipped'.
  */
-async function processOneSession(session) {
+async function processOneSession(session, tempPassword = null) {
   // TEMPORARY: disable auto Google Meet scheduling for Wix-created bookings.
-  const DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING = true;
+  const DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING = false;
 
   // Skip cancelled sessions
   const status = String(session.status || '').toLowerCase();
@@ -136,6 +139,7 @@ async function processOneSession(session) {
     ? clientDetails.user?.[0]
     : clientDetails.user;
   const clientEmail = clientUserData?.email;
+  const clientPhone = clientDetails.phone_number;
 
 
   // ── Duration ──────────────────────────────────────────────────────────
@@ -169,58 +173,99 @@ async function processOneSession(session) {
     };
   }
 
+  let meetResult = { success: false, meetLink: null };
+
   if (DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING) {
     console.log(`${LOG_PREFIX} Google Meet auto-scheduling temporarily disabled for session ${session.id}`);
   } else {
-    console.log(`${LOG_PREFIX} creating Meet link for session ${session.id} (wix: ${session.wix_booking_id})`);
+    // --- SAFE TESTING FILTER ---
+    // Only process bookings for your test email to avoid overlapping with Zapier for real clients.
+    const testEmail = 'abhishekravi063@gmail.com';
+    const currentClientEmail = session.wix_payload?.contactDetails?.email || session.wix_payload?.email || clientEmail;
 
-    const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
+    if (currentClientEmail !== testEmail) {
+      console.log(`${LOG_PREFIX} Skipping session ${session.id} - Not a test email (${currentClientEmail}).`);
+      return 'skipped';
+    }
+    // ----------------------------
+
+    console.log(`${LOG_PREFIX} Processing TEST session for ${currentClientEmail}...`);
+
+    meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
 
     // ── Save Meet link to session ─────────────────────────────────────────
-    if (meetResult.success && meetResult.meetLink) {
-      // Try full update first; fall back to just google_meet_link if extra columns don't exist
-      let { error: updateError } = await supabaseAdmin
+    const masterFallback = process.env.MASTER_FALLBACK_MEET_LINK || 'https://meet.google.com/ovr-qpsi-mwr';
+    const finalMeetLink = meetResult.meetLink || session.google_meet_link || masterFallback;
+
+    // Try full update first; fall back to just google_meet_link if extra columns don't exist
+    let { error: updateError } = await supabaseAdmin
+      .from('sessions')
+      .update({
+        google_meet_link: finalMeetLink,
+        google_meet_join_url: finalMeetLink,
+        google_meet_start_url: finalMeetLink,
+        google_calendar_event_id: meetResult.eventId || null,
+      })
+      .eq('id', session.id);
+
+    if (updateError && updateError.message && updateError.message.includes('column')) {
+      ({ error: updateError } = await supabaseAdmin
         .from('sessions')
-        .update({
-          google_meet_link: meetResult.meetLink,
-          google_meet_join_url: meetResult.meetLink,
-          google_meet_start_url: meetResult.meetLink,
-          google_calendar_event_id: meetResult.eventId || null,
-        })
-        .eq('id', session.id);
+        .update({ google_meet_link: finalMeetLink })
+        .eq('id', session.id));
+    }
 
-      // Fallback: if columns are missing, just save the meet link
-      if (updateError && updateError.message && updateError.message.includes('column')) {
-        console.warn(`${LOG_PREFIX} some columns missing, falling back to google_meet_link only`);
-        ({ error: updateError } = await supabaseAdmin
-          .from('sessions')
-          .update({ google_meet_link: meetResult.meetLink })
-          .eq('id', session.id));
-      }
-
-      if (updateError) {
-        console.error(`${LOG_PREFIX} failed to save Meet link for session ${session.id}:`, updateError.message);
-        // Still try to send notifications with the link we have
-      } else {
-        const method = meetResult.method || 'unknown';
-        console.log(`${LOG_PREFIX} ✅ Meet link saved for session ${session.id}:`, {
-          method,
-          meetLink: meetResult.meetLink,
-          hasOAuth: !!userAuth,
-        });
-      }
-    } else {
-      console.warn(`${LOG_PREFIX} ⚠️ Meet link creation failed for session ${session.id}:`, {
-        error: meetResult.error,
-        method: meetResult.method,
-      });
-      // Continue to send WhatsApp even without a real Meet link
+    if (!updateError) {
+      console.log(`${LOG_PREFIX} ✅ Session updated for ${session.id} (Link: ${finalMeetLink === masterFallback ? 'MASTER FALLBACK' : 'Real Meet'})`);
     }
   }
 
-  // TEMPORARY: Disable all auto booking notifications for Wix-created sessions.
-  // (email + WhatsApp to client/psychologist)
-  console.log(`${LOG_PREFIX} notifications temporarily disabled for session ${session.id}`);
+  // ── Send Notifications ───────────────────────────────────────────────
+  try {
+    const meetLink = meetResult.meetLink || session.google_meet_link || process.env.MASTER_FALLBACK_MEET_LINK;
+    
+    if (!meetLink) {
+      console.log(`${LOG_PREFIX} Skipping notifications for ${session.id} - No meet link available.`);
+      return 'processed';
+    }
+
+    const emailData = {
+      sessionId: session.id,
+      clientName: clientName,
+      psychologistName: psychologistName,
+      clientEmail: clientEmail,
+      psychologistEmail: psychologistDetails.email,
+      sessionDate: session.scheduled_date,
+      sessionTime: session.scheduled_time,
+      meetLink: meetLink,
+      price: session.price ?? session.amount,
+      status: session.status,
+      psychologistId: session.psychologist_id,
+      clientId: session.client_id,
+      tempPassword: tempPassword,
+    };
+
+    // Send the combined confirmation email
+    await emailService.sendSessionConfirmation(emailData);
+    console.log(`${LOG_PREFIX} ✅ Combined confirmation email sent to ${clientEmail}`);
+
+    // Send WhatsApp confirmation
+    const whatsappDetails = {
+      clientName: clientName,
+      psychologistName: psychologistName,
+      date: session.scheduled_date,
+      time: session.scheduled_time,
+      meetLink: meetResult.meetLink || session.google_meet_link,
+    };
+    
+    if (clientPhone) {
+      await interaktService.sendBookingConfirmation(clientPhone, whatsappDetails);
+      console.log(`${LOG_PREFIX} ✅ WhatsApp confirmation sent to ${clientPhone}`);
+    }
+
+  } catch (notifyErr) {
+    console.error(`${LOG_PREFIX} ❌ notification error for session ${session.id}:`, notifyErr.message || notifyErr);
+  }
 
   return 'processed';
 }

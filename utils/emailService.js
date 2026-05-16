@@ -195,7 +195,8 @@ class EmailService {
         receiptId, // Receipt ID for generating download URL
         receiptPdfBuffer, // PDF buffer to attach to email
         googleCalendarEventId: googleCalendarEventIdRaw,
-        google_calendar_event_id
+        google_calendar_event_id,
+        tempPassword // New account password if applicable
       } = sessionData;
 
       const googleCalendarEventId = googleCalendarEventIdRaw || google_calendar_event_id;
@@ -311,7 +312,8 @@ class EmailService {
           receiptPdfBuffer: receiptPdfBuffer || null, // Receipt PDF buffer to attach (not used anymore)
           receiptFileName: receiptFileName, // Receipt filename for attachment (not used anymore)
           packageInfo: packageInfo || null, // Package information
-          durationMinutes
+          durationMinutes,
+          tempPassword: tempPassword || null // Pass it through
         });
       } else {
         console.log('⚠️ Skipping client email (placeholder or missing):', clientEmail);
@@ -381,7 +383,8 @@ class EmailService {
       receiptPdfBuffer,
       receiptFileName,
       packageInfo,
-      durationMinutes = 50
+      durationMinutes = 50,
+      tempPassword = null // Add this
     } = emailData;
 
     // Get logo URL - use favicon for email compatibility
@@ -405,7 +408,9 @@ class EmailService {
       const completed = packageInfo.completedSessions || 0;
       const booked = Math.min(total, completed + 1);
       const left = Math.max(total - booked, 0);
-      packageLine = `•⁠  ⁠Package: ${booked} of ${total} sessions booked, ${left} left<br>`;
+      packageLine = `• Specialist: ${psychologistName} (Session ${booked} of ${total})<br>`;
+    } else {
+      packageLine = `• Specialist: ${psychologistName}<br>`;
     }
 
     // Format price for display
@@ -417,10 +422,9 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
       subject: `Session Confirmed - ${scheduledDate} at ${scheduledTime}`,
       html: `
@@ -430,133 +434,110 @@ class EmailService {
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
         </head>
-        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f7fa;">
-          <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f7fa;">
+        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #ffffff;">
+          <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #ffffff;">
             <tr>
-              <td style="padding: 20px 10px;">
-                <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-                  <!-- Header -->
+              <td align="center" style="padding: 20px 10px;">
+                <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);">
+                  <!-- Header Image -->
                   <tr>
-                    <td style="background: #23153B; padding: 40px 40px; text-align: center;">
-                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
-                        <tr>
-                          <td align="center">
-                            <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -1px;">KOOTT</h1>
-                            <p style="color: #ffffff; margin: 5px 0 0 0; font-size: 14px; opacity: 0.8; letter-spacing: 1px; text-transform: uppercase;">Professional Therapy</p>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td align="center" style="padding-top: 25px;">
-                            <h2 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 600;">Session Confirmed</h2>
-                          </td>
-                        </tr>
-                      </table>
+                    <td style="padding: 0;">
+                      <img src="cid:email-header" alt="Thank You for applying to Koott" style="width: 100%; max-width: 600px; height: auto; display: block;">
                     </td>
                   </tr>
                   
                   <!-- Main Content -->
                   <tr>
                     <td style="padding: 40px 30px;">
-                      <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
+                      <h2 style="color: #1a202c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Hey ${firstName}.,</h2>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
-                        Your session with <span style="color: #23153B; font-weight: 600;">Koott</span> is scheduled.
+                        Your session with <strong>Koott</strong> is scheduled.
                       </p>
+
+                      ${tempPassword ? `
+                      <!-- Account Credentials Section -->
+                      <div style="background-color: #f3fff3; background-image: linear-gradient(to bottom, #f3fff3, #d4ffd4); padding: 30px; border-radius: 12px; margin-bottom: 30px;">
+                        <h3 style="color: #064e3b; margin: 0 0 10px 0; font-size: 16px; font-weight: 700;">Your Account is Ready!</h3>
+                        <p style="color: #064e3b; font-size: 14px; margin: 0 0 15px 0;">We have created an account for you to manage your sessions.</p>
+                        <div style="background: rgba(255, 255, 255, 0.6); padding: 15px; border-radius: 8px;">
+                          <p style="margin: 0; font-size: 14px; color: #064e3b;"><strong>Email:</strong> ${to}</p>
+                          <p style="margin: 5px 0 0 0; font-size: 14px; color: #064e3b;"><strong>Password:</strong> ${tempPassword}</p>
+                        </div>
+                        <p style="color: #15803d; font-size: 12px; margin: 10px 0 0 0;">You can change your password after logging in.</p>
+                      </div>
+                      ` : ''}
                       
-                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">Here are the details:</p>
+                      <p style="color: #4a5568; font-size: 16px; font-weight: 500; margin: 0 0 20px 0;">Here are the details:</p>
                       
                       <!-- Session Details -->
-                      <div style="color: #4a5568; font-size: 15px; line-height: 1.8; margin: 0 0 30px 0;">
-                        •⁠  ⁠Specialist: ${psychologistName}<br>
+                      <div style="color: #4a5568; font-size: 16px; line-height: 2; margin: 0 0 30px 0;">
                         ${packageLine}
-                        •⁠  ⁠Date: ${formattedDateShort}<br>
-                        •⁠  ⁠Time: ${scheduledTime} (IST)<br>
-                        •⁠  ⁠Duration: ${durationMinutes} min<br>
-                        ${formattedPrice ? `•⁠  ⁠Price: ₹${formattedPrice}<br>` : ''}
+                        • Date: ${formattedDateShort}<br>
+                        • Time: ${scheduledTime} (IST)<br>
+                        • Duration: ${durationMinutes} min<br>
+                        ${formattedPrice ? `• Price: ₹${formattedPrice}` : ''}
                       </div>
                       
                       ${googleMeetLink ? `
                       <!-- Join Session Section -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
-                          <td style="padding: 0 0 20px 0; text-align: center;">
-                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #23153B; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
+                          <td style="padding: 0 0 20px 0;">
+                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background-color: #189e4f; color: #ffffff; padding: 16px 40px; text-decoration: none; border-radius: 12px; font-weight: 600; font-size: 18px; margin-bottom: 20px;">
                               Join Your Session
                             </a>
-                            <p style="color: #4a5568; font-size: 13px; margin: 15px 0 0 0; word-break: break-all;">
-                              Or copy this link: <a href="${googleMeetLink}" style="color: #23153B; text-decoration: underline;">${googleMeetLink}</a>
+                            <p style="color: #4a5568; font-size: 15px; margin: 0; line-height: 1.5;">
+                              Or join using this link: <a href="${googleMeetLink}" style="color: #189e4f; text-decoration: none;">${googleMeetLink}</a>
                             </p>
-                          </td>
-                        </tr>
-                      </table>
-                      ` : `
-                      <!-- Meet link not created - Support message -->
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
-                        <tr>
-                          <td style="padding: 0 0 20px 0; text-align: center; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
-                            <p style="color: #92400e; font-size: 14px; margin: 0; padding: 16px;">
-                              Due to some issue Google Meet didn't get created. Please contact our support.
-                            </p>
-                          </td>
-                        </tr>
-                      </table>
-                      `}
-                      
-                      ${googleCalendarLink || outlookCalendarLink ? `
-                      <!-- Add to Calendar Section -->
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
-                        <tr>
-                          <td style="padding: 0 0 20px 0; text-align: center;">
-                            ${googleCalendarLink ? `
-                            <a href="${googleCalendarLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
-                              Add to Google Calendar
-                            </a>
-                            ` : ''}
-                            ${outlookCalendarLink ? `
-                            <a href="${outlookCalendarLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
-                              Add to Outlook
-                            </a>
-                            ` : ''}
                           </td>
                         </tr>
                       </table>
                       ` : ''}
                       
-                      <!-- Important Reminders -->
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                      <!-- Calendar & WhatsApp Buttons -->
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 40px 0;">
                         <tr>
-                          <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #2d3748; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">Reminders</h3>
-                            <ul style="color: #4a5568; font-size: 14px; line-height: 1.8; margin: 0; padding-left: 20px;">
-                              <li>Please join the session 10 minutes before the scheduled time</li>
-                              <li>Ensure you have a stable internet connection</li>
-                              <li>Find a quiet, private space for your session</li>
-                              <li>Have any relevant documents or notes ready</li>
-                            </ul>
+                          <td>
+                            ${googleCalendarLink ? `
+                            <a href="${googleCalendarLink}" target="_blank" style="display: inline-block; border: 1.5px solid #189e4f; color: #189e4f; padding: 12px 24px; text-decoration: none; border-radius: 100px; font-weight: 600; font-size: 14px; margin-right: 12px; margin-bottom: 12px;">
+                              <img src="https://img.icons8.com/ios-filled/100/189e4f/calendar.png" alt="" style="width: 18px; height: 18px; vertical-align: middle; margin-right: 8px;"> Add to Google Calendar
+                            </a>
+                            ` : ''}
+                            <a href="https://wa.me/918606040400" target="_blank" style="display: inline-block; border: 1.5px solid #189e4f; color: #189e4f; padding: 12px 24px; text-decoration: none; border-radius: 100px; font-weight: 600; font-size: 14px; margin-bottom: 12px;">
+                              <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/120px-WhatsApp.svg.png" alt="" style="width: 18px; height: 18px; vertical-align: middle; margin-right: 8px;"> WhatsApp Us
+                            </a>
                           </td>
                         </tr>
                       </table>
                       
-                      <!-- Receipt Section -->
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
-                        <tr>
-                          <td style="padding: 0 0 20px 0; text-align: center;">
-                            <p style="color: #4a5568; font-size: 15px; margin: 0;">
-                              Your payment receipt is ready for download, <a href="${receiptLink}" style="color: #3f2e73; text-decoration: underline; font-weight: 600;">Click Here</a>
-                            </p>
-                          </td>
-                        </tr>
-                      </table>
-                      
-                      <!-- Footer Text -->
-                      <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0; text-align: center;">We're looking forward to seeing you on the scheduled time</p>
-                      
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0; text-align: center;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or ${contactPhone}</p>
-                      
-                      <p style="color: #2d3748; font-size: 15px; margin: 0;">
-                        Best regards,<br>
-                        <strong style="color: #23153B;">The Koott Team</strong>
+                      <!-- Reminders -->
+                      <div style="background-color: #f3fff3; background-image: linear-gradient(to bottom, #f3fff3, #d4ffd4); padding: 30px; border-radius: 12px; margin-bottom: 40px;">
+                        <h3 style="color: #064e3b; margin: 0 0 20px 0; font-size: 20px; font-weight: 700;">Reminders</h3>
+                        <ul style="color: #064e3b; font-size: 15px; line-height: 1.8; margin: 0; padding-left: 20px;">
+                          <li style="margin-bottom: 8px;">Please join the session 10 minutes before the scheduled time</li>
+                          <li style="margin-bottom: 8px;">Ensure you have a stable internet connection</li>
+                          <li style="margin-bottom: 8px;">Find a quiet, private space for your session</li>
+                          <li>Have any relevant documents or notes ready</li>
+                        </ul>
+                      </div>
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td style="background-color: #012f23; padding: 40px 30px; color: #ffffff;">
+                      <p style="margin: 0 0 15px 0; font-size: 14px; line-height: 1.6; color: #e5e7eb;">We're looking forward to seeing you at the scheduled time.</p>
+                      <p style="margin: 0 0 25px 0; font-size: 14px; line-height: 1.6; color: #e5e7eb;">
+                        If you have any questions, don't hesitate to get in touch with us at<br>
+                        <a href="mailto:care@koott.in" style="color: #ffffff; text-decoration: none;">care@koott.in</a>, via WhatsApp or call us at +91 8606040400
                       </p>
+                      <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                        <tr>
+                          <td style="font-size: 14px; color: #9ca3af;">കൂട്ടിനുണ്ട് കൂട്ട്</td>
+                          <td align="right" style="font-size: 14px; color: #9ca3af;">Koott Care Pvt. Ltd.</td>
+                        </tr>
+                      </table>
                     </td>
                   </tr>
                 </table>
@@ -567,27 +548,20 @@ class EmailService {
         </html>
       `,
       attachments: [
+        {
+          filename: 'header.png',
+          path: require('path').join(__dirname, '../../littlecare-frontend/public/email header.png'),
+          cid: 'email-header'
+        },
         ...(calendarInvite ? [{
           filename: calendarInvite.filename,
           content: calendarInvite.content,
           contentType: calendarInvite.contentType
         }] : [])
-        // NO PDF attachment - receipt is available via link
       ]
     };
 
-    // Override replyTo and ensure from address is noreply
-    const finalMailOptions = {
-      ...mailOptions,
-      from: {
-        name: 'Koott',
-        address: 'noreply@koott.com'
-      },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com'
-    };
-    
-    return this.transporter.sendMail(finalMailOptions);
+    return this.transporter.sendMail(mailOptions);
   }
 
   async sendPsychologistConfirmation(emailData) {
@@ -617,10 +591,9 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
       subject: `New Session Scheduled - ${scheduledDate} at ${scheduledTime}`,
       html: `
@@ -637,7 +610,7 @@ class EmailService {
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header -->
                   <tr>
-                    <td style="background: #23153B; padding: 40px 40px; text-align: center;">
+                    <td style="background: #3d985c; padding: 40px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center">
@@ -665,7 +638,7 @@ class EmailService {
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
+                            <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
                             <table role="presentation" style="width: 100%; border-collapse: collapse;">
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Date:</strong></td>
@@ -686,7 +659,7 @@ class EmailService {
                               ${packageInfo && packageInfo.totalSessions ? `
                               <tr>
                                 <td colspan="2" style="padding: 15px 0 8px 0;">
-                                  <p style="margin: 0; color: #3f2e73; font-weight: 600; font-size: 14px;">📦 Package Session</p>
+                                  <p style="margin: 0; color: #3d985c; font-weight: 600; font-size: 14px;">📦 Package Session</p>
                                   <p style="margin: 5px 0 0 0; color: #4a5568; font-size: 13px;">
                                     <strong>Progress:</strong> ${packageInfo.completedSessions || 0}/${packageInfo.totalSessions} sessions completed, ${packageInfo.remainingSessions || 0} remaining
                                   </p>
@@ -721,12 +694,12 @@ class EmailService {
                             <p style="color: #4a5568; font-size: 14px; margin: 0 0 20px 0;">Add this session to your calendar:</p>
                             <div style="text-align: center;">
                               ${googleCalendarLink ? `
-                              <a href="${googleCalendarLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
+                              <a href="${googleCalendarLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
                                 📅 Google Calendar
                               </a>
                               ` : ''}
                               ${outlookCalendarLink ? `
-                              <a href="${outlookCalendarLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
+                              <a href="${outlookCalendarLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
                                 📅 Outlook
                               </a>
                               ` : ''}
@@ -743,11 +716,11 @@ class EmailService {
                           <td style="padding: 0 0 20px 0; text-align: center;">
                             <h3 style="color: #2d3748; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">Join Your Session</h3>
                             <p style="color: #4a5568; font-size: 14px; margin: 0 0 20px 0;">Click the button below to join your Google Meet session:</p>
-                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
+                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
                               Join Google Meet
                             </a>
                             <p style="color: #4a5568; font-size: 12px; margin: 15px 0 0 0; word-break: break-all;">
-                              Or copy this link: <a href="${googleMeetLink}" style="color: #3f2e73; text-decoration: underline;">${googleMeetLink}</a>
+                              Or copy this link: <a href="${googleMeetLink}" style="color: #3d985c; text-decoration: underline;">${googleMeetLink}</a>
                             </p>
                           </td>
                         </tr>
@@ -783,11 +756,11 @@ class EmailService {
                       <!-- Footer Text -->
                       <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">Please ensure you're available 5 minutes before the scheduled time to start the session.</p>
                       
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a></p>
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a></p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The Koott Team</strong>
+                        <strong style="color: #3d985c;">The Koott Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -797,7 +770,7 @@ class EmailService {
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                         This email confirms your scheduled therapy session. Please ensure you're prepared and on time.<br>
-                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
                   </tr>
@@ -852,10 +825,9 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
       subject,
       html: `
@@ -872,7 +844,7 @@ class EmailService {
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header with Logo -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
@@ -899,7 +871,7 @@ class EmailService {
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
+                            <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
                             <table role="presentation" style="width: 100%; border-collapse: collapse;">
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Session type:</strong></td>
@@ -968,7 +940,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">Koott Platform</strong>
+                        <strong style="color: #3d985c;">Koott Platform</strong>
                       </p>
                     </td>
                   </tr>
@@ -978,7 +950,7 @@ class EmailService {
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                         This is an automated notification from the Koott therapy platform.<br>
-                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
                   </tr>
@@ -1041,10 +1013,9 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
       subject: `Reschedule Request - ${clientName} (${formattedFromDate} → ${formattedToDate})`,
       html: `
@@ -1061,7 +1032,7 @@ class EmailService {
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header with Logo -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
@@ -1088,7 +1059,7 @@ class EmailService {
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Reschedule Details</h3>
+                            <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Reschedule Details</h3>
                             <table role="presentation" style="width: 100%; border-collapse: collapse;">
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client:</strong></td>
@@ -1155,7 +1126,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">Koott Platform</strong>
+                        <strong style="color: #3d985c;">Koott Platform</strong>
                       </p>
                     </td>
                   </tr>
@@ -1165,7 +1136,7 @@ class EmailService {
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                         This is an automated notification from the Koott therapy platform.<br>
-                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
                   </tr>
@@ -1212,10 +1183,9 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
       subject: `New ${roleLabel} Registered - ${fullName || email}`,
       html: `
@@ -1232,7 +1202,7 @@ class EmailService {
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header with Logo -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
@@ -1259,7 +1229,7 @@ class EmailService {
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">User Details</h3>
+                            <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">User Details</h3>
                             <table role="presentation" style="width: 100%; border-collapse: collapse;">
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Role:</strong></td>
@@ -1315,7 +1285,7 @@ class EmailService {
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">Koott Platform</strong>
+                        <strong style="color: #3d985c;">Koott Platform</strong>
                       </p>
                     </td>
                   </tr>
@@ -1325,7 +1295,7 @@ class EmailService {
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                         This is an automated notification from the Koott therapy platform.<br>
-                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
                   </tr>
@@ -1525,10 +1495,9 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
       subject: `Session Rescheduled - ${newDate} at ${newTime}`,
       html: `
@@ -1545,7 +1514,7 @@ class EmailService {
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header with Logo -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
@@ -1567,7 +1536,7 @@ class EmailService {
                       <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
-                        Your session with <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Koott</span> has been rescheduled.
+                        Your session with <span style="font-style: italic; color: #3d985c; font-weight: 600;">Koott</span> has been rescheduled.
                       </p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">Here are the updated details:</p>
@@ -1584,11 +1553,11 @@ class EmailService {
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="padding: 0 0 20px 0; text-align: center;">
-                            <a href="${meetLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
+                            <a href="${meetLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
                               Join Your Session
                             </a>
                             <p style="color: #4a5568; font-size: 13px; margin: 15px 0 0 0; word-break: break-all;">
-                              Or copy this link: <a href="${meetLink}" style="color: #3f2e73; text-decoration: underline;">${meetLink}</a>
+                              Or copy this link: <a href="${meetLink}" style="color: #3d985c; text-decoration: underline;">${meetLink}</a>
                             </p>
                           </td>
                         </tr>
@@ -1612,12 +1581,12 @@ class EmailService {
                         <tr>
                           <td style="padding: 0 0 20px 0; text-align: center;">
                             ${googleCalendarLink ? `
-                            <a href="${googleCalendarLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
+                            <a href="${googleCalendarLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
                               Add to Google Calendar
                             </a>
                             ` : ''}
                             ${outlookCalendarLink ? `
-                            <a href="${outlookCalendarLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
+                            <a href="${outlookCalendarLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
                               Add to Outlook
                             </a>
                             ` : ''}
@@ -1644,11 +1613,11 @@ class EmailService {
                       <!-- Footer Text -->
                       <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0; text-align: center;">We're looking forward to seeing you on the scheduled time</p>
                       
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0; text-align: center;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or ${contactPhone}</p>
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0; text-align: center;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or ${contactPhone}</p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The <span style="font-style: italic; color: #3f2e73;">Koott</span> Team</strong>
+                        <strong style="color: #3d985c;">The <span style="font-style: italic; color: #3d985c;">Koott</span> Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -1757,10 +1726,9 @@ class EmailService {
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
       subject: `Free Assessment Confirmed - ${assessmentDate} at ${assessmentTime}`,
       html: `
@@ -1777,7 +1745,7 @@ class EmailService {
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header with Logo -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
@@ -1804,7 +1772,7 @@ class EmailService {
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Assessment Details</h3>
+                            <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Assessment Details</h3>
                             <table role="presentation" style="width: 100%; border-collapse: collapse;">
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Assessment Number:</strong></td>
@@ -1832,7 +1800,7 @@ class EmailService {
                               </tr>
                               <tr>
                                 <td colspan="2" style="padding: 15px 0 8px 0;">
-                                  <p style="margin: 0; color: #3f2e73; font-weight: 600; font-size: 14px;">You have ${remainingAssessments} free assessment${remainingAssessments !== 1 ? 's' : ''} remaining</p>
+                                  <p style="margin: 0; color: #3d985c; font-weight: 600; font-size: 14px;">You have ${remainingAssessments} free assessment${remainingAssessments !== 1 ? 's' : ''} remaining</p>
                                 </td>
                               </tr>
                             </table>
@@ -1847,11 +1815,11 @@ class EmailService {
                           <td style="padding: 0 0 20px 0; text-align: center;">
                             <h3 style="color: #2d3748; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">Join Your Session</h3>
                             <p style="color: #4a5568; font-size: 14px; margin: 0 0 20px 0;">Click the button below to join your Google Meet session:</p>
-                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
+                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
                               Join Google Meet
                             </a>
                             <p style="color: #4a5568; font-size: 12px; margin: 15px 0 0 0; word-break: break-all;">
-                              Or copy this link: <a href="${googleMeetLink}" style="color: #3f2e73; text-decoration: underline;">${googleMeetLink}</a>
+                              Or copy this link: <a href="${googleMeetLink}" style="color: #3d985c; text-decoration: underline;">${googleMeetLink}</a>
                             </p>
                           </td>
                         </tr>
@@ -1887,11 +1855,11 @@ class EmailService {
                       <!-- Footer Text -->
                       <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">We look forward to meeting you and supporting you on your wellness journey!</p>
                       
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a></p>
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a></p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The Koott Team</strong>
+                        <strong style="color: #3d985c;">The Koott Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -1901,7 +1869,7 @@ class EmailService {
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                         This is your free assessment session. No payment is required.<br>
-                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
                   </tr>
@@ -1959,10 +1927,9 @@ The Koott Team
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
-      replyTo: 'noreply@koott.com',
-      sender: 'noreply@koott.com',
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
       subject: `Free Assessment Scheduled - ${assessmentDate} at ${assessmentTime}`,
       html: `
@@ -1979,7 +1946,7 @@ The Koott Team
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header with Logo -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
@@ -2006,7 +1973,7 @@ The Koott Team
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Assessment Details</h3>
+                            <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Assessment Details</h3>
                             <table role="presentation" style="width: 100%; border-collapse: collapse;">
                               <tr>
                                 <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client Name:</strong></td>
@@ -2044,11 +2011,11 @@ The Koott Team
                           <td style="padding: 0 0 20px 0; text-align: center;">
                             <h3 style="color: #2d3748; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">Join Your Session</h3>
                             <p style="color: #4a5568; font-size: 14px; margin: 0 0 20px 0;">Click the button below to join your Google Meet session:</p>
-                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
+                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
                               Join Google Meet
                             </a>
                             <p style="color: #4a5568; font-size: 12px; margin: 15px 0 0 0; word-break: break-all;">
-                              Or copy this link: <a href="${googleMeetLink}" style="color: #3f2e73; text-decoration: underline;">${googleMeetLink}</a>
+                              Or copy this link: <a href="${googleMeetLink}" style="color: #3d985c; text-decoration: underline;">${googleMeetLink}</a>
                             </p>
                           </td>
                         </tr>
@@ -2085,11 +2052,11 @@ The Koott Team
                       <!-- Footer Text -->
                       <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">Please ensure you're available at the scheduled time.</p>
                       
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a></p>
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a></p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The Koott Team</strong>
+                        <strong style="color: #3d985c;">The Koott Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -2099,7 +2066,7 @@ The Koott Team
                     <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                       <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                         This is a free assessment session. Please provide quality care.<br>
-                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                       </p>
                     </td>
                   </tr>
@@ -2126,10 +2093,9 @@ The Koott Team
       const mailOptions = {
         from: {
           name: 'Koott',
-          address: 'noreply@koott.com'
+          address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
         },
-        replyTo: 'noreply@koott.com',
-        sender: 'noreply@koott.com',
+        replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
         to: to,
         subject: subject,
         html: html,
@@ -2172,10 +2138,9 @@ The Koott Team
       const mailOptions = {
         from: {
           name: 'Koott',
-          address: 'noreply@koott.com'
+          address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
         },
-        replyTo: 'noreply@koott.com',
-        sender: 'noreply@koott.com',
+        replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
         to: to,
         subject: 'Session Cancelled',
         html: `
@@ -2192,7 +2157,7 @@ The Koott Team
                   <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                     <!-- Header with Logo -->
                     <tr>
-                      <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                      <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
@@ -2219,7 +2184,7 @@ The Koott Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0;">
-                              <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Cancelled Session Details</h3>
+                              <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Cancelled Session Details</h3>
                               <table role="presentation" style="width: 100%; border-collapse: collapse;">
                                 <tr>
                                   <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Date:</strong></td>
@@ -2250,7 +2215,7 @@ The Koott Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0; text-align: center;">
-                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
                                 Book New Session
                               </a>
                             </td>
@@ -2259,11 +2224,11 @@ The Koott Team
                         ` : ''}
                         
                         <!-- Footer Text -->
-                        <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a></p>
+                        <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a></p>
                         
                         <p style="color: #2d3748; font-size: 15px; margin: 0;">
                           Best regards,<br>
-                          <strong style="color: #3f2e73;">The Koott Team</strong>
+                          <strong style="color: #3d985c;">The Koott Team</strong>
                         </p>
                       </td>
                     </tr>
@@ -2273,7 +2238,7 @@ The Koott Team
                       <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                         <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                           This is an automated message. Please do not reply to this email.<br>
-                          If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                          If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                         </p>
                       </td>
                     </tr>
@@ -2318,10 +2283,9 @@ The Koott Team
       const mailOptions = {
         from: {
           name: 'Koott',
-          address: 'noreply@koott.com'
+          address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
         },
-        replyTo: 'noreply@koott.com',
-        sender: 'noreply@koott.com',
+        replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
         to: to,
         subject: 'No-Show Notice - Session Missed',
         html: `
@@ -2338,7 +2302,7 @@ The Koott Team
                   <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                     <!-- Header with Logo -->
                     <tr>
-                      <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                      <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
@@ -2365,7 +2329,7 @@ The Koott Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0;">
-                              <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Missed Session Details</h3>
+                              <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Missed Session Details</h3>
                               <table role="presentation" style="width: 100%; border-collapse: collapse;">
                                 <tr>
                                   <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Date:</strong></td>
@@ -2405,7 +2369,7 @@ The Koott Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0; text-align: center;">
-                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
                                 Reschedule Session
                               </a>
                             </td>
@@ -2415,11 +2379,11 @@ The Koott Team
                         <!-- Footer Text -->
                         <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">We're here to help you reschedule or address any concerns. Don't hesitate to reach out!</p>
                         
-                        <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a></p>
+                        <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a></p>
                         
                         <p style="color: #2d3748; font-size: 15px; margin: 0;">
                           Best regards,<br>
-                          <strong style="color: #3f2e73;">The Koott Team</strong>
+                          <strong style="color: #3d985c;">The Koott Team</strong>
                         </p>
                       </td>
                     </tr>
@@ -2429,7 +2393,7 @@ The Koott Team
                       <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                         <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                           This is an automated message. Please do not reply to this email.<br>
-                          If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                          If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                         </p>
                       </td>
                     </tr>
@@ -2464,10 +2428,9 @@ The Koott Team
       const mailOptions = {
         from: {
           name: 'Koott',
-          address: 'noreply@koott.com'
+          address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
         },
-        replyTo: 'noreply@koott.com',
-        sender: 'noreply@koott.com',
+        replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
         to: clientEmail,
         subject: 'Session Completed - Summary & Report Available',
         html: `
@@ -2484,7 +2447,7 @@ The Koott Team
                   <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                     <!-- Header with Logo -->
                     <tr>
-                      <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                      <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
@@ -2511,7 +2474,7 @@ The Koott Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0;">
-                              <h3 style="color: #3f2e73; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
+                              <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
                               <table role="presentation" style="width: 100%; border-collapse: collapse;">
                                 <tr>
                                   <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Child:</strong></td>
@@ -2541,7 +2504,7 @@ The Koott Team
                         <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                           <tr>
                             <td style="padding: 0 0 20px 0; text-align: center;">
-                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                              <a href="${PRODUCTION_SITE_URL}/profile" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
                                 View Session Summary & Report
                               </a>
                             </td>
@@ -2563,11 +2526,11 @@ The Koott Team
                         </table>
                         
                         <!-- Footer Text -->
-                        <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions about the session or need to schedule a follow-up, please contact us at <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a></p>
+                        <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions about the session or need to schedule a follow-up, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a></p>
                         
                         <p style="color: #2d3748; font-size: 15px; margin: 0;">
                           Best regards,<br>
-                          <strong style="color: #3f2e73;">The Koott Team</strong>
+                          <strong style="color: #3d985c;">The Koott Team</strong>
                         </p>
                       </td>
                     </tr>
@@ -2577,7 +2540,7 @@ The Koott Team
                       <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
                         <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
                           This is an automated message. Please do not reply to this email.<br>
-                          If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3f2e73; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3f2e73; text-decoration: none;">${contactPhone}</a>
+                          If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
                         </p>
                       </td>
                     </tr>
@@ -2626,7 +2589,7 @@ The Koott Team
             <td style="padding: 20px 10px;">
               <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                 <tr>
-                  <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                  <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                       <tr>
                         <td align="center" style="padding-bottom: 15px;">
@@ -2652,7 +2615,7 @@ The Koott Team
                     <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 24px 0;">
                       <tr>
                         <td style="padding: 16px; background: #f8f5ff; border: 1px solid #e9ddff; border-radius: 10px;">
-                          <p style="margin: 0 0 8px 0; color: #3f2e73; font-size: 15px; font-weight: 700;">Event</p>
+                          <p style="margin: 0 0 8px 0; color: #3d985c; font-size: 15px; font-weight: 700;">Event</p>
                           <p style="margin: 0; color: #2d3748; font-size: 15px;">${safeTitle}</p>
                         </td>
                       </tr>
@@ -2671,7 +2634,7 @@ The Koott Team
                       </tr>
                       <tr>
                         <td style="text-align: center;">
-                          <a href="${safeJoin}" target="_blank" rel="noopener noreferrer" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                          <a href="${safeJoin}" target="_blank" rel="noopener noreferrer" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
                             Join Session
                           </a>
                         </td>
@@ -2694,7 +2657,7 @@ The Koott Team
                       You will also receive the same details on WhatsApp.
                     </p>
                     <p style="color: #2d3748; font-size: 15px; margin: 18px 0 0 0;">
-                      — <strong style="color: #3f2e73;">The Koott Team</strong>
+                      — <strong style="color: #3d985c;">The Koott Team</strong>
                     </p>
                   </td>
                 </tr>
@@ -2738,7 +2701,7 @@ The Koott Team
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
       replyTo: 'hey@koott.com',
       to: to,
@@ -2757,7 +2720,7 @@ The Koott Team
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header with Logo -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
@@ -2779,7 +2742,7 @@ The Koott Team
                       <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
-                        We're thrilled to have you join <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Koott</span>. Your account has been created successfully.
+                        We're thrilled to have you join <span style="font-style: italic; color: #3d985c; font-weight: 600;">Koott</span>. Your account has been created successfully.
                       </p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">You can access your dashboard using the credentials below:</p>
@@ -2806,7 +2769,7 @@ The Koott Team
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="text-align: center;">
-                            <a href="${loginUrl}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;">
+                            <a href="${loginUrl}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;">
                               Log In to Your Dashboard
                             </a>
                           </td>
@@ -2830,11 +2793,11 @@ The Koott Team
                         <li>Track your progress over time</li>
                       </ul>
                       
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:hey@koott.com" style="color: #3f2e73; text-decoration: none;">hey@koott.com</a> or +91-9539007766</p>
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:hey@koott.com" style="color: #3d985c; text-decoration: none;">hey@koott.com</a> or +91-9539007766</p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Best regards,<br>
-                        <strong style="color: #3f2e73;">The <span style="font-style: italic; color: #3f2e73;">Koott</span> Team</strong>
+                        <strong style="color: #3d985c;">The <span style="font-style: italic; color: #3d985c;">Koott</span> Team</strong>
                       </p>
                     </td>
                   </tr>
@@ -2874,7 +2837,7 @@ The Koott Team
     const mailOptions = {
       from: {
         name: 'Koott',
-        address: 'noreply@koott.com'
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
       },
       replyTo: 'hey@koott.com',
       to: to,
@@ -2893,7 +2856,7 @@ The Koott Team
                 <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
                   <!-- Header with Logo -->
                   <tr>
-                    <td style="background: linear-gradient(135deg, #3f2e73 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                    <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
@@ -2915,7 +2878,7 @@ The Koott Team
                       <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hello Dr. ${firstName},</p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
-                        We are delighted to have you on board with <span style="font-style: italic; color: #3f2e73; font-weight: 600;">Koott</span>. Your therapist account has been set up, and you can now access your dedicated dashboard.
+                        We are delighted to have you on board with <span style="font-style: italic; color: #3d985c; font-weight: 600;">Koott</span>. Your therapist account has been set up, and you can now access your dedicated dashboard.
                       </p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 20px 0;">Your dashboard credentials:</p>
@@ -2942,7 +2905,7 @@ The Koott Team
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
                           <td style="text-align: center;">
-                            <a href="${loginUrl}" target="_blank" style="display: inline-block; background: #3f2e73; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;">
+                            <a href="${loginUrl}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;">
                               Log In to Therapist Dashboard
                             </a>
                           </td>
@@ -2967,11 +2930,11 @@ The Koott Team
                         <li>Record session summaries and track progress</li>
                       </ul>
                       
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you need any technical assistance, please reach out to our support team at <a href="mailto:hey@koott.com" style="color: #3f2e73; text-decoration: none;">hey@koott.com</a>.</p>
+                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you need any technical assistance, please reach out to our support team at <a href="mailto:hey@koott.com" style="color: #3d985c; text-decoration: none;">hey@koott.com</a>.</p>
                       
                       <p style="color: #2d3748; font-size: 15px; margin: 0;">
                         Welcome to the family!<br>
-                        <strong style="color: #3f2e73;">The Koott Operations Team</strong>
+                        <strong style="color: #3d985c;">The Koott Operations Team</strong>
                       </p>
                     </td>
                   </tr>

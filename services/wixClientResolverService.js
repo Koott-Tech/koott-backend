@@ -18,7 +18,7 @@ function isMissingColumnError(err, columnName) {
  * Returns clients.id or null (if no email available).
  */
 async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
-  if (!email || !email.trim()) return { clientId: null, isNew: false };
+  if (!email || !email.trim()) return { clientId: null, isNew: false, tempPassword: null };
 
   const normalizedEmail = email.trim().toLowerCase();
 
@@ -76,19 +76,14 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
       userId = newUser.id;
       isNewUser = true;
       console.log(`[wixClientResolver] created user ${normalizedEmail} (${userId})`);
-
-      // Send welcome email only for newly created users (fire-and-forget)
-      const clientName = [firstName, lastName].filter(Boolean).join(' ') || normalizedEmail;
-      emailService.sendWelcomeEmail({
-        to: normalizedEmail,
-        clientName,
-        tempPassword,
-        loginUrl: process.env.CLIENT_SITE_URL || 'https://www.koott.in',
-      }).catch((err) => {
-        console.error(`[wixClientResolver] welcome email failed for ${normalizedEmail}:`, err?.message || err);
-      });
+      // We will send the welcome details combined with the booking email later
     }
   }
+
+  // Define tempPassword here if it was a new user so we can return it
+  const localPart = normalizedEmail.split('@')[0] || 'user';
+  const suffix = localPart.slice(0, 4).toLowerCase();
+  const tempPassword = isNewUser ? `Welcome@${suffix}` : null;
 
   // 3. Find or create the clients row linked to this user
   // Use .limit(1) instead of .maybeSingle() — maybeSingle errors when multiple rows exist
@@ -98,7 +93,7 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
     .eq('user_id', userId)
     .limit(1);
 
-  if (existingClients?.length) return { clientId: existingClients[0].id, isNew: isNewUser };
+  if (existingClients?.length) return { clientId: existingClients[0].id, isNew: isNewUser, tempPassword };
 
   const baseInsert = {
     user_id: userId,
@@ -139,14 +134,14 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
       .eq('user_id', userId)
       .limit(1);
     if (raceClient?.length) {
-      return { clientId: raceClient[0].id, isNew: isNewUser };
+      return { clientId: raceClient[0].id, isNew: isNewUser, tempPassword };
     }
     console.error('[wixClientResolver] client insert failed:', createClientError.message || createClientError);
     return { clientId: null, isNew: false };
   }
 
   console.log(`[wixClientResolver] created client for user ${userId} → client ${newClient.id}`);
-  return { clientId: newClient.id, isNew: true };
+  return { clientId: newClient.id, isNew: true, tempPassword };
 }
 
 /**
@@ -162,6 +157,7 @@ async function resolveClientsForBookings(bookings) {
   const wixIdToClientId = new Map();
   const newClientWixIds = new Set();
   const resolveCache = new Map(); // email -> Promise
+  const wixIdToTempPassword = new Map(); // wix_booking_id -> tempPassword
 
   await Promise.all(
     bookings.map(async (b) => {
@@ -183,12 +179,17 @@ async function resolveClientsForBookings(bookings) {
       }
 
       const result = await resolveCache.get(normalizedEmail);
-      // Handle both old format (plain id) and new format ({ clientId, isNew })
+      // Handle both old format (plain id) and new format ({ clientId, isNew, tempPassword })
       const clientId = result?.clientId ?? result;
       const isNew = result?.isNew ?? false;
+      const tempPass = result?.tempPassword ?? null;
+      
       if (clientId) {
         wixIdToClientId.set(wixId, clientId);
-        if (isNew) newClientWixIds.add(wixId);
+        if (isNew) {
+          newClientWixIds.add(wixId);
+          if (tempPass) wixIdToTempPassword.set(wixId, tempPass);
+        }
       }
     })
   );
@@ -210,8 +211,9 @@ async function resolveClientsForBookings(bookings) {
     }
   }
 
-  // Attach newClientWixIds to the returned map so callers know which bookings got new accounts
+  // Attach metadata to the returned map
   wixIdToClientId._newClientWixIds = newClientWixIds;
+  wixIdToClientId._wixIdToTempPassword = wixIdToTempPassword;
 
   return wixIdToClientId;
 }

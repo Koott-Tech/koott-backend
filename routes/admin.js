@@ -15,7 +15,7 @@ const { supabaseAdmin } = require('../config/supabase');
 // Note: This runs BEFORE authentication, so we can only use IP
 const adminLimiter = require('express-rate-limit')({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // 100 requests per 15 minutes per IP
+  max: process.env.NODE_ENV === 'development' ? 1000 : 100, // 1000 in dev, 100 in prod per 15 minutes per IP
   message: {
     error: 'Too many admin requests',
     message: 'Rate limit exceeded for admin operations. Please try again later.',

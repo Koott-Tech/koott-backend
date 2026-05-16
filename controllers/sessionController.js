@@ -19,6 +19,16 @@ const {
   hydrateSessionsWixPayloadFromMirror,
 } = require('../utils/wixSessionRowEnrichment');
 
+function isHiddenWixListRow(session) {
+  const src = String(session?.source || '').toLowerCase();
+  if (src !== 'wix') return false;
+  const wp = session?.wix_payload;
+  const missingSessionId = !wp || typeof wp !== 'object' || !wp.sessionId;
+  const isUndefinedWix = !session?.payment_id && missingSessionId;
+  const isPackageChild = Number(session?.package_session_number || 1) > 1;
+  return isUndefinedWix || isPackageChild;
+}
+
 // Book a new session
 const bookSession = async (req, res) => {
   try {
@@ -797,13 +807,14 @@ const getAllSessions = async (req, res) => {
       });
     }
 
+    const visibleSessions = allSessions.filter((s) => !isHiddenWixListRow(s));
+
     // Apply pagination to combined results
     // Note: Since we're combining two different tables, we need to paginate in memory
-    // The total is the sum of both counts
-    const totalSessions = allSessions.length;
+    const totalSessions = visibleSessions.length;
     const startIndex = (page - 1) * parseInt(limit);
     const endIndex = startIndex + parseInt(limit);
-    const paginatedSessions = allSessions.slice(startIndex, endIndex);
+    const paginatedSessions = visibleSessions.slice(startIndex, endIndex);
 
     // Commission / net revenue (finance sessions table)
     try {
@@ -837,6 +848,7 @@ const getAllSessions = async (req, res) => {
       assessmentSessionsCount: assessmentSessionsCount || 0,
       totalSessions,
       allSessionsLength: allSessions.length,
+      visibleSessionsLength: visibleSessions.length,
       page: parseInt(page),
       limit: parseInt(limit),
       startIndex,

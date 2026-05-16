@@ -42,6 +42,11 @@ function parsePhone(phone) {
     return { countryCode: '+91', phoneNumber: cleaned.substring(2) };
   }
 
+  // UAE numbers: starts with 971 and has 12-13 digits total
+  if (cleaned.startsWith('971') && (cleaned.length === 12 || cleaned.length === 13)) {
+    return { countryCode: '+971', phoneNumber: cleaned.substring(3) };
+  }
+
   // Already 10 digits (no country code) — assume India
   if (/^\d{10}$/.test(cleaned)) {
     return { countryCode: '+91', phoneNumber: cleaned };
@@ -56,6 +61,9 @@ function parsePhone(phone) {
     }
     if (cleaned.startsWith('44') && cleaned.length >= 12) {
       return { countryCode: '+44', phoneNumber: cleaned.substring(2) };
+    }
+    if (cleaned.startsWith('971')) {
+      return { countryCode: '+971', phoneNumber: cleaned.substring(3) };
     }
     // Default: assume first 2 digits are country code
     return { countryCode: `+${cleaned.substring(0, 2)}`, phoneNumber: cleaned.substring(2) };

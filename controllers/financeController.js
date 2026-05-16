@@ -34,6 +34,16 @@ dayjs.extend(timezone);
 
 const FINANCE_IST_TZ = 'Asia/Kolkata';
 
+function isHiddenWixListRow(session) {
+  const src = String(session?.source || '').toLowerCase();
+  if (src !== 'wix') return false;
+  const wp = session?.wix_payload;
+  const missingSessionId = !wp || typeof wp !== 'object' || !wp.sessionId;
+  const isUndefinedWix = !session?.payment_id && missingSessionId;
+  const isPackageChild = Number(session?.package_session_number || 1) > 1;
+  return isUndefinedWix || isPackageChild;
+}
+
 /** Non-terminal sessions that still count as “pending fulfilment” on the dashboard card (excludes cancelled). */
 const PENDING_SESSION_CARD_STATUSES = new Set([
   'booked',
@@ -249,36 +259,59 @@ const getDashboard = async (req, res) => {
       let sessions = null;
       let sessionsError = null;
       const dashBcf = appendBookingTimeSelectFragment(dashBookingTimeCol);
-      ({ data: sessions, error: sessionsError } = await supabaseAdmin
+      let sessionsQuery = supabaseAdmin
         .from('sessions')
         .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
         .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
-        .neq('session_type', 'free_assessment'));
+        .neq('session_type', 'free_assessment');
+
+      // Optimization: If not all-time, filter from start of year to ensure we get enough data for MTD/QTD/YTD cards
+      // without hitting the default 1000-row limit on old data.
+      if (!allTimeMode) {
+        sessionsQuery = sessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+      }
+      
+      // Order by latest first and increase limit to avoid missing recent bookings
+      sessionsQuery = sessionsQuery.order('created_at', { ascending: false }).limit(5000);
+
+      ({ data: sessions, error: sessionsError } = await sessionsQuery);
 
       // Legacy schema fallback: sessions.payment_id not present
       if (sessionsError && String(sessionsError.message || '').includes('payment_id')) {
-        ({ data: sessions, error: sessionsError } = await supabaseAdmin
+        let fbQuery1 = supabaseAdmin
           .from('sessions')
           .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
           .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
-          .neq('session_type', 'free_assessment'));
+          .neq('session_type', 'free_assessment');
+        if (!allTimeMode) {
+          fbQuery1 = fbQuery1.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+        }
+        ({ data: sessions, error: sessionsError } = await fbQuery1.order('created_at', { ascending: false }).limit(5000));
       }
       // Optional column until migration applies — still derives booking time from wix_payload / created_at
       if (sessionsError && /booking_created_at/i.test(String(sessionsError.message || ''))) {
-        ({ data: sessions, error: sessionsError } = await supabaseAdmin
+        let fbQuery2 = supabaseAdmin
           .from('sessions')
           .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
           .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
-          .neq('session_type', 'free_assessment'));
+          .neq('session_type', 'free_assessment');
+        if (!allTimeMode) {
+          fbQuery2 = fbQuery2.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+        }
+        ({ data: sessions, error: sessionsError } = await fbQuery2.order('created_at', { ascending: false }).limit(5000));
         if (
           sessionsError &&
           String(sessionsError.message || '').includes('payment_id')
         ) {
-          ({ data: sessions, error: sessionsError } = await supabaseAdmin
+          let fbQuery3 = supabaseAdmin
             .from('sessions')
             .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
             .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
-            .neq('session_type', 'free_assessment'));
+            .neq('session_type', 'free_assessment');
+          if (!allTimeMode) {
+            fbQuery3 = fbQuery3.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+          }
+          ({ data: sessions, error: sessionsError } = await fbQuery3.order('created_at', { ascending: false }).limit(5000));
         }
       }
 
@@ -846,6 +879,11 @@ const getDashboard = async (req, res) => {
           .neq('session_type', 'free_assessment')
           .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
           .in('psychologist_id', allPsychIds);
+
+        if (!allTimeMode) {
+          allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+        }
+        allSessionsQuery = allSessionsQuery.order('created_at', { ascending: true }).limit(5000);
         
         // Fetch all relevant sessions - we'll filter by different date criteria in the processing loop:
         // - Pending payouts: Filter by created_at (payment date) within date range
@@ -862,7 +900,10 @@ const getDashboard = async (req, res) => {
             .neq('session_type', 'free_assessment')
             .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
             .in('psychologist_id', allPsychIds);
-          ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }));
+          if (!allTimeMode) {
+            allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+          }
+          ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }).limit(5000));
         }
         if (allSessionsError && /booking_created_at/i.test(String(allSessionsError.message || ''))) {
           allSessionsQuery = supabaseAdmin
@@ -872,7 +913,10 @@ const getDashboard = async (req, res) => {
             .neq('session_type', 'free_assessment')
             .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
             .in('psychologist_id', allPsychIds);
-          ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }));
+          if (!allTimeMode) {
+            allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+          }
+          ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }).limit(5000));
           if (allSessionsError && String(allSessionsError.message || '').includes('payment_id')) {
             allSessionsQuery = supabaseAdmin
               .from('sessions')
@@ -881,7 +925,10 @@ const getDashboard = async (req, res) => {
               .neq('session_type', 'free_assessment')
               .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
               .in('psychologist_id', allPsychIds);
-            ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }));
+            if (!allTimeMode) {
+              allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+            }
+            ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }).limit(5000));
           }
         }
         if (allSessionsError) throw allSessionsError;
@@ -2212,6 +2259,7 @@ const getSessions = async (req, res) => {
       dateFrom,
       dateTo,
       dateBasis = 'scheduled',
+      includeUnpaid = 'false',
       psychologistId,
       sessionType,
       status,
@@ -2220,10 +2268,10 @@ const getSessions = async (req, res) => {
       search
     } = req.query;
     const normalizedDateBasis = String(dateBasis || 'scheduled').toLowerCase() === 'booked' ? 'booked' : 'scheduled';
+    const shouldIncludeUnpaid = String(includeUnpaid || 'false').toLowerCase() === 'true';
 
-    // First, get sessions with payment status filter
-    // Exclude free assessments and only include sessions with successful payments
-    // Get all sessions first, then filter by payment status
+    // Exclude free assessments. Finance sessions can optionally include unpaid Wix rows
+    // so the page can mirror the admin/Wix booking lists when needed.
     let query = supabaseAdmin
       .from('sessions')
       .select(`
@@ -2245,8 +2293,11 @@ const getSessions = async (req, res) => {
         session_count,
         package_id
       `, { count: 'exact' })
-      .neq('session_type', 'free_assessment') // Exclude free assessments
-      .not('payment_id', 'is', null); // Only sessions with payment_id
+      .neq('session_type', 'free_assessment'); // Exclude free assessments
+
+    if (!shouldIncludeUnpaid) {
+      query = query.not('payment_id', 'is', null); // Only sessions with payment_id
+    }
 
     // Apply filters
     if (dateFrom) {
@@ -2269,9 +2320,7 @@ const getSessions = async (req, res) => {
     if (status) {
       query = query.eq('status', status);
     }
-    // Pagination - removed search filter from query as it will be done after fetching
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    query = query.range(offset, offset + parseInt(limit) - 1);
+    // Filter and paginate in memory so totals match the rows actually shown.
     query = query.order(normalizedDateBasis === 'booked' ? bookingTimeCol : 'scheduled_date', { ascending: false });
 
     const { data: sessions, error, count } = await query;
@@ -2290,6 +2339,9 @@ const getSessions = async (req, res) => {
       }, 'Sessions fetched successfully (empty)'));
     }
 
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.max(1, parseInt(limit, 10) || 50);
+
     // Ensure sessions is an array
     let sessionsData = sessions || [];
     
@@ -2303,7 +2355,7 @@ const getSessions = async (req, res) => {
     }
 
     // Filter by successful payment status (paid, success, completed, cash)
-    // Get payment IDs and check their status
+    // when the caller wants paid finance rows only.
     const paymentIds = [...new Set(sessionsData.map(s => s.payment_id).filter(Boolean))];
     let successfulPaymentIds = [];
     
@@ -2319,13 +2371,12 @@ const getSessions = async (req, res) => {
       }
     }
 
-    // Filter sessions to only include those with successful payments
-    const sessionsWithSuccessfulPayments = sessionsData.filter(s => 
-      s.payment_id && successfulPaymentIds.includes(s.payment_id)
-    );
+    const sessionsForResponse = shouldIncludeUnpaid
+      ? sessionsData
+      : sessionsData.filter(s => s.payment_id && successfulPaymentIds.includes(s.payment_id));
 
     // Get commission data for each session
-    const sessionIds = sessionsWithSuccessfulPayments.map(s => s?.id).filter(Boolean);
+    const sessionIds = sessionsForResponse.map(s => s?.id).filter(Boolean);
     let commissions = [];
     
     if (sessionIds.length > 0) {
@@ -2362,7 +2413,7 @@ const getSessions = async (req, res) => {
       clients = clientData || [];
     }
 
-    const sessionsWithCommission = sessionsWithSuccessfulPayments.map(session => {
+    const sessionsWithCommission = sessionsForResponse.map(session => {
       if (!session) return null;
       const commission = commissions.find(c => c.session_id === session.id);
       const psychologist = psychologists.find(p => p.id === session.psychologist_id);
@@ -2413,6 +2464,11 @@ const getSessions = async (req, res) => {
       });
     }
 
+    finalSessions = finalSessions.filter((s) => !isHiddenWixListRow(s));
+    const totalVisibleSessions = finalSessions.length;
+    const offset = (safePage - 1) * safeLimit;
+    const paginatedSessions = finalSessions.slice(offset, offset + safeLimit);
+
     await auditLogger.logAction({
       userId: req.user.id,
       userEmail: req.user.email,
@@ -2427,15 +2483,15 @@ const getSessions = async (req, res) => {
     }).catch(err => console.error('Audit log error:', err));
 
     res.json(successResponse({
-      sessions: finalSessions || [],
+      sessions: paginatedSessions || [],
       filters: {
         dateBasis: normalizedDateBasis,
       },
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: search ? finalSessions.length : (count || 0),
-        totalPages: search ? Math.ceil(finalSessions.length / parseInt(limit)) : Math.ceil((count || 0) / parseInt(limit))
+        page: safePage,
+        limit: safeLimit,
+        total: totalVisibleSessions,
+        totalPages: Math.max(1, Math.ceil(totalVisibleSessions / safeLimit))
       }
     }, 'Sessions fetched successfully'));
 
@@ -6309,4 +6365,3 @@ module.exports = {
   markPayoutAsPaid,
   getDoctorPayouts
 };
-
