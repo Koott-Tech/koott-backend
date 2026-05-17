@@ -76,8 +76,7 @@ function generateCalendarInvite(sessionData) {
     `SUMMARY:Therapy Session - ${clientName} with ${psychologistName}`,
     `DESCRIPTION:Online therapy session scheduled through Koott.\\n\\n` +
     `Client: ${clientName}\\n` +
-    `Psychologist: ${psychologistName}\\n` +
-    `Session Fee: $${price}\\n\\n` +
+    `Psychologist: ${psychologistName}\\n\\n` +
     `Join the session via Google Meet:\\n${meetText}\\n\\n` +
     `Please join the meeting 5 minutes before the scheduled time.`,
     `LOCATION:${locationText}`,
