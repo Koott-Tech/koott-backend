@@ -222,7 +222,7 @@ async function processOneSession(session, tempPassword = null) {
 
   // ── Send Notifications ───────────────────────────────────────────────
   try {
-    const meetLink = meetResult.meetLink || session.google_meet_link || process.env.MASTER_FALLBACK_MEET_LINK;
+    const meetLink = finalMeetLink;
     
     if (!meetLink) {
       console.log(`${LOG_PREFIX} Skipping notifications for ${session.id} - No meet link available.`);
@@ -255,7 +255,7 @@ async function processOneSession(session, tempPassword = null) {
       psychologistName: psychologistName,
       date: session.scheduled_date,
       time: session.scheduled_time,
-      meetLink: meetResult.meetLink || session.google_meet_link,
+      meetLink: meetLink,
     };
     
     if (clientPhone) {
