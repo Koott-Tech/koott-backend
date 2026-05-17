@@ -1113,7 +1113,7 @@ async function listWixTherapists(req, res) {
 
     const { data: psychologists } = await supabaseAdmin
       .from('psychologists')
-      .select('id,email,first_name,last_name,phone,designation,profile_picture_url,created_at')
+      .select('id,email,first_name,last_name,phone,designation,profile_picture_url,created_at,google_calendar_credentials')
       .limit(5000);
 
     const psychByEmail = new Map();
@@ -1143,6 +1143,7 @@ async function listWixTherapists(req, res) {
                 designation: matched.designation,
                 profilePictureUrl: matched.profile_picture_url,
                 createdAt: matched.created_at,
+                google_calendar_connected: !!matched.google_calendar_credentials,
               }
             : null,
         };

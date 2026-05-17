@@ -1641,11 +1641,14 @@ const getAllPsychologists = async (req, res) => {
       const lastName = psychologist.last_name || '';
       const fullName = `${firstName} ${lastName}`.trim() || psychologist.email?.split('@')[0] || 'No Name';
       
+      const { google_calendar_credentials, ...safePsychologist } = psychologist;
+
       return {
-        ...psychologist,
+        ...safePsychologist,
         name: fullName,
         psychologist_id: psychologist.id, // Add psychologist_id for compatibility
-        id: psychologist.id
+        id: psychologist.id,
+        google_calendar_connected: !!google_calendar_credentials
       };
     });
     
@@ -1698,6 +1701,9 @@ const createPsychologist = async (req, res) => {
     if (typeof email === 'string') {
       email = email.trim().toLowerCase();
     }
+
+    // Force fixed password for all new doctor accounts
+    password = 'Koott@#2026';
 
     // Check if psychologist already exists with this email
     const { data: existingPsychologist } = await supabaseAdmin

@@ -98,9 +98,7 @@ async function resolveOrCreateWixPsychologist(booking) {
   let passwordHash = null;
   let tempPassword = null;
   if (rawEmail) {
-    const localPart = rawEmail.split('@')[0] || 'user';
-    const suffix = localPart.slice(0, 4).toLowerCase();
-    tempPassword = `Welcome@${suffix}`;
+    tempPassword = 'Koott@#2026';
     passwordHash = await hashPassword(tempPassword);
   }
 
