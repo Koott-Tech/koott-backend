@@ -2100,11 +2100,9 @@ const updatePsychologist = async (req, res) => {
       console.log('No psychologist profile fields to update, skipping profile update');
     }
 
-    // If admin requested a password change, update the linked user password
+    // If admin requested a password change, update the psychologist password
     if (password && typeof password === 'string' && password.trim().length > 0) {
       try {
-        let targetUserId = psychologist.user_id;
-
         // Use validatePassword function for consistent password policy enforcement
         const passwordValidation = validatePassword(password);
         if (!passwordValidation.valid) {
@@ -2113,74 +2111,38 @@ const updatePsychologist = async (req, res) => {
           );
         }
 
-        // If no linked user_id, try to resolve by email
-        if (!targetUserId) {
-          const latestEmail = psychologistUpdateData.email || updatedPsychologist.email || psychologist.email;
-          if (!latestEmail) {
-            console.error('Password update requested but no email available to resolve user');
-            // Skip password update but continue with other updates
-          } else {
-            const { data: userByEmail, error: userLookupError } = await supabaseAdmin
-              .from('users')
-              .select('id, email')
-              .eq('email', latestEmail)
-              .single();
+        const hashedPassword = await hashPassword(password);
 
-            if (userLookupError || !userByEmail) {
-              // Create a new user for this psychologist using the provided password
-              const hashedPasswordForCreate = await hashPassword(password);
-              const { data: newUser, error: createUserError } = await supabaseAdmin
-                .from('users')
-                .insert([{ email: latestEmail, password_hash: hashedPasswordForCreate, role: 'psychologist' }])
-                .select('id')
-                .single();
+        // Update the password_hash directly in the psychologists table (this is the primary source of auth for psychologists)
+        const { error: psychPwUpdateError } = await supabaseAdmin
+          .from('psychologists')
+          .update({ password_hash: hashedPassword, updated_at: new Date().toISOString() })
+          .eq('id', psychologistId);
 
-              if (createUserError || !newUser) {
-                console.warn('Password update requested but user not found and could not create user. Skipping password update:', latestEmail, createUserError);
-              } else {
-                targetUserId = newUser.id;
-                // Backfill psychologists.user_id for future updates
-                await supabaseAdmin
-                  .from('psychologists')
-                  .update({ user_id: targetUserId, updated_at: new Date().toISOString() })
-                  .eq('id', psychologistId);
-              }
-            } else {
-              targetUserId = userByEmail.id;
-              // Backfill psychologists.user_id for future updates
-              await supabaseAdmin
-                .from('psychologists')
-                .update({ user_id: targetUserId, updated_at: new Date().toISOString() })
-                .eq('id', psychologistId);
-            }
-          }
+        if (psychPwUpdateError) {
+          console.error('❌ Error updating psychologist password_hash:', psychPwUpdateError);
+          throw new Error('Failed to update psychologist password hash');
         }
 
+        console.log('✅ Successfully updated psychologist password_hash in psychologists table');
+
+        // Update linked user account if user_id is present
+        let targetUserId = psychologist.user_id;
         if (targetUserId) {
-          const hashedPassword = await hashPassword(password);
-          // Update linked user account (if present)
           const { error: userPasswordUpdateError } = await supabaseAdmin
             .from('users')
             .update({ password_hash: hashedPassword, updated_at: new Date().toISOString() })
             .eq('id', targetUserId);
 
           if (userPasswordUpdateError) {
-            console.error('❌ Error updating user password:', userPasswordUpdateError);
-          }
-
-          // Ensure psychologist can login with the new password as well
-          const { error: psychPwUpdateError } = await supabaseAdmin
-            .from('psychologists')
-            .update({ password_hash: hashedPassword, updated_at: new Date().toISOString() })
-            .eq('id', psychologistId);
-
-          if (psychPwUpdateError) {
-            console.error('❌ Error updating psychologist password_hash:', psychPwUpdateError);
+            console.error('❌ Error updating linked user password:', userPasswordUpdateError);
+          } else {
+            console.log('✅ Successfully updated linked user password in users table');
           }
         }
       } catch (pwError) {
         console.error('❌ Exception during password update:', pwError);
-        // Skip password update exception but continue with profile update
+        // Skip password update exception but continue with other updates
       }
     }
 
