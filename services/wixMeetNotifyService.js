@@ -174,6 +174,8 @@ async function processOneSession(session, tempPassword = null) {
   }
 
   let meetResult = { success: false, meetLink: null };
+  const masterFallback = process.env.MASTER_FALLBACK_MEET_LINK || 'https://meet.google.com/ovr-qpsi-mwr';
+  let finalMeetLink = session.google_meet_link || masterFallback;
 
   if (DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING) {
     console.log(`${LOG_PREFIX} Google Meet auto-scheduling temporarily disabled for session ${session.id}`);
@@ -194,8 +196,7 @@ async function processOneSession(session, tempPassword = null) {
     meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
 
     // ── Save Meet link to session ─────────────────────────────────────────
-    const masterFallback = process.env.MASTER_FALLBACK_MEET_LINK || 'https://meet.google.com/ovr-qpsi-mwr';
-    const finalMeetLink = meetResult.meetLink || session.google_meet_link || masterFallback;
+    finalMeetLink = meetResult.meetLink || session.google_meet_link || masterFallback;
 
     // Try full update first; fall back to just google_meet_link if extra columns don't exist
     let { error: updateError } = await supabaseAdmin
