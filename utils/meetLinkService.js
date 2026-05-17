@@ -85,9 +85,14 @@ class MeetLinkService {
 
   async initializeAuth() {
     try {
-      // Load service account for fallback
-      this.serviceAccount = require('../google-service-account.json');
-      log('✅ Meet Link Service initialized');
+      if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+        this.serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+        log('✅ Meet Link Service initialized using environment variable');
+      } else {
+        // Load service account from local file for fallback
+        this.serviceAccount = require('../google-service-account.json');
+        log('✅ Meet Link Service initialized using local file');
+      }
     } catch (error) {
       logError('❌ Failed to initialize Meet Link Service:', error.message);
     }

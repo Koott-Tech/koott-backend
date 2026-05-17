@@ -550,7 +550,7 @@ class EmailService {
       attachments: [
         {
           filename: 'header.png',
-          path: require('path').join(__dirname, '../../littlecare-frontend/public/email header.png'),
+          path: require('path').join(__dirname, '../templates/email-header.png'),
           cid: 'email-header'
         },
         ...(calendarInvite ? [{
