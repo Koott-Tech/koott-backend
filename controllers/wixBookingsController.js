@@ -222,6 +222,30 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
 
     if (filteredSessionRows.length > 0) {
       const upsertSessions = await sessionRowsForSchema(filteredSessionRows);
+
+      // Prevent PostgREST upsert from resetting existing fields (google_meet_link, client_id, psychologist_id, etc.) back to default/null
+      const wixBookingIds = upsertSessions.map(r => r.wix_booking_id).filter(Boolean);
+      if (wixBookingIds.length > 0) {
+        const { data: existing } = await supabaseAdmin
+          .from('sessions')
+          .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id')
+          .in('wix_booking_id', wixBookingIds);
+        if (existing?.length) {
+          const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
+          upsertSessions.forEach(row => {
+            const prev = existingMap.get(row.wix_booking_id);
+            if (prev) {
+              if (prev.client_id) row.client_id = prev.client_id;
+              if (prev.psychologist_id) row.psychologist_id = prev.psychologist_id;
+              if (prev.google_meet_link) row.google_meet_link = prev.google_meet_link;
+              if (prev.google_meet_join_url) row.google_meet_join_url = prev.google_meet_join_url;
+              if (prev.google_meet_start_url) row.google_meet_start_url = prev.google_meet_start_url;
+              if (prev.google_calendar_event_id) row.google_calendar_event_id = prev.google_calendar_event_id;
+            }
+          });
+        }
+      }
+
       const { data: sessionData, error: sessionError } = await supabaseAdmin
         .from('sessions')
         .upsert(upsertSessions, { onConflict: 'wix_booking_id' })
@@ -583,6 +607,30 @@ async function performWixSync(options = {}) {
 
   if (filteredSessionRows.length > 0) {
     const upsertSessions = await sessionRowsForSchema(filteredSessionRows);
+
+    // Prevent PostgREST upsert from resetting existing fields (google_meet_link, client_id, psychologist_id, etc.) back to default/null
+    const wixBookingIds = upsertSessions.map(r => r.wix_booking_id).filter(Boolean);
+    if (wixBookingIds.length > 0) {
+      const { data: existing } = await supabaseAdmin
+        .from('sessions')
+        .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id')
+        .in('wix_booking_id', wixBookingIds);
+      if (existing?.length) {
+        const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
+        upsertSessions.forEach(row => {
+          const prev = existingMap.get(row.wix_booking_id);
+          if (prev) {
+            if (prev.client_id) row.client_id = prev.client_id;
+            if (prev.psychologist_id) row.psychologist_id = prev.psychologist_id;
+            if (prev.google_meet_link) row.google_meet_link = prev.google_meet_link;
+            if (prev.google_meet_join_url) row.google_meet_join_url = prev.google_meet_join_url;
+            if (prev.google_meet_start_url) row.google_meet_start_url = prev.google_meet_start_url;
+            if (prev.google_calendar_event_id) row.google_calendar_event_id = prev.google_calendar_event_id;
+          }
+        });
+      }
+    }
+
     const { data, error } = await supabaseAdmin
       .from('sessions')
       .upsert(upsertSessions, { onConflict: 'wix_booking_id' })
