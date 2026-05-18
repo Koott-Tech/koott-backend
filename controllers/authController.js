@@ -584,11 +584,11 @@ const findUserWithFlexibleEmail = async (table, email) => {
   // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
   const { supabaseAdmin } = require('../config/supabase');
   
-  // First try exact match
+  // First try exact match (case-insensitive)
   let { data, error } = await supabaseAdmin
     .from(table)
     .select('*')
-    .eq('email', email)
+    .ilike('email', email)
     .single();
   
   if (data && !error) {
@@ -603,7 +603,7 @@ const findUserWithFlexibleEmail = async (table, email) => {
     const { data: dataWithoutDots, error: errorWithoutDots } = await supabaseAdmin
       .from(table)
       .select('*')
-      .eq('email', emailWithoutDots)
+      .ilike('email', emailWithoutDots)
       .single();
     
     if (dataWithoutDots && !errorWithoutDots) {
@@ -625,7 +625,7 @@ const findUserWithFlexibleEmail = async (table, email) => {
       const { data: dataWithDots, error: errorWithDots } = await supabaseAdmin
         .from(table)
         .select('*')
-        .eq('email', emailWithDots)
+        .ilike('email', emailWithDots)
         .single();
       
       if (dataWithDots && !errorWithDots) {
