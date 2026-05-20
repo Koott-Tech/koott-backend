@@ -200,6 +200,26 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
     return { upserted: 0, sessionsUpserted: 0, sessionMirrorSkipped: false };
   }
 
+  // Preserve wix_session_id if already set — prevents interval sync from overwriting
+  // a manually backfilled or previously resolved value with null.
+  const existingIds = rows.map(r => r.wix_booking_id).filter(Boolean);
+  if (existingIds.length) {
+    const { data: existing } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('wix_booking_id, wix_session_id')
+      .in('wix_booking_id', existingIds);
+    if (existing?.length) {
+      const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
+      rows = rows.map(r => {
+        const prev = existingMap.get(r.wix_booking_id);
+        if (prev?.wix_session_id && !r.wix_session_id) {
+          return { ...r, wix_session_id: prev.wix_session_id };
+        }
+        return r;
+      });
+    }
+  }
+
   const { data, error } = await supabaseAdmin
     .from('wix_bookings')
     .upsert(rows, { onConflict: 'wix_booking_id' })
@@ -562,6 +582,25 @@ async function performWixSync(options = {}) {
       fetchedAt: r.json?.fetchedAt || new Date().toISOString(),
       ...syncFilterMeta(createdAfter, filterStats),
     };
+  }
+
+  // Preserve wix_session_id if already set — prevents sync from overwriting with null.
+  const syncExistingIds = rows.map(r => r.wix_booking_id).filter(Boolean);
+  if (syncExistingIds.length) {
+    const { data: syncExisting } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('wix_booking_id, wix_session_id')
+      .in('wix_booking_id', syncExistingIds);
+    if (syncExisting?.length) {
+      const syncExistingMap = new Map(syncExisting.map(e => [e.wix_booking_id, e]));
+      rows = rows.map(r => {
+        const prev = syncExistingMap.get(r.wix_booking_id);
+        if (prev?.wix_session_id && !r.wix_session_id) {
+          return { ...r, wix_session_id: prev.wix_session_id };
+        }
+        return r;
+      });
+    }
   }
 
   const { data, error } = await supabaseAdmin

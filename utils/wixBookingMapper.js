@@ -143,7 +143,7 @@ function discoverRowToDb(booking) {
 
   return {
     wix_booking_id: String(b.id),
-    wix_session_id: b.sessionId || null,
+    wix_session_id: b.sessionId || b.id || null,
     schedule_id: b.scheduleId || null,
     service_id: b.serviceId || null,
     contact_id: b.contactId || b.client?.contactId || null,

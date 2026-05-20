@@ -23,7 +23,8 @@ function isHiddenWixListRow(session) {
   const src = String(session?.source || '').toLowerCase();
   if (src !== 'wix') return false;
   const wp = session?.wix_payload;
-  const missingSessionId = !wp || typeof wp !== 'object' || !wp.sessionId;
+  // wp.id is the Wix booking ID — treat it as equivalent to sessionId
+  const missingSessionId = !wp || typeof wp !== 'object' || (!wp.sessionId && !wp.id);
   const isUndefinedWix = !session?.payment_id && missingSessionId;
   const isPackageChild = Number(session?.package_session_number || 1) > 1;
   return isUndefinedWix || isPackageChild;

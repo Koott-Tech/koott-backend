@@ -170,10 +170,18 @@ async function resolveClientsForBookings(bookings) {
       // Guard: only resolve each email once even in parallel
       if (!resolveCache.has(normalizedEmail)) {
         // Seed with a Promise IMMEDIATELY so concurrent bookings with same email wait for one resolve
+        // Wix sometimes sends fullName instead of firstName/lastName separately
+        let firstName = b.client?.firstName || null;
+        let lastName  = b.client?.lastName  || null;
+        if (!firstName && !lastName && b.client?.fullName) {
+          const parts = b.client.fullName.trim().split(/\s+/);
+          firstName = parts[0] || null;
+          lastName  = parts.length > 1 ? parts.slice(1).join(' ') : null;
+        }
         resolveCache.set(normalizedEmail, resolveOrCreateWixClient({
           email,
-          firstName: b.client?.firstName || null,
-          lastName: b.client?.lastName || null,
+          firstName,
+          lastName,
           phone: b.client?.phone || null,
         }));
       }
