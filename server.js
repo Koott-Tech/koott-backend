@@ -338,7 +338,7 @@ const formatPublicPsychologist = (psych) => {
     last_name: psych.last_name,
     email: psych.email,
     area_of_expertise: psych.area_of_expertise || [],
-    personality_traits: psych.personality_traits || [],
+    personality_traits: [],
     experience_years: psych.experience_years || 0,
     designation: psych.designation || '',
     languages_json: mergedLanguagesJson, // Keep for backward compatibility, but uses defaults only
@@ -373,7 +373,7 @@ const formatPublicPsychologistCard = (psych) => {
     price: full.price,
     short_description: short,
     description: full.description || fullDesc,
-    personality_traits: full.personality_traits || [],
+    personality_traits: [],
     area_of_expertise: full.area_of_expertise || [],
     specialist_category: full.specialist_category ?? null,
     // Needed on list payloads so booking/profile can treat as child specialist before /details returns
@@ -401,7 +401,6 @@ app.get('/api/public/psychologists', async (req, res) => {
         first_name,
         last_name,
         area_of_expertise,
-        personality_traits,
         description,
         experience_years,
         cover_image_url,

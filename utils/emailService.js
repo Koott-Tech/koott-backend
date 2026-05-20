@@ -430,8 +430,8 @@ class EmailService {
     const contactEmail = 'hey@koott.com';
     const contactPhone = '+91-9539007766';
 
-    // Extract first name from clientName
-    const firstName = clientName ? clientName.split(' ')[0] : 'there';
+    // Extract first name from clientName (empty string if unknown — greeting will just say "Hey,")
+    const firstName = clientName ? clientName.split(' ')[0] : '';
 
     // scheduledDate is already in short format "Mon, 12 Jan 2026" from sendSessionConfirmation
     const formattedDateShort = scheduledDate;
@@ -485,7 +485,7 @@ class EmailService {
                   <!-- Main Content -->
                   <tr>
                     <td class="content-td" style="padding: 40px 30px; background-color: #ffffff;">
-                      <h2 class="greeting" style="color: #1a202c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Hey ${firstName},</h2>
+                      <h2 class="greeting" style="color: #1a202c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Hey${firstName ? ` ${firstName}` : ''},</h2>
 
                       <p class="body-text" style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
                         Your session with <strong>Koott</strong> is scheduled.
@@ -620,7 +620,7 @@ class EmailService {
       },
       replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
-      subject: `Koott Booking Confirmed | ${clientName} | ${scheduledDate.replace(/,?\s*\d{4}$/, '').trim()}`,
+      subject: `Koott Booking Confirmed${clientName ? ` | ${clientName}` : ''} | ${scheduledDate.replace(/,?\s*\d{4}$/, '').trim()}`,
       html: `
         <!DOCTYPE html>
         <html lang="en">
@@ -644,7 +644,7 @@ class EmailService {
                   <!-- Main Content -->
                   <tr>
                     <td class="content-td" style="padding: 40px 30px; background-color: #ffffff;">
-                      <h2 class="greeting" style="color: #1a202c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Hey ${firstName},</h2>
+                      <h2 class="greeting" style="color: #1a202c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Hey${firstName ? ` ${firstName}` : ''},</h2>
 
                       <p class="body-text" style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
                         A new session has been scheduled with you on <strong>Koott</strong>.
@@ -1415,8 +1415,8 @@ class EmailService {
     const frontendUrl = PRODUCTION_SITE_URL;
     const logoUrl = `${PRODUCTION_SITE_URL}/logo.png`;
 
-    // Extract first name from name
-    const firstName = name ? name.split(' ')[0] : 'there';
+    // Extract first name from name (empty string if unknown — greeting will just say "Hey,")
+    const firstName = name ? name.split(' ')[0] : '';
 
     // Format dates as "Mon, 12 Jan 2026"
     const formatDateShort = (dateStr) => {
@@ -1497,7 +1497,7 @@ class EmailService {
                   <!-- Main Content -->
                   <tr>
                     <td style="padding: 40px 30px;">
-                      <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
+                      <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey${firstName ? ` ${firstName}` : ''},</p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
                         Your session with <span style="font-style: italic; color: #3d985c; font-weight: 600;">Koott</span> has been rescheduled.
@@ -2660,7 +2660,7 @@ The Koott Team
     const { to, clientName, tempPassword, loginUrl } = emailData;
     
     const logoUrl = `${PRODUCTION_SITE_URL}/logo.png`;
-    const firstName = clientName ? clientName.split(' ')[0] : 'there';
+    const firstName = clientName ? clientName.split(' ')[0] : '';
 
     const mailOptions = {
       from: {
@@ -2703,7 +2703,7 @@ The Koott Team
                   <!-- Main Content -->
                   <tr>
                     <td style="padding: 40px 30px;">
-                      <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey ${firstName},</p>
+                      <p style="color: #1a202c; margin: 0 0 20px 0; font-size: 18px; font-weight: 500;">Hey${firstName ? ` ${firstName}` : ''},</p>
                       
                       <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
                         We're thrilled to have you join <span style="font-style: italic; color: #3d985c; font-weight: 600;">Koott</span>. Your account has been created successfully.

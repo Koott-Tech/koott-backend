@@ -131,7 +131,7 @@ async function processOneSession(session, tempPassword = null) {
   if (!clientName || clientName.trim() === '' || clientName.toLowerCase() === 'pending') {
     const firstName = clientDetails.first_name || '';
     const lastName = clientDetails.last_name || '';
-    clientName = `${firstName} ${lastName}`.trim() || 'Client';
+    clientName = `${firstName} ${lastName}`.trim() || '';
   }
 
   const psychologistName = `${psychologistDetails.first_name || ''} ${psychologistDetails.last_name || ''}`.trim() || 'Therapist';

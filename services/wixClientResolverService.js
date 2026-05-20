@@ -93,7 +93,24 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
     .eq('user_id', userId)
     .limit(1);
 
-  if (existingClients?.length) return { clientId: existingClients[0].id, isNew: isNewUser, tempPassword };
+  if (existingClients?.length) {
+    const clientId = existingClients[0].id;
+    // Backfill name if missing — Wix sends fullName which wasn't split on first creation
+    if (firstName || lastName) {
+      const { data: existing } = await supabaseAdmin
+        .from('clients')
+        .select('first_name, last_name')
+        .eq('id', clientId)
+        .single();
+      if (existing && !existing.first_name && !existing.last_name) {
+        await supabaseAdmin
+          .from('clients')
+          .update({ first_name: firstName || null, last_name: lastName || null })
+          .eq('id', clientId);
+      }
+    }
+    return { clientId, isNew: isNewUser, tempPassword };
+  }
 
   const baseInsert = {
     user_id: userId,
@@ -161,20 +178,23 @@ async function resolveClientsForBookings(bookings) {
 
   await Promise.all(
     bookings.map(async (b) => {
-      const email = b?.client?.email;
-      const wixId = b?.id != null ? String(b.id) : null;
+      // Support both nested Wix format (webhook: b.client.email) and flat mapped format (interval sync: b.client_email)
+      const email = b?.client?.email || b?.client_email;
+      const wixId = b?.id != null ? String(b.id) : (b?.wix_booking_id != null ? String(b.wix_booking_id) : null);
       if (!email || !wixId) return;
 
       const normalizedEmail = email.trim().toLowerCase();
-      
+
       // Guard: only resolve each email once even in parallel
       if (!resolveCache.has(normalizedEmail)) {
         // Seed with a Promise IMMEDIATELY so concurrent bookings with same email wait for one resolve
         // Wix sometimes sends fullName instead of firstName/lastName separately
-        let firstName = b.client?.firstName || null;
-        let lastName  = b.client?.lastName  || null;
-        if (!firstName && !lastName && b.client?.fullName) {
-          const parts = b.client.fullName.trim().split(/\s+/);
+        // Also support flat mapped format: b.client_first_name, b.client_last_name, b.client_full_name
+        let firstName = b.client?.firstName || b.client_first_name || null;
+        let lastName  = b.client?.lastName  || b.client_last_name  || null;
+        const fullName = b.client?.fullName || b.client_full_name || null;
+        if (!firstName && !lastName && fullName) {
+          const parts = fullName.trim().split(/\s+/);
           firstName = parts[0] || null;
           lastName  = parts.length > 1 ? parts.slice(1).join(' ') : null;
         }
@@ -182,7 +202,7 @@ async function resolveClientsForBookings(bookings) {
           email,
           firstName,
           lastName,
-          phone: b.client?.phone || null,
+          phone: b.client?.phone || b.client_phone || null,
         }));
       }
 

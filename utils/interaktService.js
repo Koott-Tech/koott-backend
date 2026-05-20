@@ -222,7 +222,7 @@ async function sendBookingConfirmation(toPhone, details) {
   } catch { /* keep raw */ }
 
   const specialist = (psychologistName || '').trim() || 'our specialist';
-  const client = (clientName || '').trim() || 'there';
+  const client = (clientName || '').trim();
   const link = meetLink || 'Link will be shared shortly';
 
   return sendTemplateWithRetry(toPhone, TEMPLATES.BOOKING_CONFIRMATION, 'en', {
@@ -287,7 +287,7 @@ async function sendSessionNotificationPsychologist(toPhone, details) {
   const link = meetLink || 'Link will be shared shortly';
 
   return sendTemplateWithRetry(toPhone, TEMPLATES.SESSION_NOTIFICATION_PSYCHOLOGIST, 'en', {
-    bodyValues: [clientName || 'Client', formattedDate, formattedTime, duration, link],
+    bodyValues: [(clientName || '').trim(), formattedDate, formattedTime, duration, link],
     callbackData: 'wix_session_notification_psychologist',
   });
 }
