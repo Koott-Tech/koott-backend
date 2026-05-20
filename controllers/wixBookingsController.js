@@ -670,11 +670,17 @@ async function performWixSync(options = {}) {
     throw err;
   }
 
-  // Resolve/create user+client rows and link sessions
+  // Re-run both resolvers now that sessions rows exist — the first pass above ran before
+  // the session upsert so those UPDATEs affected 0 rows. This second pass sets the IDs.
   try {
     await resolveClientsForBookings(dedupedBookings);
   } catch (err) {
-    console.warn('[performWixSync] client resolve non-blocking error:', err.message || err);
+    console.warn('[performWixSync] client resolve (post-upsert) non-blocking error:', err.message || err);
+  }
+  try {
+    await resolvePsychologistsForBookings(dedupedBookings);
+  } catch (err) {
+    console.warn('[performWixSync] psychologist resolve (post-upsert) non-blocking error:', err.message || err);
   }
 
   // Link ₹0 follow-up sessions under their parent package booking (wix_bookings table)
@@ -687,7 +693,8 @@ async function performWixSync(options = {}) {
     console.warn('[performWixSync] package linking non-blocking error:', err.message || err);
   }
 
-  // Fire-and-forget: create Google Meet links + send WhatsApp for new Wix sessions
+  // Fire-and-forget: create Google Meet links + send notifications for new Wix sessions.
+  // Runs after both resolvers so client_id and psychologist_id are guaranteed set.
   const wixBookingIds = dedupedBookings.map((b) => b.id != null ? String(b.id) : null).filter(Boolean);
   if (wixBookingIds.length) {
     processNewWixSessions(wixBookingIds, tempPasswordMapSync).catch((err) => {

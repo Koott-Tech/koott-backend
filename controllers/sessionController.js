@@ -533,45 +533,10 @@ const getAllSessions = async (req, res) => {
       console.log('Total assessment sessions count:', assessmentSessionsCount);
 
       // Now fetch all assessment sessions (we'll combine and paginate in memory)
+      // assessment_sessions has no FK relationships in the schema cache — use flat select + manual enrichment
       let assessQuery = supabaseAdmin
         .from('assessment_sessions')
-        .select(`
-          id,
-          assessment_id,
-          assessment_slug,
-          client_id,
-          psychologist_id,
-          scheduled_date,
-          scheduled_time,
-          status,
-          amount,
-          payment_id,
-          session_number,
-          created_at,
-          updated_at,
-          client:clients(
-            id,
-            user_id,
-            first_name,
-            last_name,
-            child_name,
-            child_age,
-            phone_number
-          ),
-          psychologist:psychologists(
-            id,
-            first_name,
-            last_name,
-            area_of_expertise,
-            email
-          ),
-          assessment:assessments(
-            id,
-            slug,
-            hero_title,
-            seo_title
-          )
-        `);
+        .select('id, client_id, psychologist_id, scheduled_date, scheduled_time, status, amount, created_at, updated_at');
 
       // Apply same filters as regular sessions
       assessQuery = applySessionStatusFilter(assessQuery);
@@ -600,87 +565,43 @@ const getAllSessions = async (req, res) => {
         }
       }
 
-      let { data: assessData, error: assessError } = await assessQuery;
-
-      // Schema fallback:
-      // If FK embed relationships are missing (assessment_sessions -> clients/psychologists/assessments),
-      // fetch flat rows and enrich manually.
-      if (assessError && String(assessError.message || '').includes('Could not find a relationship')) {
-        let flatQuery = supabaseAdmin
-          .from('assessment_sessions')
-          .select('id, assessment_id, assessment_slug, client_id, psychologist_id, scheduled_date, scheduled_time, status, amount, payment_id, session_number, created_at, updated_at');
-
-        flatQuery = applySessionStatusFilter(flatQuery);
-        if (psychologist_id) flatQuery = flatQuery.eq('psychologist_id', psychologist_id);
-        if (client_id) flatQuery = flatQuery.eq('client_id', client_id);
-        if (date) flatQuery = flatQuery.eq('scheduled_date', date);
-        if (dateFrom) flatQuery = flatQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`);
-        if (dateTo) flatQuery = flatQuery.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
-        if (sort && order) {
-          const asc = order === 'asc';
-          flatQuery = flatQuery.order(sort, { ascending: asc });
-          if (sort === 'scheduled_date') {
-            flatQuery = flatQuery.order('scheduled_time', { ascending: asc });
-          }
-        }
-
-        const { data: flatData, error: flatError } = await flatQuery;
-        if (!flatError && flatData) {
-          const clientIds = [...new Set(flatData.map(r => r.client_id).filter(Boolean))];
-          const psychIds = [...new Set(flatData.map(r => r.psychologist_id).filter(Boolean))];
-          const assessIds = [...new Set(flatData.map(r => r.assessment_id).filter(Boolean))];
-
-          let clients = [];
-          let psychologists = [];
-          let assessments = [];
-
-          if (clientIds.length) {
-            const { data } = await supabaseAdmin
-              .from('clients')
-              .select('id, user_id, first_name, last_name, child_name, child_age, phone_number')
-              .in('id', clientIds);
-            clients = data || [];
-          }
-          if (psychIds.length) {
-            const { data } = await supabaseAdmin
-              .from('psychologists')
-              .select('id, first_name, last_name, area_of_expertise, email')
-              .in('id', psychIds);
-            psychologists = data || [];
-          }
-          if (assessIds.length) {
-            const { data } = await supabaseAdmin
-              .from('assessments')
-              .select('id, slug, hero_title, seo_title')
-              .in('id', assessIds);
-            assessments = data || [];
-          }
-
-          const clientMap = new Map(clients.map(c => [c.id, c]));
-          const psychMap = new Map(psychologists.map(p => [p.id, p]));
-          const assessmentMap = new Map(assessments.map(a => [a.id, a]));
-
-          assessData = flatData.map(r => ({
-            ...r,
-            client: clientMap.get(r.client_id) || null,
-            psychologist: psychMap.get(r.psychologist_id) || null,
-            assessment: assessmentMap.get(r.assessment_id) || null
-          }));
-          assessError = null;
-        } else {
-          assessError = flatError || assessError;
-        }
-      }
+      const { data: assessData, error: assessError } = await assessQuery;
 
       if (assessError) {
         console.error('Error fetching assessment sessions:', assessError);
       } else {
-        // Transform assessment sessions to match session format
+        // Manually enrich with client and psychologist data (no FK relationships in schema cache)
+        const clientIds = [...new Set((assessData || []).map(r => r.client_id).filter(Boolean))];
+        const psychIds  = [...new Set((assessData || []).map(r => r.psychologist_id).filter(Boolean))];
+
+        let enrichedClients = [];
+        let enrichedPsychs  = [];
+
+        if (clientIds.length) {
+          const { data } = await supabaseAdmin
+            .from('clients')
+            .select('id, user_id, first_name, last_name, child_name, child_age, phone_number')
+            .in('id', clientIds);
+          enrichedClients = data || [];
+        }
+        if (psychIds.length) {
+          const { data } = await supabaseAdmin
+            .from('psychologists')
+            .select('id, first_name, last_name, area_of_expertise, email')
+            .in('id', psychIds);
+          enrichedPsychs = data || [];
+        }
+
+        const clientMap = new Map(enrichedClients.map(c => [c.id, c]));
+        const psychMap  = new Map(enrichedPsychs.map(p => [p.id, p]));
+
         assessmentSessions = (assessData || []).map(a => ({
           ...a,
+          client:       clientMap.get(a.client_id) || null,
+          psychologist: psychMap.get(a.psychologist_id) || null,
           session_type: 'assessment',
-          type: 'assessment',
-          assessment_title: a.assessment?.hero_title || a.assessment?.seo_title || 'Assessment'
+          type:         'assessment',
+          assessment_title: 'Assessment',
         }));
 
         console.log(`✅ Found ${assessmentSessions.length} assessment sessions for admin dashboard`);
