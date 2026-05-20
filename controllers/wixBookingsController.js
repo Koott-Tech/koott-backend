@@ -263,6 +263,9 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
               if (prev.google_calendar_event_id) row.google_calendar_event_id = prev.google_calendar_event_id;
               // Preserve notified_at — never let a sync upsert clear this after it's been stamped
               if (prev.notified_at) row.notified_at = prev.notified_at;
+              // If admin soft-deleted this session (cancelled + notified_at set), lock status too
+              // so Wix sync can't resurrect it back to 'booked'
+              if (prev.notified_at && prev.status === 'cancelled') row.status = 'cancelled';
             }
           });
         }

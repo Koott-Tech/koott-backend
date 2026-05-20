@@ -1660,7 +1660,7 @@ const deleteSession = async (req, res) => {
     // Check if session exists
     const { data: session, error: sessionError } = await supabaseAdmin
       .from('sessions')
-      .select('id, status')
+      .select('id, status, wix_booking_id')
       .eq('id', sessionId)
       .single();
 
@@ -1713,22 +1713,45 @@ const deleteSession = async (req, res) => {
       }
     }
 
-    // Delete session
-    const { error: deleteError } = await supabaseAdmin
-      .from('sessions')
-      .delete()
-      .eq('id', sessionId);
+    // Wix sessions: soft-delete (status=cancelled + notified_at=now) so the interval sync
+    // never re-inserts and re-fires notifications. Non-Wix sessions: hard delete as normal.
+    if (session.wix_booking_id) {
+      const { error: softDeleteError } = await supabaseAdmin
+        .from('sessions')
+        .update({
+          status: 'cancelled',
+          notified_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', sessionId);
 
-    if (deleteError) {
-      console.error('Delete session error:', deleteError);
-      if (deleteError.code === '23503') {
-        return res.status(400).json(
-          errorResponse('Cannot delete session: it is still linked to a package. Unlink it first or try again.')
-        );
+      if (softDeleteError) {
+        console.error('Delete session error (soft):', softDeleteError);
+        return res.status(500).json(errorResponse('Failed to delete session'));
       }
-      return res.status(500).json(
-        errorResponse('Failed to delete session')
-      );
+
+      // Also mark in wix_bookings so the discover page hides it
+      await supabaseAdmin
+        .from('wix_bookings')
+        .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+        .eq('wix_booking_id', session.wix_booking_id);
+
+    } else {
+      // Hard delete for non-Wix sessions
+      const { error: deleteError } = await supabaseAdmin
+        .from('sessions')
+        .delete()
+        .eq('id', sessionId);
+
+      if (deleteError) {
+        console.error('Delete session error:', deleteError);
+        if (deleteError.code === '23503') {
+          return res.status(400).json(
+            errorResponse('Cannot delete session: it is still linked to a package. Unlink it first or try again.')
+          );
+        }
+        return res.status(500).json(errorResponse('Failed to delete session'));
+      }
     }
 
     res.json(
