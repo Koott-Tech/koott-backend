@@ -248,7 +248,7 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
       if (wixBookingIds.length > 0) {
         const { data: existing } = await supabaseAdmin
           .from('sessions')
-          .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id')
+          .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at')
           .in('wix_booking_id', wixBookingIds);
         if (existing?.length) {
           const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
@@ -261,6 +261,8 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
               if (prev.google_meet_join_url) row.google_meet_join_url = prev.google_meet_join_url;
               if (prev.google_meet_start_url) row.google_meet_start_url = prev.google_meet_start_url;
               if (prev.google_calendar_event_id) row.google_calendar_event_id = prev.google_calendar_event_id;
+              // Preserve notified_at — never let a sync upsert clear this after it's been stamped
+              if (prev.notified_at) row.notified_at = prev.notified_at;
             }
           });
         }
@@ -652,7 +654,7 @@ async function performWixSync(options = {}) {
     if (wixBookingIds.length > 0) {
       const { data: existing } = await supabaseAdmin
         .from('sessions')
-        .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id')
+        .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at')
         .in('wix_booking_id', wixBookingIds);
       if (existing?.length) {
         const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
@@ -665,6 +667,8 @@ async function performWixSync(options = {}) {
             if (prev.google_meet_join_url) row.google_meet_join_url = prev.google_meet_join_url;
             if (prev.google_meet_start_url) row.google_meet_start_url = prev.google_meet_start_url;
             if (prev.google_calendar_event_id) row.google_calendar_event_id = prev.google_calendar_event_id;
+            // Preserve notified_at — never let a sync upsert clear this after it's been stamped
+            if (prev.notified_at) row.notified_at = prev.notified_at;
           }
         });
       }
