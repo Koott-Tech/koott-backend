@@ -196,6 +196,8 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
   if (locallyModifiedIds.size) {
     rows = rows.filter((r) => !locallyModifiedIds.has(r.wix_booking_id));
   }
+  // Drop pending (unpaid) bookings — Wix UNDEFINED status means payment not completed
+  rows = rows.filter((r) => r.status !== 'pending');
   if (!rows.length) {
     return { upserted: 0, sessionsUpserted: 0, sessionMirrorSkipped: false };
   }
@@ -239,6 +241,8 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
     if (locallyModifiedIds.size) {
       filteredSessionRows = sessionRows.filter(r => !locallyModifiedIds.has(r.wix_booking_id));
     }
+    // Skip pending sessions (Wix UNDEFINED = payment not completed) — don't save to sessions table
+    filteredSessionRows = filteredSessionRows.filter(r => r.status !== 'pending');
 
     if (filteredSessionRows.length > 0) {
       const upsertSessions = await sessionRowsForSchema(filteredSessionRows);
@@ -589,6 +593,9 @@ async function performWixSync(options = {}) {
     };
   }
 
+  // Drop pending (unpaid) bookings — Wix UNDEFINED status means payment not completed
+  rows = rows.filter((r) => r.status !== 'pending');
+
   // Preserve wix_session_id if already set — prevents sync from overwriting with null.
   const syncExistingIds = rows.map(r => r.wix_booking_id).filter(Boolean);
   if (syncExistingIds.length) {
@@ -645,6 +652,8 @@ async function performWixSync(options = {}) {
   if (locallyModifiedIds.size) {
     filteredSessionRows = sessionRows.filter(r => !locallyModifiedIds.has(r.wix_booking_id));
   }
+  // Skip pending sessions (Wix UNDEFINED = payment not completed) — don't save to sessions table
+  filteredSessionRows = filteredSessionRows.filter(r => r.status !== 'pending');
 
   let sessionData = null;
   let sessionError = null;
