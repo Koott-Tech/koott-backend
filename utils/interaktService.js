@@ -18,58 +18,39 @@
  */
 
 const https = require('https');
+const { parsePhoneNumberFromString } = require('libphonenumber-js');
 
 const LOG_PREFIX = '[interakt]';
 
 /**
- * Normalize phone number: strip + and country code for Interakt
- * Interakt expects countryCode and phoneNumber as separate fields.
+ * Parse a phone number into { countryCode, phoneNumber } for the Interakt API.
+ * Uses Google's libphonenumber for accurate country code detection across all countries.
+ * Falls back to India (+91) for bare 10-digit numbers (no country code prefix).
  *
- * @param {string} phone - Phone in any format (+919876543210, 919876543210, 9876543210)
+ * @param {string} phone - e.g. "+919876543210", "9876543210", "+61412345678"
  * @returns {{ countryCode: string, phoneNumber: string } | null}
  */
 function parsePhone(phone) {
   if (!phone || typeof phone !== 'string') return null;
 
-  let cleaned = phone.trim().replace(/\s+/g, '');
+  const cleaned = phone.trim().replace(/[\s\-().]/g, '');
   if (!cleaned) return null;
 
-  // Strip leading +
-  if (cleaned.startsWith('+')) cleaned = cleaned.substring(1);
-
-  // Indian numbers: starts with 91 and has 12 digits total
-  if (cleaned.startsWith('91') && cleaned.length === 12) {
-    return { countryCode: '+91', phoneNumber: cleaned.substring(2) };
-  }
-
-  // UAE numbers: starts with 971 and has 12-13 digits total
-  if (cleaned.startsWith('971') && (cleaned.length === 12 || cleaned.length === 13)) {
-    return { countryCode: '+971', phoneNumber: cleaned.substring(3) };
-  }
-
-  // Already 10 digits (no country code) — assume India
+  // Bare 10-digit number with no + — treat as Indian local number
   if (/^\d{10}$/.test(cleaned)) {
     return { countryCode: '+91', phoneNumber: cleaned };
   }
 
-  // Other international: take first 1-3 digits as country code, rest as number
-  // Fallback: return as-is with +91 default
-  if (/^\d{11,15}$/.test(cleaned)) {
-    // Try common country codes
-    if (cleaned.startsWith('1') && cleaned.length === 11) {
-      return { countryCode: '+1', phoneNumber: cleaned.substring(1) };
-    }
-    if (cleaned.startsWith('44') && cleaned.length >= 12) {
-      return { countryCode: '+44', phoneNumber: cleaned.substring(2) };
-    }
-    if (cleaned.startsWith('971')) {
-      return { countryCode: '+971', phoneNumber: cleaned.substring(3) };
-    }
-    // Default: assume first 2 digits are country code
-    return { countryCode: `+${cleaned.substring(0, 2)}`, phoneNumber: cleaned.substring(2) };
-  }
+  // Ensure E.164 format for the parser (needs leading +)
+  const e164 = cleaned.startsWith('+') ? cleaned : `+${cleaned}`;
 
-  return null;
+  const parsed = parsePhoneNumberFromString(e164);
+  if (!parsed || !parsed.isValid()) return null;
+
+  return {
+    countryCode: `+${parsed.countryCallingCode}`,
+    phoneNumber: parsed.nationalNumber,
+  };
 }
 
 /**

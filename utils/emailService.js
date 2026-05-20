@@ -8,6 +8,38 @@ const PRODUCTION_SITE_URL = (
   'https://www.koott.in'
 ).replace(/\/+$/, '');
 
+// Hosted email header images — served from Vercel frontend public folder
+const CLIENT_EMAIL_HEADER_URL = process.env.CLIENT_EMAIL_HEADER_URL || 'https://koott-frontend-keth.vercel.app/BookingConfirmationKoott.webp';
+const THERAPIST_EMAIL_HEADER_URL = process.env.THERAPIST_EMAIL_HEADER_URL || 'https://koott-frontend-keth.vercel.app/NewKoottBooking.webp';
+
+// Dark mode styles injected into every session confirmation email <head>
+const DARK_MODE_STYLES = `
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .email-bg   { background-color: #121212 !important; }
+      .email-card { background-color: #1e1e1e !important; }
+      .content-td { background-color: #1e1e1e !important; }
+      .greeting   { color: #f3f4f6 !important; }
+      .body-text  { color: #d1d5db !important; }
+      .detail-text { color: #d1d5db !important; }
+      .detail-link { color: #4ade80 !important; }
+      .btn-pill   { border-color: #4ade80 !important; color: #4ade80 !important; }
+      /* Reminder / preparation gradient box */
+      .reminder-box   { background-color: #14532d !important; background-image: none !important; }
+      .reminder-title { color: #bbf7d0 !important; }
+      .reminder-list  { color: #bbf7d0 !important; }
+      /* Calendar already-added info box */
+      .cal-info-box { background-color: #1e1b4b !important; border-color: #4338ca !important; }
+      .cal-info-text { color: #c7d2fe !important; }
+      /* Meet link fallback warning */
+      .warn-box  { background-color: #422006 !important; border-color: #b45309 !important; }
+      .warn-text { color: #fde68a !important; }
+    }
+  </style>
+`;
+
 // Shared helper: Format time string (HH:MM:SS or HH:MM) to 12-hour format (h:mm AM/PM IST)
 // Time is already stored in IST format, so no timezone conversion needed
 function formatTimeFromString(timeStr) {
@@ -384,8 +416,11 @@ class EmailService {
       receiptFileName,
       packageInfo,
       durationMinutes = 50,
-      tempPassword = null // Add this
+      tempPassword = null
     } = emailData;
+
+    // TEMPORARY: credential block disabled during website redesign — set to true when ready to re-enable
+    const showCredentials = false; // TODO: change to !!tempPassword when redesign is done
 
     // Get logo URL - use favicon for email compatibility
     const frontendUrl = PRODUCTION_SITE_URL;
@@ -426,59 +461,60 @@ class EmailService {
       },
       replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
-      subject: `Session Confirmed - ${scheduledDate} at ${scheduledTime}`,
+      subject: `Koott Booking Confirmed | ${psychologistName.replace(/^Dr\.?\s*/i, '').trim()} | ${scheduledDate.replace(/,?\s*\d{4}$/, '').trim()}`,
       html: `
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          ${DARK_MODE_STYLES}
         </head>
-        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #ffffff;">
-          <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #ffffff;">
+        <body class="email-bg" style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #ffffff;">
+          <table role="presentation" class="email-bg" style="width: 100%; border-collapse: collapse; background-color: #ffffff;">
             <tr>
               <td align="center" style="padding: 20px 10px;">
-                <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);">
+                <table role="presentation" class="email-card" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);">
                   <!-- Header Image -->
                   <tr>
                     <td style="padding: 0;">
-                      <img src="cid:email-header" alt="Thank You for applying to Koott" style="width: 100%; max-width: 600px; height: auto; display: block;">
+                      <img src="${CLIENT_EMAIL_HEADER_URL}" alt="Koott" style="width: 100%; max-width: 600px; height: auto; display: block;">
                     </td>
                   </tr>
-                  
+
                   <!-- Main Content -->
                   <tr>
-                    <td style="padding: 40px 30px;">
-                      <h2 style="color: #1a202c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Hey ${firstName}.,</h2>
-                      
-                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
+                    <td class="content-td" style="padding: 40px 30px; background-color: #ffffff;">
+                      <h2 class="greeting" style="color: #1a202c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Hey ${firstName},</h2>
+
+                      <p class="body-text" style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
                         Your session with <strong>Koott</strong> is scheduled.
                       </p>
 
-                      ${tempPassword ? `
+                      ${showCredentials && tempPassword ? `
                       <!-- Account Credentials Section -->
-                      <div style="background-color: #f3fff3; background-image: linear-gradient(to bottom, #f3fff3, #d4ffd4); padding: 30px; border-radius: 12px; margin-bottom: 30px;">
-                        <h3 style="color: #064e3b; margin: 0 0 10px 0; font-size: 16px; font-weight: 700;">Your Account is Ready!</h3>
-                        <p style="color: #064e3b; font-size: 14px; margin: 0 0 15px 0;">We have created an account for you to manage your sessions.</p>
+                      <div class="reminder-box" style="background-color: #f3fff3; background-image: linear-gradient(to bottom, #f3fff3, #d4ffd4); padding: 30px; border-radius: 12px; margin-bottom: 30px;">
+                        <h3 class="reminder-title" style="color: #064e3b; margin: 0 0 10px 0; font-size: 16px; font-weight: 700;">Your Account is Ready!</h3>
+                        <p class="reminder-title" style="color: #064e3b; font-size: 14px; margin: 0 0 15px 0;">We have created an account for you to manage your sessions.</p>
                         <div style="background: rgba(255, 255, 255, 0.6); padding: 15px; border-radius: 8px;">
-                          <p style="margin: 0; font-size: 14px; color: #064e3b;"><strong>Email:</strong> ${to}</p>
-                          <p style="margin: 5px 0 0 0; font-size: 14px; color: #064e3b;"><strong>Password:</strong> ${tempPassword}</p>
+                          <p class="reminder-title" style="margin: 0; font-size: 14px; color: #064e3b;"><strong>Email:</strong> ${to}</p>
+                          <p class="reminder-title" style="margin: 5px 0 0 0; font-size: 14px; color: #064e3b;"><strong>Password:</strong> ${tempPassword}</p>
                         </div>
-                        <p style="color: #15803d; font-size: 12px; margin: 10px 0 0 0;">You can change your password after logging in.</p>
+                        <p class="reminder-title" style="color: #15803d; font-size: 12px; margin: 10px 0 0 0;">You can change your password after logging in.</p>
                       </div>
                       ` : ''}
-                      
-                      <p style="color: #4a5568; font-size: 16px; font-weight: 500; margin: 0 0 20px 0;">Here are the details:</p>
-                      
+
+                      <p class="body-text" style="color: #4a5568; font-size: 16px; font-weight: 500; margin: 0 0 20px 0;">Here are the details:</p>
+
                       <!-- Session Details -->
-                      <div style="color: #4a5568; font-size: 16px; line-height: 2; margin: 0 0 30px 0;">
+                      <div class="detail-text" style="color: #4a5568; font-size: 16px; line-height: 2; margin: 0 0 30px 0;">
                         ${packageLine}
                         • Date: ${formattedDateShort}<br>
                         • Time: ${scheduledTime} (IST)<br>
                         • Duration: ${durationMinutes} min<br>
                         ${formattedPrice ? `• Price: ₹${formattedPrice}` : ''}
                       </div>
-                      
+
                       ${googleMeetLink ? `
                       <!-- Join Session Section -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
@@ -487,34 +523,34 @@ class EmailService {
                             <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background-color: #189e4f; color: #ffffff; padding: 16px 40px; text-decoration: none; border-radius: 12px; font-weight: 600; font-size: 18px; margin-bottom: 20px;">
                               Join Your Session
                             </a>
-                            <p style="color: #4a5568; font-size: 15px; margin: 0; line-height: 1.5;">
-                              Or join using this link: <a href="${googleMeetLink}" style="color: #189e4f; text-decoration: none;">${googleMeetLink}</a>
+                            <p class="body-text" style="color: #4a5568; font-size: 15px; margin: 0; line-height: 1.5;">
+                              Or join using this link: <a href="${googleMeetLink}" class="detail-link" style="color: #189e4f; text-decoration: none;">${googleMeetLink}</a>
                             </p>
                           </td>
                         </tr>
                       </table>
                       ` : ''}
-                      
+
                       <!-- Calendar & WhatsApp Buttons -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 40px 0;">
                         <tr>
                           <td>
                             ${googleCalendarLink ? `
-                            <a href="${googleCalendarLink}" target="_blank" style="display: inline-block; border: 1.5px solid #189e4f; color: #189e4f; padding: 12px 24px; text-decoration: none; border-radius: 100px; font-weight: 600; font-size: 14px; margin-right: 12px; margin-bottom: 12px;">
+                            <a href="${googleCalendarLink}" target="_blank" class="btn-pill" style="display: inline-block; border: 1.5px solid #189e4f; color: #189e4f; padding: 12px 24px; text-decoration: none; border-radius: 100px; font-weight: 600; font-size: 14px; margin-right: 12px; margin-bottom: 12px;">
                               <img src="https://img.icons8.com/ios-filled/100/189e4f/calendar.png" alt="" style="width: 18px; height: 18px; vertical-align: middle; margin-right: 8px;"> Add to Google Calendar
                             </a>
                             ` : ''}
-                            <a href="https://wa.me/918606040400" target="_blank" style="display: inline-block; border: 1.5px solid #189e4f; color: #189e4f; padding: 12px 24px; text-decoration: none; border-radius: 100px; font-weight: 600; font-size: 14px; margin-bottom: 12px;">
+                            <a href="https://wa.me/918606040400" target="_blank" class="btn-pill" style="display: inline-block; border: 1.5px solid #189e4f; color: #189e4f; padding: 12px 24px; text-decoration: none; border-radius: 100px; font-weight: 600; font-size: 14px; margin-bottom: 12px;">
                               <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/120px-WhatsApp.svg.png" alt="" style="width: 18px; height: 18px; vertical-align: middle; margin-right: 8px;"> WhatsApp Us
                             </a>
                           </td>
                         </tr>
                       </table>
-                      
+
                       <!-- Reminders -->
-                      <div style="background-color: #f3fff3; background-image: linear-gradient(to bottom, #f3fff3, #d4ffd4); padding: 30px; border-radius: 12px; margin-bottom: 40px;">
-                        <h3 style="color: #064e3b; margin: 0 0 20px 0; font-size: 20px; font-weight: 700;">Reminders</h3>
-                        <ul style="color: #064e3b; font-size: 15px; line-height: 1.8; margin: 0; padding-left: 20px;">
+                      <div class="reminder-box" style="background-color: #f3fff3; background-image: linear-gradient(to bottom, #f3fff3, #d4ffd4); padding: 30px; border-radius: 12px; margin-bottom: 40px;">
+                        <h3 class="reminder-title" style="color: #064e3b; margin: 0 0 20px 0; font-size: 20px; font-weight: 700;">Reminders</h3>
+                        <ul class="reminder-list" style="color: #064e3b; font-size: 15px; line-height: 1.8; margin: 0; padding-left: 20px;">
                           <li style="margin-bottom: 8px;">Please join the session 10 minutes before the scheduled time</li>
                           <li style="margin-bottom: 8px;">Ensure you have a stable internet connection</li>
                           <li style="margin-bottom: 8px;">Find a quiet, private space for your session</li>
@@ -547,46 +583,35 @@ class EmailService {
         </body>
         </html>
       `,
-      attachments: [
-        {
-          filename: 'header.png',
-          path: require('path').join(__dirname, '../templates/email-header.png'),
-          cid: 'email-header'
-        },
-        ...(calendarInvite ? [{
-          filename: calendarInvite.filename,
-          content: calendarInvite.content,
-          contentType: calendarInvite.contentType
-        }] : [])
-      ]
+      attachments: calendarInvite ? [{
+        filename: calendarInvite.filename,
+        content: calendarInvite.content,
+        contentType: calendarInvite.contentType,
+        contentDisposition: 'attachment'
+      }] : []
     };
 
     return this.transporter.sendMail(mailOptions);
   }
 
   async sendPsychologistConfirmation(emailData) {
-    const { 
-      to, 
-      clientName, 
-      psychologistName, 
-      scheduledDate, 
-      scheduledTime, 
-      googleMeetLink, 
+    const {
+      to,
+      clientName,
+      psychologistName,
+      scheduledDate,
+      scheduledTime,
+      googleMeetLink,
       sessionId,
       calendarInvite,
       googleCalendarLink,
       outlookCalendarLink,
       calendarFromGoogleApi = false,
-      price,
       packageInfo,
       durationMinutes = 50
     } = emailData;
-    
-    // Format price for display (convert to number if string, then format with commas)
-    const formattedPrice = price ? (typeof price === 'number' ? price.toLocaleString('en-IN') : Number(price).toLocaleString('en-IN')) : null;
 
-    const contactEmail = 'hey@koott.com';
-    const contactPhone = '+91-9539007766';
+    const firstName = psychologistName ? psychologistName.replace(/^Dr\.?\s*/i, '').split(' ')[0] : 'there';
 
     const mailOptions = {
       from: {
@@ -595,183 +620,124 @@ class EmailService {
       },
       replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
       to: to,
-      subject: `New Session Scheduled - ${scheduledDate} at ${scheduledTime}`,
+      subject: `Koott Booking Confirmed | ${clientName} | ${scheduledDate.replace(/,?\s*\d{4}$/, '').trim()}`,
       html: `
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          ${DARK_MODE_STYLES}
         </head>
-        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f7fa;">
-          <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f7fa;">
+        <body class="email-bg" style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #ffffff;">
+          <table role="presentation" class="email-bg" style="width: 100%; border-collapse: collapse; background-color: #ffffff;">
             <tr>
-              <td style="padding: 20px 10px;">
-                <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-                  <!-- Header -->
+              <td align="center" style="padding: 20px 10px;">
+                <table role="presentation" class="email-card" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);">
+                  <!-- Header Image -->
                   <tr>
-                    <td style="background: #3d985c; padding: 40px 40px; text-align: center;">
-                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
-                        <tr>
-                          <td align="center">
-                            <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -1px;">KOOTT</h1>
-                            <p style="color: #ffffff; margin: 5px 0 0 0; font-size: 14px; opacity: 0.8; letter-spacing: 1px; text-transform: uppercase;">Therapist Dashboard</p>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td align="center" style="padding-top: 25px;">
-                            <h2 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 600;">New Session Scheduled</h2>
-                          </td>
-                        </tr>
-                      </table>
+                    <td style="padding: 0;">
+                      <img src="${THERAPIST_EMAIL_HEADER_URL}" alt="Koott" style="width: 100%; max-width: 600px; height: auto; display: block;">
                     </td>
                   </tr>
-                  
+
                   <!-- Main Content -->
                   <tr>
-                    <td style="padding: 30px 20px;">
-                      <h2 style="color: #1a202c; margin: 0 0 20px 0; font-size: 24px; font-weight: 600;">Hello ${psychologistName},</h2>
-                      
-                      <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">A new therapy session has been scheduled with you. Here are the details:</p>
-                      
-                      <!-- Session Details Card -->
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
-                        <tr>
-                          <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
-                            <table role="presentation" style="width: 100%; border-collapse: collapse;">
-                              <tr>
-                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Date:</strong></td>
-                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${scheduledDate}</td>
-                              </tr>
-                              <tr>
-                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Time:</strong></td>
-                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${scheduledTime} (IST)</td>
-                              </tr>
-                              <tr>
-                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Duration:</strong></td>
-                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${durationMinutes} min</td>
-                              </tr>
-                              <tr>
-                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client:</strong></td>
-                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${clientName}</td>
-                              </tr>
-                              ${packageInfo && packageInfo.totalSessions ? `
-                              <tr>
-                                <td colspan="2" style="padding: 15px 0 8px 0;">
-                                  <p style="margin: 0; color: #3d985c; font-weight: 600; font-size: 14px;">📦 Package Session</p>
-                                  <p style="margin: 5px 0 0 0; color: #4a5568; font-size: 13px;">
-                                    <strong>Progress:</strong> ${packageInfo.completedSessions || 0}/${packageInfo.totalSessions} sessions completed, ${packageInfo.remainingSessions || 0} remaining
-                                  </p>
-                                </td>
-                              </tr>
-                              ` : ''}
-                              <tr>
-                                <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Session Fee:</strong></td>
-                                <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right; font-weight: 600;">${formattedPrice ? `₹${formattedPrice}` : 'TBD'}</td>
-                              </tr>
-                            </table>
-                          </td>
-                        </tr>
-                      </table>
-                      
-                      ${calendarFromGoogleApi ? `
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
-                        <tr>
-                          <td style="padding: 14px 16px; background: #eef2ff; border-radius: 8px; border: 1px solid #c7d2fe;">
-                            <p style="color: #3730a3; font-size: 14px; margin: 0; line-height: 1.5;">
-                              <strong>Calendar:</strong> This session is already on your Google Calendar (you are the host). Use the Meet button below—do not add the event again from this email.
-                            </p>
-                          </td>
-                        </tr>
-                      </table>
-                      ` : googleCalendarLink || outlookCalendarLink ? `
-                      <!-- Calendar Section -->
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
-                        <tr>
-                          <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #2d3748; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">📅 Add to Your Calendar</h3>
-                            <p style="color: #4a5568; font-size: 14px; margin: 0 0 20px 0;">Add this session to your calendar:</p>
-                            <div style="text-align: center;">
-                              ${googleCalendarLink ? `
-                              <a href="${googleCalendarLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
-                                📅 Google Calendar
-                              </a>
-                              ` : ''}
-                              ${outlookCalendarLink ? `
-                              <a href="${outlookCalendarLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 5px; font-weight: 600; font-size: 14px;">
-                                📅 Outlook
-                              </a>
-                              ` : ''}
-                            </div>
-                          </td>
-                        </tr>
-                      </table>
-                      ` : ''}
-                      
+                    <td class="content-td" style="padding: 40px 30px; background-color: #ffffff;">
+                      <h2 class="greeting" style="color: #1a202c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Hey ${firstName},</h2>
+
+                      <p class="body-text" style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 25px 0;">
+                        A new session has been scheduled with you on <strong>Koott</strong>.
+                      </p>
+
+                      <p class="body-text" style="color: #4a5568; font-size: 16px; font-weight: 500; margin: 0 0 20px 0;">Here are the details:</p>
+
+                      <!-- Session Details -->
+                      <div class="detail-text" style="color: #4a5568; font-size: 16px; line-height: 2; margin: 0 0 30px 0;">
+                        • Client: ${clientName}<br>
+                        • Date: ${scheduledDate}<br>
+                        • Time: ${scheduledTime} (IST)<br>
+                        • Duration: ${durationMinutes} min<br>
+                        ${packageInfo && packageInfo.totalSessions ? `• Session: ${Math.min((packageInfo.completedSessions || 0) + 1, packageInfo.totalSessions)} of ${packageInfo.totalSessions} (package)<br>` : ''}
+                      </div>
+
                       ${googleMeetLink ? `
-                      <!-- Google Meet Section -->
+                      <!-- Join Session -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
-                          <td style="padding: 0 0 20px 0; text-align: center;">
-                            <h3 style="color: #2d3748; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">Join Your Session</h3>
-                            <p style="color: #4a5568; font-size: 14px; margin: 0 0 20px 0;">Click the button below to join your Google Meet session:</p>
-                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
-                              Join Google Meet
+                          <td style="padding: 0 0 20px 0;">
+                            <a href="${googleMeetLink}" target="_blank" style="display: inline-block; background-color: #189e4f; color: #ffffff; padding: 16px 40px; text-decoration: none; border-radius: 12px; font-weight: 600; font-size: 18px; margin-bottom: 20px;">
+                              Join Your Session
                             </a>
-                            <p style="color: #4a5568; font-size: 12px; margin: 15px 0 0 0; word-break: break-all;">
-                              Or copy this link: <a href="${googleMeetLink}" style="color: #3d985c; text-decoration: underline;">${googleMeetLink}</a>
+                            <p class="body-text" style="color: #4a5568; font-size: 15px; margin: 0; line-height: 1.5;">
+                              Or join using this link: <a href="${googleMeetLink}" class="detail-link" style="color: #189e4f; text-decoration: none;">${googleMeetLink}</a>
                             </p>
                           </td>
                         </tr>
                       </table>
                       ` : `
-                      <!-- Meet link not created - Support message -->
+                      <!-- Meet link not created -->
                       <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
                         <tr>
-                          <td style="padding: 0 0 20px 0; text-align: center; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
-                            <p style="color: #92400e; font-size: 14px; margin: 0; padding: 16px;">
-                              Due to some issue Google Meet didn't get created. Please contact our support.
+                          <td class="warn-box" style="padding: 16px; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
+                            <p class="warn-text" style="color: #92400e; font-size: 14px; margin: 0;">
+                              Google Meet link could not be created. Please contact our support at care@koott.in.
                             </p>
                           </td>
                         </tr>
                       </table>
                       `}
-                      
-                      <!-- Important Reminders -->
-                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+
+                      <!-- Calendar Buttons (no WhatsApp) -->
+                      ${calendarFromGoogleApi ? `
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 40px 0;">
                         <tr>
-                          <td style="padding: 0 0 20px 0;">
-                            <h3 style="color: #2d3748; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">Session Preparation</h3>
-                            <ul style="color: #4a5568; font-size: 14px; line-height: 1.8; margin: 0; padding-left: 20px;">
-                              <li>Review client information and previous session notes</li>
-                              <li>Prepare any relevant materials or resources</li>
-                              <li>Ensure your workspace is professional and private</li>
-                              <li>Test your audio and video equipment</li>
-                            </ul>
+                          <td class="cal-info-box" style="padding: 14px 16px; background: #eef2ff; border-radius: 8px; border: 1px solid #c7d2fe;">
+                            <p class="cal-info-text" style="color: #3730a3; font-size: 14px; margin: 0; line-height: 1.5;">
+                              <strong>Calendar:</strong> This session is already on your Google Calendar (you are the host). Use the Join button above — do not add the event again from this email.
+                            </p>
                           </td>
                         </tr>
                       </table>
-                      
-                      <!-- Footer Text -->
-                      <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">Please ensure you're available 5 minutes before the scheduled time to start the session.</p>
-                      
-                      <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a></p>
-                      
-                      <p style="color: #2d3748; font-size: 15px; margin: 0;">
-                        Best regards,<br>
-                        <strong style="color: #3d985c;">The Koott Team</strong>
-                      </p>
+                      ` : googleCalendarLink ? `
+                      <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 40px 0;">
+                        <tr>
+                          <td>
+                            <a href="${googleCalendarLink}" target="_blank" class="btn-pill" style="display: inline-block; border: 1.5px solid #189e4f; color: #189e4f; padding: 12px 24px; text-decoration: none; border-radius: 100px; font-weight: 600; font-size: 14px; margin-bottom: 12px;">
+                              <img src="https://img.icons8.com/ios-filled/100/189e4f/calendar.png" alt="" style="width: 18px; height: 18px; vertical-align: middle; margin-right: 8px;"> Add to Google Calendar
+                            </a>
+                          </td>
+                        </tr>
+                      </table>
+                      ` : ''}
+
+                      <!-- Reminders -->
+                      <div class="reminder-box" style="background-color: #f3fff3; background-image: linear-gradient(to bottom, #f3fff3, #d4ffd4); padding: 30px; border-radius: 12px; margin-bottom: 40px;">
+                        <h3 class="reminder-title" style="color: #064e3b; margin: 0 0 20px 0; font-size: 20px; font-weight: 700;">Session Preparation</h3>
+                        <ul class="reminder-list" style="color: #064e3b; font-size: 15px; line-height: 1.8; margin: 0; padding-left: 20px;">
+                          <li style="margin-bottom: 8px;">Review client information and previous session notes</li>
+                          <li style="margin-bottom: 8px;">Prepare any relevant materials or resources</li>
+                          <li style="margin-bottom: 8px;">Ensure your workspace is professional and private</li>
+                          <li>Test your audio and video equipment before the session</li>
+                        </ul>
+                      </div>
                     </td>
                   </tr>
-                  
+
                   <!-- Footer -->
                   <tr>
-                    <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
-                      <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
-                        This email confirms your scheduled therapy session. Please ensure you're prepared and on time.<br>
-                        If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
+                    <td style="background-color: #012f23; padding: 40px 30px; color: #ffffff;">
+                      <p style="margin: 0 0 15px 0; font-size: 14px; line-height: 1.6; color: #e5e7eb;">Please be available 5 minutes before the scheduled time.</p>
+                      <p style="margin: 0 0 25px 0; font-size: 14px; line-height: 1.6; color: #e5e7eb;">
+                        If you have any questions, don't hesitate to get in touch with us at<br>
+                        <a href="mailto:care@koott.in" style="color: #ffffff; text-decoration: none;">care@koott.in</a>, via WhatsApp or call us at +91 8606040400
                       </p>
+                      <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                        <tr>
+                          <td style="font-size: 14px; color: #9ca3af;">കൂട്ടിനുണ്ട് കൂട്ട്</td>
+                          <td align="right" style="font-size: 14px; color: #9ca3af;">Koott Care Pvt. Ltd.</td>
+                        </tr>
+                      </table>
                     </td>
                   </tr>
                 </table>
@@ -781,13 +747,11 @@ class EmailService {
         </body>
         </html>
       `,
-      attachments: calendarInvite ? [
-        {
-          filename: calendarInvite.filename,
-          content: calendarInvite.content,
-          contentType: calendarInvite.contentType
-        }
-      ] : []
+      attachments: calendarInvite ? [{
+        filename: calendarInvite.filename,
+        content: calendarInvite.content,
+        contentType: calendarInvite.contentType
+      }] : []
     };
 
     return this.transporter.sendMail(mailOptions);
