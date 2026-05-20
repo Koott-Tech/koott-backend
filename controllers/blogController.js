@@ -73,7 +73,7 @@ const getAllBlogs = async (req, res) => {
     // Transform blog data
     const formattedBlogs = blogs.map(blog => ({
       ...blog,
-      featured_image_url: blog.featured_image_url || '/mainlogo.webp',
+      featured_image_url: blog.featured_image_url || '/logo.png',
       tags: blog.tags || [],
       read_time_minutes: blog.read_time_minutes || 5
     }));
@@ -121,7 +121,7 @@ const getBlogBySlug = async (req, res) => {
 
     res.json(successResponse('Blog retrieved successfully', {
       ...blog,
-      featured_image_url: blog.featured_image_url || '/mainlogo.webp',
+      featured_image_url: blog.featured_image_url || '/logo.png',
       tags: blog.tags || []
     }));
   } catch (error) {

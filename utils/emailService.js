@@ -424,7 +424,7 @@ class EmailService {
 
     // Get logo URL - use favicon for email compatibility
     const frontendUrl = PRODUCTION_SITE_URL;
-    const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
+    const logoUrl = `${PRODUCTION_SITE_URL}/logo.png`;
     
     // Contact information
     const contactEmail = 'hey@koott.com';
@@ -812,7 +812,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1000,7 +1000,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1170,7 +1170,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1413,7 +1413,7 @@ class EmailService {
 
     // Get logo URL - use favicon for email compatibility
     const frontendUrl = PRODUCTION_SITE_URL;
-    const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
+    const logoUrl = `${PRODUCTION_SITE_URL}/logo.png`;
 
     // Extract first name from name
     const firstName = name ? name.split(' ')[0] : 'there';
@@ -1713,7 +1713,7 @@ class EmailService {
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -1914,7 +1914,7 @@ The Koott Team
                       <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                         <tr>
                           <td align="center" style="padding-bottom: 15px;">
-                            <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                           </td>
                         </tr>
                         <tr>
@@ -2125,7 +2125,7 @@ The Koott Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2270,7 +2270,7 @@ The Koott Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2415,7 +2415,7 @@ The Koott Team
                         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                           <tr>
                             <td align="center" style="padding-bottom: 15px;">
-                              <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                              <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                             </td>
                           </tr>
                           <tr>
@@ -2557,7 +2557,7 @@ The Koott Team
                     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
                       <tr>
                         <td align="center" style="padding-bottom: 15px;">
-                          <img src="${PRODUCTION_SITE_URL}/favicon.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                          <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
                         </td>
                       </tr>
                       <tr>
@@ -2659,7 +2659,7 @@ The Koott Team
   async sendWelcomeEmail(emailData) {
     const { to, clientName, tempPassword, loginUrl } = emailData;
     
-    const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
+    const logoUrl = `${PRODUCTION_SITE_URL}/logo.png`;
     const firstName = clientName ? clientName.split(' ')[0] : 'there';
 
     const mailOptions = {
@@ -2795,7 +2795,7 @@ The Koott Team
   async sendWelcomePsychologistEmail(emailData) {
     const { to, psychologistName, tempPassword, loginUrl } = emailData;
     
-    const logoUrl = `${PRODUCTION_SITE_URL}/favicon.png`;
+    const logoUrl = `${PRODUCTION_SITE_URL}/logo.png`;
     const firstName = psychologistName ? psychologistName.split(' ')[0] : 'Specialist';
 
     const mailOptions = {

@@ -32,12 +32,14 @@ async function processNewWixSessions(wixBookingIds, tempPasswordMap = new Map())
     return { processed: 0, skipped: 0, errors: 0 };
   }
 
-  // Fetch sessions that were just upserted and still lack a Meet link
+  // Fetch sessions that were just upserted and haven't been fully notified yet.
+  // notified_at IS NULL is the authoritative "not yet done" flag — covers the case
+  // where GMeet saved but email/WhatsApp crashed before notifications went out.
   const { data: sessions, error } = await supabaseAdmin
     .from('sessions')
-    .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, wix_payload, source, price, amount')
+    .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, notified_at, wix_payload, source, price, amount')
     .in('wix_booking_id', wixBookingIds)
-    .is('google_meet_link', null);
+    .is('notified_at', null);
 
   if (error) {
     console.error(`${LOG_PREFIX} failed to fetch sessions:`, error.message || error);
@@ -88,8 +90,8 @@ async function processOneSession(session, tempPassword = null) {
     return 'skipped';
   }
 
-  // Already has a meet link (double-check)
-  if (session.google_meet_link) {
+  // Already fully processed (double-check in case of concurrent runs)
+  if (session.notified_at) {
     return 'skipped';
   }
 
@@ -180,18 +182,7 @@ async function processOneSession(session, tempPassword = null) {
   if (DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING) {
     console.log(`${LOG_PREFIX} Google Meet auto-scheduling temporarily disabled for session ${session.id}`);
   } else {
-    // --- SAFE TESTING FILTER ---
-    // Only process bookings for your test email to avoid overlapping with Zapier for real clients.
-    const testEmail = 'abhishekravi063@gmail.com';
-    const currentClientEmail = session.wix_payload?.contactDetails?.email || session.wix_payload?.email || clientEmail;
-
-    if (currentClientEmail !== testEmail) {
-      console.log(`${LOG_PREFIX} Skipping session ${session.id} - Not a test email (${currentClientEmail}).`);
-      return 'skipped';
-    }
-    // ----------------------------
-
-    console.log(`${LOG_PREFIX} Processing TEST session for ${currentClientEmail}...`);
+    console.log(`${LOG_PREFIX} Processing session ${session.id} for ${clientEmail}...`);
 
     meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
 
@@ -250,22 +241,37 @@ async function processOneSession(session, tempPassword = null) {
     await emailService.sendSessionConfirmation(emailData);
     console.log(`${LOG_PREFIX} ✅ Combined confirmation email sent to ${clientEmail}`);
 
-    // Send WhatsApp confirmation
-    const whatsappDetails = {
-      clientName: clientName,
-      psychologistName: psychologistName,
-      date: session.scheduled_date,
-      time: session.scheduled_time,
-      meetLink: meetLink,
-    };
-    
+    // ── Mark fully processed — interval sync will skip this session from now on ──
+    // Stamped immediately after email succeeds. WhatsApp is fire-and-forget below.
+    const { error: flagErr } = await supabaseAdmin
+      .from('sessions')
+      .update({ notified_at: new Date().toISOString() })
+      .eq('id', session.id);
+
+    if (flagErr) {
+      console.warn(`${LOG_PREFIX} ⚠️ could not set notified_at for session ${session.id}:`, flagErr.message);
+    } else {
+      console.log(`${LOG_PREFIX} ✅ notified_at stamped for session ${session.id}`);
+    }
+
+    // Send WhatsApp confirmation — best-effort, never blocks notified_at
     if (clientPhone) {
-      await interaktService.sendBookingConfirmation(clientPhone, whatsappDetails);
-      console.log(`${LOG_PREFIX} ✅ WhatsApp confirmation sent to ${clientPhone}`);
+      interaktService.sendBookingConfirmation(clientPhone, {
+        clientName: clientName,
+        psychologistName: psychologistName,
+        date: session.scheduled_date,
+        time: session.scheduled_time,
+        meetLink: meetLink,
+      }).then(() => {
+        console.log(`${LOG_PREFIX} ✅ WhatsApp confirmation sent to ${clientPhone}`);
+      }).catch(err => {
+        console.warn(`${LOG_PREFIX} ⚠️ WhatsApp failed for session ${session.id} (non-blocking):`, err.message || err);
+      });
     }
 
   } catch (notifyErr) {
     console.error(`${LOG_PREFIX} ❌ notification error for session ${session.id}:`, notifyErr.message || notifyErr);
+    // notified_at NOT set — interval sync will retry this session automatically
   }
 
   return 'processed';
