@@ -144,14 +144,6 @@ async function processOneSession(session, tempPassword = null) {
   const clientEmail = clientUserData?.email;
   const clientPhone = clientDetails.phone_number;
 
-  // ── TEST FILTER — remove before going live ────────────────────────────
-  const TEST_EMAIL = 'abhishekravi063@gmail.com';
-  if (clientEmail?.toLowerCase() !== TEST_EMAIL) {
-    console.log(`${LOG_PREFIX} [TEST MODE] skipping session ${session.id} — client email ${clientEmail} is not the test account`);
-    return 'skipped';
-  }
-  // ─────────────────────────────────────────────────────────────────────
-
   // ── Duration ──────────────────────────────────────────────────────────
   const meetDurationMinutes = resolveSessionDurationMinutes({
     durationMinutes: null,
