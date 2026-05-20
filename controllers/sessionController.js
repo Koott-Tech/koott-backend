@@ -325,7 +325,8 @@ const getAllSessions = async (req, res) => {
     let countQuery = supabaseAdmin
       .from('sessions')
       .select('*', { count: 'exact', head: true })
-      .neq('session_type', 'free_assessment'); // Exclude free assessments
+      .neq('session_type', 'free_assessment') // Exclude free assessments
+      .neq('status', 'cancelled'); // Exclude soft-deleted (admin-cancelled) sessions
 
     // Apply same filters for count
     countQuery = applySessionStatusFilter(countQuery);
@@ -378,7 +379,8 @@ const getAllSessions = async (req, res) => {
           email
         )
       `)
-      .neq('session_type', 'free_assessment'); // Exclude free assessments
+      .neq('session_type', 'free_assessment') // Exclude free assessments
+      .neq('status', 'cancelled'); // Exclude soft-deleted (admin-cancelled) sessions
 
     console.log('Supabase query built, executing...');
 
