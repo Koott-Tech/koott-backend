@@ -173,7 +173,13 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
     };
   }
 
-  const deduped = dedupeBookings(listToSync);
+  // Drop unpaid bookings at the raw level — Wix UNDEFINED status = payment not completed
+  const paidBookings = listToSync.filter(b => {
+    const s = String(b?.status || '').trim().toUpperCase();
+    return s !== 'UNDEFINED' && s !== '';
+  });
+
+  const deduped = dedupeBookings(paidBookings);
   const dedupedHydrated = await hydrateBareTherapistBookings(supabaseAdmin, deduped);
 
   let rows = dedupedHydrated
@@ -539,7 +545,11 @@ async function performWixSync(options = {}) {
         `${filterStats.bookings.length}/${bookings.length} kept`
     );
   }
-  const filteredBookings = filterStats.bookings;
+  // Drop unpaid bookings at the raw level — Wix UNDEFINED status = payment not completed
+  const filteredBookings = filterStats.bookings.filter(b => {
+    const s = String(b?.status || '').trim().toUpperCase();
+    return s !== 'UNDEFINED' && s !== '';
+  });
 
   const dedupedBookings = dedupeBookings(filteredBookings);
   const dedupedHydratedBookings = await hydrateBareTherapistBookings(supabaseAdmin, dedupedBookings);
