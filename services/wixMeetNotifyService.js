@@ -39,7 +39,8 @@ async function processNewWixSessions(wixBookingIds, tempPasswordMap = new Map())
     .from('sessions')
     .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, notified_at, wix_payload, source, price, amount')
     .in('wix_booking_id', wixBookingIds)
-    .is('notified_at', null);
+    .is('notified_at', null)
+    .eq('status', 'booked'); // Only notify confirmed bookings — not 'pending' (pre-payment / UNDEFINED from Wix)
 
   if (error) {
     console.error(`${LOG_PREFIX} failed to fetch sessions:`, error.message || error);

@@ -172,12 +172,17 @@ function discoverRowToDb(booking) {
 
 function normalizeWixStatusToSessionStatus(status) {
   const s = String(status ?? '').trim().toLowerCase();
-  // Treat blank, literal "undefined", or "null" as the default
-  if (!s || s === 'undefined' || s === 'null') return 'booked';
+  // Wix sends UNDEFINED when a booking is created but payment is not yet completed (pre-checkout).
+  // Treat these as 'pending' — notifications should NOT fire until status upgrades to confirmed/booked.
+  if (!s || s === 'undefined' || s === 'null') return 'pending';
   if (s.includes('cancel')) return 'cancelled';
   if (s.includes('complete')) return 'completed';
   if (s.includes('no_show') || s.includes('noshow')) return 'no_show';
-  if (s.includes('book') || s.includes('confirm') || s.includes('pending') || s.includes('approve')) return 'booked';
+  // PENDING_APPROVAL = waiting for host approval — not yet confirmed, don't notify
+  if (s.includes('pending_approval') || s.includes('waiting')) return 'pending';
+  if (s.includes('book') || s.includes('confirm') || s.includes('approve')) return 'booked';
+  // Generic "pending" (pre-payment) — don't treat as booked
+  if (s.includes('pending')) return 'pending';
   return s;
 }
 
