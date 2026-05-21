@@ -420,7 +420,6 @@ class MeetLinkService {
 
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
       if (adminEmail) pushUniqueEmail(adminEmail);
-      pushUniqueEmail('meet.koott@gmail.com');
 
       const event = {
         summary: sessionData.summary || 'Therapy Session',

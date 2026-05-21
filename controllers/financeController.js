@@ -9,7 +9,7 @@ const {
   getSessionFinanceRevenueAmount,
 } = require('../utils/sessionBookingCreatedAt');
 
-/** Rows counted for dashboard “total sessions / bookings”; excludes refunded to match headline revenue sessions. */
+/** Rows counted for dashboard “total sessions / bookings”; excludes cancelled (soft-deleted) and refunded. */
 const FINANCE_BOOKING_TOTAL_STATUSES = [
   'completed',
   'booked',
@@ -17,8 +17,6 @@ const FINANCE_BOOKING_TOTAL_STATUSES = [
   'reschedule_requested',
   'no_show',
   'noshow',
-  'cancelled',
-  'canceled',
 ];
 
 /** IST calendar YYYY-MM-DD from API/query → inclusive timestamptz window on booking_created_at. */
@@ -262,7 +260,7 @@ const getDashboard = async (req, res) => {
       let sessionsQuery = supabaseAdmin
         .from('sessions')
         .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-        .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+        .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
         .neq('session_type', 'free_assessment');
 
       // Optimization: If not all-time, filter from start of year to ensure we get enough data for MTD/QTD/YTD cards
@@ -281,7 +279,7 @@ const getDashboard = async (req, res) => {
         let fbQuery1 = supabaseAdmin
           .from('sessions')
           .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
           .neq('session_type', 'free_assessment');
         if (!allTimeMode) {
           fbQuery1 = fbQuery1.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -293,7 +291,7 @@ const getDashboard = async (req, res) => {
         let fbQuery2 = supabaseAdmin
           .from('sessions')
           .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
           .neq('session_type', 'free_assessment');
         if (!allTimeMode) {
           fbQuery2 = fbQuery2.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -306,7 +304,7 @@ const getDashboard = async (req, res) => {
           let fbQuery3 = supabaseAdmin
             .from('sessions')
             .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-            .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+            .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
             .neq('session_type', 'free_assessment');
           if (!allTimeMode) {
             fbQuery3 = fbQuery3.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -658,7 +656,7 @@ const getDashboard = async (req, res) => {
     // Include all statuses where payment was made (sessions exist only after successful payment)
     const shouldIncludeInRevenue = (s) => {
       if (!s) return false;
-      const paidStatuses = ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled'];
+      const paidStatuses = ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'];
       return paidStatuses.includes(s.status);
     };
 
@@ -877,7 +875,7 @@ const getDashboard = async (req, res) => {
           .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
           .not('psychologist_id', 'is', null)
           .neq('session_type', 'free_assessment')
-          .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+          .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
           .in('psychologist_id', allPsychIds);
 
         if (!allTimeMode) {
@@ -898,7 +896,7 @@ const getDashboard = async (req, res) => {
             .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
             .not('psychologist_id', 'is', null)
             .neq('session_type', 'free_assessment')
-            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
             .in('psychologist_id', allPsychIds);
           if (!allTimeMode) {
             allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -911,7 +909,7 @@ const getDashboard = async (req, res) => {
             .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, wix_payload, source')
             .not('psychologist_id', 'is', null)
             .neq('session_type', 'free_assessment')
-            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
             .in('psychologist_id', allPsychIds);
           if (!allTimeMode) {
             allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -923,7 +921,7 @@ const getDashboard = async (req, res) => {
               .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count, wix_payload, source')
               .not('psychologist_id', 'is', null)
               .neq('session_type', 'free_assessment')
-              .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded'])
+              .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
               .in('psychologist_id', allPsychIds);
             if (!allTimeMode) {
               allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -1908,7 +1906,7 @@ const getDoctorPayouts = async (req, res) => {
       .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number')
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled'])
+      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'])
       .in('psychologist_id', allPsychIds);
     
     const { data: allSessions } = await allSessionsQuery.order('created_at', { ascending: true });
@@ -2539,7 +2537,7 @@ const getDoctorBookings = async (req, res) => {
       )
       .eq('psychologist_id', psychologistId)
       .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled', 'refunded']);
+      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded']);
 
     if (dateFrom) {
       if (normalizedDateBasis === 'booked') {
@@ -3757,7 +3755,7 @@ const getCommissions = async (req, res) => {
       .select(`id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, ${commSessionsBcf} wix_payload, source, package_session_number`)
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'cancelled', 'canceled']); // Include all paid sessions
+      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']); // Include all paid sessions
 
     if (dateFrom && dateTo) {
       if (doctorDateBasis === 'scheduled') {

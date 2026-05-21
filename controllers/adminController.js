@@ -1445,7 +1445,9 @@ const getPlatformStats = async (req, res) => {
     const bookingTimeCol = await getBookingTimeColumnKey(supabaseAdmin);
 
     const sessionsNoFreeSelect = () =>
-      supabaseAdmin.from('sessions').select('id', { count: 'exact', head: true }).neq('session_type', 'free_assessment');
+      supabaseAdmin.from('sessions').select('id', { count: 'exact', head: true })
+        .neq('session_type', 'free_assessment')
+        .neq('status', 'cancelled'); // Exclude soft-deleted sessions
 
     /** YYYY-MM-DD params = IST midnight bounds (finance / Wix-aligned). */
     const applyBookingDayRange = (q) => {
