@@ -11,29 +11,58 @@
 function sessionTypeFromBooking(b) {
   if (!b) return 'individual';
 
-  // 0. Pre-detected by Velo enrichBookingItem (uses variant selections + price ratio)
-  if (b.bookingType && b.bookingType !== 'individual') return b.bookingType;
+  // 0. Wix service tags are the most reliable signal — admin sets these in the dashboard.
+  //    Tags come from the enriched Velo payload as e.g. ["INDIVIDUAL"], ["PACKAGE"], ["COUPLE"].
+  const tags = Array.isArray(b.tags) ? b.tags.map(t => String(t).toLowerCase()) : [];
+  if (tags.includes('couple'))     return 'couple';
+  if (tags.includes('assessment')) return 'assessment';
+  if (tags.includes('discovery'))  return 'discovery';
+  if (tags.includes('package') || tags.includes('pack') || tags.includes('bundle') || tags.includes('membership')) return 'package';
+  // If Wix explicitly says INDIVIDUAL, trust it (overrides any price-ratio guess below)
+  const hasExplicitIndividualTag = tags.includes('individual');
 
+  // 1. Pricing plan / subscription present → always a package
+  if (b.pricingPlanInfo || b.subscriptionId) return 'package';
+
+  // 2. Duration — compute early as it overrides wrong Wix tags (e.g. INDIVIDUAL on a 110min couple session)
+  const durMin = b.sessionDurationMin != null
+    ? Number(b.sessionDurationMin)
+    : (() => {
+        const s = b.startTime || b.rawBookedEntity?.singleSession?.start;
+        const e = b.endTime   || b.rawBookedEntity?.singleSession?.end;
+        if (!s || !e) return null;
+        const m = Math.round((new Date(e) - new Date(s)) / 60000);
+        return m > 0 ? m : null;
+      })();
+
+  if (durMin != null) {
+    if (durMin > 75) return 'couple';
+    // Only classify as discovery if session is also free — paid short sessions are individual check-ins
+    if (durMin < 45) {
+      const price = parseFloat(b._resolvedPrice ?? b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 1);
+      if (price === 0) return 'discovery';
+    }
+  }
+
+  // 3. Wix service tags are reliable for non-duration types
+  if (hasExplicitIndividualTag) return 'individual';
+
+  // 4. Actual service name from Wix service catalogue (Velo now sends this as serviceName)
+  const serviceName = String(b.serviceName || '').toLowerCase();
+  if (serviceName.includes('couple'))     return 'couple';
+  if (serviceName.includes('assessment')) return 'assessment';
+  if (serviceName.includes('discovery'))  return 'discovery';
+  if (serviceName.includes('pack') || serviceName.includes('bundle')) return 'package';
+
+  // 5. Title/variant keywords (for older data that lacks serviceName/tags)
   const title = String(b.title || b.rawBookedEntity?.title || '').toLowerCase();
-  
-  // 1. Explicit Keywords in Title or Variants
   const variantStr = JSON.stringify(b.variantSelections || b.rawFormInfo?.variantSelections || '').toLowerCase();
   const fullText = `${title} ${variantStr}`;
 
-  if (fullText.includes('couple')) return 'couple';
+  if (fullText.includes('couple'))     return 'couple';
   if (fullText.includes('assessment')) return 'assessment';
-  if (fullText.includes('discovery')) return 'discovery';
-  if (fullText.includes('pack') || fullText.includes('bundle') || fullText.includes('membership') || fullText.includes('plan')) return 'package';
-
-  // 2. Pricing Plan check
-  if (b.pricingPlanInfo) return 'package';
-
-  // 3. Fallback to Price Ratio — lowered to 1.3x to catch couple sessions (e.g. 2299/1499=1.53)
-  const catalogRate = parseFloat(b.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 0);
-  const actualPaid  = parseFloat(b._resolvedPrice ?? b.paymentDetails?.balance?.finalPrice?.amount ?? b.price ?? 0);
-  if (catalogRate > 0 && actualPaid > 0 && actualPaid >= catalogRate * 1.3) {
-    return 'package';
-  }
+  if (fullText.includes('discovery'))  return 'discovery';
+  if (fullText.includes('pack') || fullText.includes('bundle') || fullText.includes('membership')) return 'package';
 
   return 'individual';
 }
@@ -67,23 +96,6 @@ function sessionCountFromBooking(b) {
   // 2. Couple/assessment types are always 1 session per booking
   if (combinedText.includes('couple') || combinedText.includes('assessment') || combinedText.includes('discovery')) {
     return 1;
-  }
-
-  // 3. Price-ratio math
-  const catalogRate = parseFloat(b?.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 0);
-  const actualPaid  = parseFloat(b?._resolvedPrice ?? b?.paymentDetails?.balance?.finalPrice?.amount ?? b?.price ?? 0);
-  
-  if (catalogRate > 0 && actualPaid > 0) {
-    const ratio = actualPaid / catalogRate;
-    if (ratio >= 1.3) {
-      // Common discount patterns with real Koott data:
-      // 7499/1999 = 3.75 → 4 sessions | 3499/999 = 3.50 → 4 sessions
-      // 2499/749 = 3.33 → 4 sessions  | 2999/999 = 3.00 → 3 sessions
-      if (ratio > 3.1 && ratio < 4) return 4;
-      if (ratio > 2.1 && ratio < 3.1) return 3;
-      const count = Math.round(ratio);
-      return count >= 2 ? count : 2;
-    }
   }
 
   return 1;
@@ -151,6 +163,8 @@ function discoverRowToDb(booking) {
     title: b.title != null ? String(b.title) : null,
     session_type: sessionTypeFromBooking(augmented),
     session_count: sessionCountFromBooking(augmented),
+    package_session_number: b.planSessionNumber != null ? Number(b.planSessionNumber) : null,
+    package_group_id: b.subscriptionId || null,
     therapist_name: therapistNameFromBooking(b),
     tags: Array.isArray(b.tags) ? b.tags : b.tags != null ? b.tags : null,
     start_time: b.startTime || null,
@@ -253,11 +267,18 @@ function discoverRowToSessionDb(booking) {
   const createdAt = fromWixInstant || new Date().toISOString();
   const updatedAt = new Date().toISOString();
 
+  // Package / plan tracking — populated when booking is via Wix Pricing Plan
+  const planSessionNumber = b.planSessionNumber != null ? Number(b.planSessionNumber) : null;
+  const sessionCount = sessionCountFromBooking(b);
+  const packageGroupId = b.subscriptionId || null;
+
   return {
     wix_booking_id: b.id != null ? String(b.id) : null,
     source: 'wix',
     session_type: sessionTypeFromBooking(b) || 'individual',
-    session_count: sessionCountFromBooking(b),
+    session_count: sessionCount,
+    package_session_number: planSessionNumber || null,
+    package_group_id: packageGroupId,
     status: normalizeWixStatusToSessionStatus(b.status),
     scheduled_date: isoDate(b.startTime),
     scheduled_time: isoTime(b.startTime),
