@@ -68,6 +68,7 @@ router.patch('/wix/bookings/:id', wixBookingsController.editWixBooking);
 router.delete('/wix/bookings/:id', wixBookingsController.deleteWixBooking);
 router.patch('/wix/bookings/:id/complete', wixBookingsController.completeWixBooking);
 router.patch('/wix/bookings/:id/no-show', wixBookingsController.noShowWixBooking);
+router.post('/wix/bookings/:id/book-next-session', wixBookingsController.bookWixNextSession);
 router.get('/wix/therapists', wixBookingsController.listWixTherapists);
 router.post('/wix/backfill-clients', wixBookingsController.backfillWixClients);
 

@@ -3524,6 +3524,15 @@ function parseFinanceDoctorDateBasis(query) {
   return raw === 'scheduled' ? 'scheduled' : 'booked';
 }
 
+function hasConfiguredMoneyValue(obj, key) {
+  return !!obj && Object.prototype.hasOwnProperty.call(obj, key) && obj[key] !== null && obj[key] !== undefined;
+}
+
+function toMoneyNumber(value) {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 /**
  * Get Doctor Commissions
  * GET /api/finance/commissions
@@ -3938,9 +3947,13 @@ const getCommissions = async (req, res) => {
           individual_sessions: 0,
           package_sessions: 0,
           total_sessions: 0,
+          pending_sessions: 0,
+          completed_sessions: 0,
           total_revenue: 0,
           total_commission_to_company: 0,
           total_to_doctor_wallet: 0,
+          pending_payout: 0,
+          completed_payout: 0,
           monthly_breakdown: {}
         };
       }
@@ -3968,17 +3981,17 @@ const getCommissions = async (req, res) => {
       
       // Calculate commission values (used in both total stats and monthly breakdown)
       let commissionToCompany = 0;
-      let toDoctorWallet = sessionPrice;
+      let toDoctorWallet = 0;
       
       // If commission history exists (completed session with calculated commission), use it
       if (historyRecord) {
         // commission_amount in history = fixed commission amount = what COMPANY gets (e.g., ₹300)
         // company_revenue in history = commission_amount (same value, for backward compatibility)
         // doctor wallet = session_amount - commission_amount = what DOCTOR gets (e.g., ₹700)
-        const commissionAmount = parseFloat(historyRecord.commission_amount || 0);
-        const sessionAmount = parseFloat(historyRecord.session_amount || sessionPrice);
+        const commissionAmount = toMoneyNumber(historyRecord.commission_amount || 0);
+        const sessionAmount = toMoneyNumber(historyRecord.session_amount || sessionPrice);
         commissionToCompany = commissionAmount; // Company gets the commission (fixed amount)
-        toDoctorWallet = sessionAmount - commissionAmount; // Doctor gets the rest
+        toDoctorWallet = Math.max(0, sessionAmount - commissionAmount); // Doctor gets the rest
       } else {
         // Booked/Non-completed - calculate from commission settings (pending payout)
         // Use first session vs follow-up logic
@@ -3986,6 +3999,7 @@ const getCommissions = async (req, res) => {
         const commissionRecord = commissionRecordsMap[s.psychologist_id] || {};
         
         let doctorCommission = 0;
+        let hasExplicitDoctorCommission = false;
         
         if (isPackage && s.package_id) {
           // Package session - commission is calculated per session:
@@ -3998,24 +4012,28 @@ const getCommissions = async (req, res) => {
           
           if (isInitialPackageSession) {
             const packageFirstSessionKey = `${packageType}_first_session`;
-            if (doctorCommissionPackages[packageFirstSessionKey] !== null && doctorCommissionPackages[packageFirstSessionKey] !== undefined) {
-              doctorCommission = parseFloat(doctorCommissionPackages[packageFirstSessionKey]) || 0;
-            } else if (commissionRecord?.doctor_commission_first_session_package !== null && commissionRecord?.doctor_commission_first_session_package !== undefined) {
-              doctorCommission = parseFloat(commissionRecord.doctor_commission_first_session_package) || 0;
+            if (hasConfiguredMoneyValue(doctorCommissionPackages, packageFirstSessionKey)) {
+              doctorCommission = toMoneyNumber(doctorCommissionPackages[packageFirstSessionKey]);
+              hasExplicitDoctorCommission = true;
+            } else if (hasConfiguredMoneyValue(commissionRecord, 'doctor_commission_first_session_package')) {
+              doctorCommission = toMoneyNumber(commissionRecord.doctor_commission_first_session_package);
+              hasExplicitDoctorCommission = true;
             }
           } else {
             const packageFollowupKey = `${packageType}_followup`;
-            if (doctorCommissionPackages[packageFollowupKey] !== null && doctorCommissionPackages[packageFollowupKey] !== undefined) {
-              doctorCommission = parseFloat(doctorCommissionPackages[packageFollowupKey]) || 0;
-            } else if (commissionRecord?.doctor_commission_followup_package !== null && commissionRecord?.doctor_commission_followup_package !== undefined) {
-              doctorCommission = parseFloat(commissionRecord.doctor_commission_followup_package) || 0;
+            if (hasConfiguredMoneyValue(doctorCommissionPackages, packageFollowupKey)) {
+              doctorCommission = toMoneyNumber(doctorCommissionPackages[packageFollowupKey]);
+              hasExplicitDoctorCommission = true;
+            } else if (hasConfiguredMoneyValue(commissionRecord, 'doctor_commission_followup_package')) {
+              doctorCommission = toMoneyNumber(commissionRecord.doctor_commission_followup_package);
+              hasExplicitDoctorCommission = true;
             }
           }
           
-          // If doctor commission not found, use fallback (but this should not happen if properly configured)
-          if (doctorCommission === 0) {
-            const commissionAmount = parseFloat(commissionAmounts?.[packageType] || commissionAmounts?.package || 0);
-            doctorCommission = sessionPrice - commissionAmount;
+          // Only use fallback when no doctor-side commission is configured at all.
+          if (!hasExplicitDoctorCommission) {
+            const commissionAmount = toMoneyNumber(commissionAmounts?.[packageType] || commissionAmounts?.package || 0);
+            doctorCommission = Math.max(0, sessionPrice - commissionAmount);
           }
           
           // Per-session package math
@@ -4026,20 +4044,26 @@ const getCommissions = async (req, res) => {
           const isCoupleSession = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
           if (isCoupleSession) {
             const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-            doctorCommission = parseFloat(
-              doctorCommissionPackages.couple_session ??
-              doctorCommissionPackages.cpl_session ??
-              commissionRecord.doctor_commission_individual ??
-              0
-            ) || 0;
-          } else if (isFirstSession && commissionRecord.doctor_commission_first_session !== null && commissionRecord.doctor_commission_first_session !== undefined) {
-            doctorCommission = parseFloat(commissionRecord.doctor_commission_first_session) || 0;
-          } else if (!isFirstSession && commissionRecord.doctor_commission_followup !== null && commissionRecord.doctor_commission_followup !== undefined) {
-            doctorCommission = parseFloat(commissionRecord.doctor_commission_followup) || 0;
+            if (hasConfiguredMoneyValue(doctorCommissionPackages, 'couple_session')) {
+              doctorCommission = toMoneyNumber(doctorCommissionPackages.couple_session);
+              hasExplicitDoctorCommission = true;
+            } else if (hasConfiguredMoneyValue(doctorCommissionPackages, 'cpl_session')) {
+              doctorCommission = toMoneyNumber(doctorCommissionPackages.cpl_session);
+              hasExplicitDoctorCommission = true;
+            } else if (hasConfiguredMoneyValue(commissionRecord, 'doctor_commission_individual')) {
+              doctorCommission = toMoneyNumber(commissionRecord.doctor_commission_individual);
+              hasExplicitDoctorCommission = true;
+            }
+          } else if (isFirstSession && hasConfiguredMoneyValue(commissionRecord, 'doctor_commission_first_session')) {
+            doctorCommission = toMoneyNumber(commissionRecord.doctor_commission_first_session);
+            hasExplicitDoctorCommission = true;
+          } else if (!isFirstSession && hasConfiguredMoneyValue(commissionRecord, 'doctor_commission_followup')) {
+            doctorCommission = toMoneyNumber(commissionRecord.doctor_commission_followup);
+            hasExplicitDoctorCommission = true;
           } else {
             // Fallback to individual commission calculation
-            const commissionAmount = parseFloat(commissionAmounts?.individual || 0);
-            doctorCommission = sessionPrice - commissionAmount;
+            const commissionAmount = toMoneyNumber(commissionAmounts?.individual || 0);
+            doctorCommission = Math.max(0, sessionPrice - commissionAmount);
           }
           
           // For individual sessions
@@ -4052,6 +4076,13 @@ const getCommissions = async (req, res) => {
       statsByPsych[s.psychologist_id].total_revenue += sessionPrice;
       statsByPsych[s.psychologist_id].total_commission_to_company += commissionToCompany;
       statsByPsych[s.psychologist_id].total_to_doctor_wallet += toDoctorWallet;
+      if (isCompleted) {
+        statsByPsych[s.psychologist_id].completed_sessions += 1;
+        statsByPsych[s.psychologist_id].completed_payout += toDoctorWallet;
+      } else {
+        statsByPsych[s.psychologist_id].pending_sessions += 1;
+        statsByPsych[s.psychologist_id].pending_payout += toDoctorWallet;
+      }
 
       // Monthly breakdown buckets: align with doctorDateBasis (booked vs therapy month)
       const bucketYmd =
@@ -4093,9 +4124,13 @@ const getCommissions = async (req, res) => {
         individual_sessions: 0,
         package_sessions: 0,
         total_sessions: 0,
+        pending_sessions: 0,
+        completed_sessions: 0,
         total_revenue: 0,
         total_commission_to_company: 0,
         total_to_doctor_wallet: 0,
+        pending_payout: 0,
+        completed_payout: 0,
         monthly_breakdown: {}
       };
 
@@ -4203,11 +4238,15 @@ const getCommissions = async (req, res) => {
         package_sessions: stats.package_sessions,
         total_sessions: displayTotalSessions,
         total_sessions_finance: stats.total_sessions,
+        pending_sessions: stats.pending_sessions,
+        completed_sessions: stats.completed_sessions,
         wix_bookings_count: wixCount,
         latest_wix_booking_at: wixCountsByPsychId[psych.id]?.latestBookingAt || null,
         total_revenue: stats.total_revenue,
         total_commission_to_company: stats.total_commission_to_company,
         total_to_doctor_wallet: stats.total_to_doctor_wallet,
+        pending_payout: stats.pending_payout,
+        completed_payout: stats.completed_payout,
         monthly_breakdown: Object.values(stats.monthly_breakdown).sort((a, b) => 
           b.month.localeCompare(a.month)
         ),

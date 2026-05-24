@@ -923,12 +923,12 @@ async function listWixBookings(req, res) {
     if (wixBookingIds.length > 0) {
       const { data: sessionsData } = await supabaseAdmin
         .from('sessions')
-        .select('id, wix_booking_id')
+        .select('id, wix_booking_id, package_id, client_id, psychologist_id, package_session_number, session_count, status')
         .in('wix_booking_id', wixBookingIds);
       
       if (sessionsData) {
         sessionsData.forEach(s => {
-          sessionMap.set(s.wix_booking_id, s.id);
+          sessionMap.set(s.wix_booking_id, s);
         });
       }
     }
@@ -943,7 +943,7 @@ async function listWixBookings(req, res) {
       title: row.title,
       contactId: row.contact_id,
       client: { email: row.client_email, contactId: row.contact_id },
-      session_id: sessionMap.get(row.wix_booking_id) || null,
+      session_id: sessionMap.get(row.wix_booking_id)?.id || null,
       __row: row,
     })))
       .map((x) => x.__row || x)
@@ -979,7 +979,20 @@ async function listWixBookings(req, res) {
     return res.json({
       success: true,
       data: {
-        bookings: dedupedData,
+        bookings: dedupedData.map((row) => {
+          const linkedSession = sessionMap.get(row.wix_booking_id) || null;
+          if (!linkedSession) return row;
+          return {
+            ...row,
+            session_id: linkedSession.id || null,
+            package_id: linkedSession.package_id || null,
+            client_id: linkedSession.client_id || null,
+            psychologist_id: linkedSession.psychologist_id || null,
+            package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
+            session_count: row.session_count ?? linkedSession.session_count ?? null,
+            session_status: linkedSession.status || null,
+          };
+        }),
         pagination: {
           page,
           limit,
@@ -1686,6 +1699,84 @@ async function noShowWixBooking(req, res) {
   }
 }
 
+/**
+ * POST /admin/wix/bookings/:id/book-next-session
+ * Book the next session in a Wix package, creating a new sessions row.
+ * :id = the wix_bookings.id (UUID primary key, NOT wix_booking_id).
+ * Body: { scheduled_date, scheduled_time }
+ */
+async function bookWixNextSession(req, res) {
+  try {
+    const { id } = req.params;
+    const { scheduled_date, scheduled_time } = req.body;
+
+    if (!id || !scheduled_date || !scheduled_time) {
+      return res.status(400).json({ success: false, error: 'Missing required fields: id (param), scheduled_date, scheduled_time' });
+    }
+
+    // Fetch the original wix_booking row to get package info
+    const { data: wixRow, error: wixError } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('id, wix_booking_id, session_type, session_count, package_session_number, package_group_id, therapist_name, client_full_name, client_email')
+      .eq('id', id)
+      .single();
+
+    if (wixError || !wixRow) {
+      return res.status(404).json({ success: false, error: 'Wix booking not found' });
+    }
+
+    // Look up the linked session to get client_id and psychologist_id
+    const { data: linkedSession, error: sessionError } = await supabaseAdmin
+      .from('sessions')
+      .select('id, client_id, psychologist_id, session_type, package_group_id, wix_payload')
+      .eq('wix_booking_id', wixRow.wix_booking_id)
+      .single();
+
+    if (sessionError || !linkedSession) {
+      return res.status(404).json({ success: false, error: 'Linked session not found for this Wix booking. Client/psychologist may not yet be resolved.' });
+    }
+
+    if (!linkedSession.client_id || !linkedSession.psychologist_id) {
+      return res.status(400).json({ success: false, error: 'Client or psychologist not yet resolved for this session. Please wait for the sync to complete.' });
+    }
+
+    // Create the next session row
+    const now = new Date().toISOString();
+    const newSession = {
+      source: 'admin_manual',
+      client_id: linkedSession.client_id,
+      psychologist_id: linkedSession.psychologist_id,
+      session_type: linkedSession.session_type || wixRow.session_type || 'individual',
+      package_group_id: linkedSession.package_group_id || wixRow.package_group_id || null,
+      scheduled_date,
+      scheduled_time,
+      original_scheduled_date: scheduled_date,
+      original_scheduled_time: scheduled_time,
+      status: 'booked',
+      notes: wixRow.client_full_name ? `Package follow-up for ${wixRow.client_full_name}` : 'Package follow-up (Wix)',
+      created_at: now,
+      updated_at: now,
+    };
+
+    const { data: created, error: createError } = await supabaseAdmin
+      .from('sessions')
+      .insert(newSession)
+      .select()
+      .single();
+
+    if (createError) {
+      console.error('[bookWixNextSession] insert error:', createError);
+      return res.status(500).json({ success: false, error: 'Failed to create session: ' + (createError.message || String(createError)) });
+    }
+
+    console.log(`[bookWixNextSession] Created new session ${created.id} for Wix booking ${wixRow.wix_booking_id}`);
+    return res.json({ success: true, message: 'Next session booked successfully', data: { session: created } });
+  } catch (e) {
+    console.error('[bookWixNextSession]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
 module.exports = {
   performWixSync,
   upsertEnrichedBookings,
@@ -1700,6 +1791,7 @@ module.exports = {
   deleteWixBooking,
   completeWixBooking,
   noShowWixBooking,
+  bookWixNextSession,
   handleWixWebhook,
 };
 
