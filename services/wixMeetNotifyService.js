@@ -145,11 +145,23 @@ async function processOneSession(session, tempPassword = null) {
   const clientPhone = clientDetails.phone_number;
 
   // ── Duration ──────────────────────────────────────────────────────────
-  const meetDurationMinutes = resolveSessionDurationMinutes({
-    durationMinutes: null,
-    sessionDuration: null,
-    packageInfo: session.package_id ? { packageType: session.session_type } : null,
-  }) || 50;
+  // 1. Compute from actual Wix start/end times — ground truth for every session type.
+  //    Wix creates 80-min slots for couple, 50-min for individual, etc.
+  // 2. Fall back to session_type defaults if Wix times are missing.
+  let meetDurationMinutes = 50;
+  const wp = session.wix_payload || {};
+  const wixStart = wp.startTime || wp.rawBookedEntity?.singleSession?.start || null;
+  const wixEnd   = wp.endTime   || wp.rawBookedEntity?.singleSession?.end   || null;
+  if (wixStart && wixEnd) {
+    const computed = Math.round((new Date(wixEnd) - new Date(wixStart)) / 60000);
+    if (computed > 0) meetDurationMinutes = computed;
+  } else {
+    // Session-type defaults when Wix times are unavailable
+    const typeDefaults = { couple: 80, assessment: 30, discovery: 30, individual: 50 };
+    meetDurationMinutes = typeDefaults[session.session_type] || resolveSessionDurationMinutes({
+      packageInfo: session.package_id ? { packageType: session.session_type } : null,
+    }) || 50;
+  }
 
   const endTime = addMinutesToTime(session.scheduled_time || '00:00', meetDurationMinutes);
 

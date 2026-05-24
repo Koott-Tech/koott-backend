@@ -11,20 +11,18 @@
 function sessionTypeFromBooking(b) {
   if (!b) return 'individual';
 
-  // 0. Wix service tags are the most reliable signal — admin sets these in the dashboard.
-  //    Tags come from the enriched Velo payload as e.g. ["INDIVIDUAL"], ["PACKAGE"], ["COUPLE"].
+  // 0. Wix service tags — most reliable when admin sets them in dashboard.
   const tags = Array.isArray(b.tags) ? b.tags.map(t => String(t).toLowerCase()) : [];
-  if (tags.includes('couple'))     return 'couple';
   if (tags.includes('assessment')) return 'assessment';
   if (tags.includes('discovery'))  return 'discovery';
-  if (tags.includes('package') || tags.includes('pack') || tags.includes('bundle') || tags.includes('membership')) return 'package';
-  // If Wix explicitly says INDIVIDUAL, trust it (overrides any price-ratio guess below)
+  // Note: 'couple' and 'package' tags are checked AFTER duration so a couple-package
+  // is correctly typed as 'couple' (with session_count > 1) rather than 'package'.
   const hasExplicitIndividualTag = tags.includes('individual');
+  const hasCoupleTag   = tags.includes('couple');
+  const hasPackageTag  = tags.includes('package') || tags.includes('pack') || tags.includes('bundle') || tags.includes('membership');
 
-  // 1. Pricing plan / subscription present → always a package
-  if (b.pricingPlanInfo || b.subscriptionId) return 'package';
-
-  // 2. Duration — compute early as it overrides wrong Wix tags (e.g. INDIVIDUAL on a 110min couple session)
+  // 1. Duration — runs first because it is the ground truth for couple vs individual.
+  //    A 110-min session tagged INDIVIDUAL is still a couple session.
   const durMin = b.sessionDurationMin != null
     ? Number(b.sessionDurationMin)
     : (() => {
@@ -35,26 +33,32 @@ function sessionTypeFromBooking(b) {
         return m > 0 ? m : null;
       })();
 
-  if (durMin != null) {
-    if (durMin > 75) return 'couple';
-    // Only classify as discovery if session is also free — paid short sessions are individual check-ins
-    if (durMin < 45) {
-      const price = parseFloat(b._resolvedPrice ?? b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 1);
-      if (price === 0) return 'discovery';
-    }
+  if (durMin != null && durMin > 75) return 'couple';
+
+  // 2. Now apply couple/package tags (duration didn't fire, so session is ≤75 min)
+  if (hasCoupleTag)  return 'couple';
+  if (hasPackageTag) return 'package';
+
+  // 3. Pricing plan / subscription → individual package (not couple — would have been caught above)
+  if (b.pricingPlanInfo || b.subscriptionId) return 'package';
+
+  // 4. Short + free → discovery
+  if (durMin != null && durMin < 45) {
+    const price = parseFloat(b._resolvedPrice ?? b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? 1);
+    if (price === 0) return 'discovery';
   }
 
-  // 3. Wix service tags are reliable for non-duration types
+  // 5. Explicit INDIVIDUAL tag
   if (hasExplicitIndividualTag) return 'individual';
 
-  // 4. Actual service name from Wix service catalogue (Velo now sends this as serviceName)
+  // 6. Service name keywords
   const serviceName = String(b.serviceName || '').toLowerCase();
   if (serviceName.includes('couple'))     return 'couple';
   if (serviceName.includes('assessment')) return 'assessment';
   if (serviceName.includes('discovery'))  return 'discovery';
   if (serviceName.includes('pack') || serviceName.includes('bundle')) return 'package';
 
-  // 5. Title/variant keywords (for older data that lacks serviceName/tags)
+  // 7. Title / variant keywords (older data without serviceName/tags)
   const title = String(b.title || b.rawBookedEntity?.title || '').toLowerCase();
   const variantStr = JSON.stringify(b.variantSelections || b.rawFormInfo?.variantSelections || '').toLowerCase();
   const fullText = `${title} ${variantStr}`;
