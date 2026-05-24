@@ -9,6 +9,7 @@
  *   "1 hr 20 min (Couple Session)"        → type: couple, count: 1
  *   "50 min (Individual 4-Session Pack)"  → type: package, count: 4
  *   "50 min (Individual 3-Session Pack)"  → type: package, count: 3
+ *   "50 min (Package- 3 Single Session)"  → type: package, count: 3
  */
 
 const WIX_SITE_ID = 'bdc65312-ea74-4f9e-bb82-6882a429d42b';
@@ -24,15 +25,24 @@ function parseSessionDescription(descLine) {
   if (!descLine) return null;
   const str = descLine.toLowerCase();
 
-  // Pattern: "... (Couple Session)"
-  if (str.includes('couple')) {
-    return { sessionType: 'couple', sessionCount: 1 };
-  }
-
   // Pattern: "... (Individual N-Session Pack)"
   const packMatch = str.match(/(\d+)\s*-?\s*session\s*pack/i);
   if (packMatch) {
     return { sessionType: 'package', sessionCount: parseInt(packMatch[1], 10) };
+  }
+
+  // Pattern seen in Wix order details: "... (Package- 3 Single Session)"
+  // Also covers variants like "Package - 3 Couple Session" or "Package 3 Session".
+  const namedPackageMatch =
+    str.match(/package\s*-\s*(\d+)\s*(single|individual|couple)?\s*session/i) ||
+    str.match(/package\s*(\d+)\s*(single|individual|couple)?\s*session/i);
+  if (namedPackageMatch) {
+    return { sessionType: 'package', sessionCount: parseInt(namedPackageMatch[1], 10) };
+  }
+
+  // Pattern: "... (Couple Session)"
+  if (str.includes('couple')) {
+    return { sessionType: 'couple', sessionCount: 1 };
   }
 
   // Pattern: "... (Individual Session)"

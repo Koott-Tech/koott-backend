@@ -35,6 +35,14 @@ function sessionTypeFromBooking(b) {
 
   if (durMin != null && durMin > 75) return 'couple';
 
+  // 1.5. Velo-enriched bookingType from Wix discover payload, when present.
+  // Keep this after duration so couple sessions still win on actual slot length.
+  const bookingType = String(b.bookingType || '').toLowerCase().trim();
+  if (bookingType === 'assessment') return 'assessment';
+  if (bookingType === 'discovery') return 'discovery';
+  if (bookingType === 'package') return 'package';
+  if (bookingType === 'couple') return 'couple';
+
   // 2. Now apply couple/package tags (duration didn't fire, so session is ≤75 min)
   if (hasCoupleTag)  return 'couple';
   if (hasPackageTag) return 'package';
@@ -80,9 +88,10 @@ function sessionCountFromBooking(b) {
 
   // 0. Pre-detected by Velo enrichBookingItem
   if (b.detectedSessionCount && b.detectedSessionCount > 1) return b.detectedSessionCount;
+  if (b.creditsAvailable && Number(b.creditsAvailable) > 1) return Number(b.creditsAvailable);
 
   const title = String(b.title || b.rawBookedEntity?.title || '').toLowerCase();
-  const planName = String(b.pricingPlanInfo?.planName || '').toLowerCase();
+  const planName = String(b.pricingPlanInfo?.planName || b.planName || '').toLowerCase();
   const variantStr = JSON.stringify(b.variantSelections || b.rawFormInfo?.variantSelections || '').toLowerCase();
   const combinedText = `${title} ${planName} ${variantStr}`;
 

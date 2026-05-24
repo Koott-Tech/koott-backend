@@ -258,13 +258,14 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
       if (wixBookingIds.length > 0) {
         const { data: existing } = await supabaseAdmin
           .from('sessions')
-          .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at')
+          .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at, status, session_type, session_count')
           .in('wix_booking_id', wixBookingIds);
         if (existing?.length) {
           const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
           upsertSessions.forEach(row => {
             const prev = existingMap.get(row.wix_booking_id);
             if (prev) {
+              Object.assign(row, preserveResolvedSessionShape(row, prev));
               if (prev.client_id) row.client_id = prev.client_id;
               if (prev.psychologist_id) row.psychologist_id = prev.psychologist_id;
               if (prev.google_meet_link) row.google_meet_link = prev.google_meet_link;
@@ -519,6 +520,31 @@ async function applyMaxPriceGuard(rows) {
   });
 }
 
+function preserveResolvedSessionShape(row, prev) {
+  if (!prev) return row;
+
+  const prevCount = Number(prev.session_count || 1);
+  const nextCount = Number(row.session_count || 1);
+  const prevType = String(prev.session_type || '').toLowerCase();
+  const nextType = String(row.session_type || '').toLowerCase();
+
+  const shouldKeepPrevType =
+    (prevType === 'package' && nextType === 'individual') ||
+    (prevType === 'couple' && nextType === 'individual') ||
+    (prevType === 'assessment' && nextType === 'individual') ||
+    (prevType === 'discovery' && nextType === 'individual');
+
+  if (shouldKeepPrevType) {
+    row = { ...row, session_type: prev.session_type };
+  }
+
+  if (prevCount > nextCount && prevCount > 1) {
+    row = { ...row, session_count: prev.session_count };
+  }
+
+  return row;
+}
+
 async function performWixSync(options = {}) {
   const shouldSync = String(process.env.WIX_SYNC_AUTOSTART || 'true').toLowerCase() !== 'false';
   if (!shouldSync) {
@@ -676,13 +702,14 @@ async function performWixSync(options = {}) {
     if (wixBookingIds.length > 0) {
       const { data: existing } = await supabaseAdmin
         .from('sessions')
-        .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at')
+        .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at, session_type, session_count')
         .in('wix_booking_id', wixBookingIds);
       if (existing?.length) {
         const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
         upsertSessions.forEach(row => {
           const prev = existingMap.get(row.wix_booking_id);
           if (prev) {
+            Object.assign(row, preserveResolvedSessionShape(row, prev));
             if (prev.client_id) row.client_id = prev.client_id;
             if (prev.psychologist_id) row.psychologist_id = prev.psychologist_id;
             if (prev.google_meet_link) row.google_meet_link = prev.google_meet_link;
