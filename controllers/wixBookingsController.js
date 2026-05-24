@@ -5,7 +5,7 @@ const { discoverRowToDb, discoverRowToSessionDb, wixBookingCreatedIso } = requir
 const { resolveClientsForBookings } = require('../services/wixClientResolverService');
 const { linkPackageSessions: linkWixBookingsPackages } = require('../services/wixPackageLinkingService');
 const { resolvePsychologistsForBookings } = require('../services/wixPsychologistResolverService');
-const { processNewWixSessions } = require('../services/wixMeetNotifyService');
+const { processNewWixSessions, processOneSession } = require('../services/wixMeetNotifyService');
 const { linkPackageSessions } = require('../services/wixPackageLinkerService');
 const { fetchSessionInfoBatch } = require('../services/wixOrderEnrichmentService');
 const { hydrateBareTherapistBookings } = require('../utils/wixBookingPayloadHydration');
@@ -1701,8 +1701,12 @@ async function noShowWixBooking(req, res) {
 
 /**
  * POST /admin/wix/bookings/:id/book-next-session
- * Book the next session in a Wix package, creating a new sessions row.
- * :id = the wix_bookings.id (UUID primary key, NOT wix_booking_id).
+ * Book the next session in a Wix package.
+ * - Creates a sessions row (for meet/notification pipeline)
+ * - Creates a wix_bookings mirror row so the session appears in the Wix Discover page
+ * - Fires meet + email + WhatsApp notifications async
+ *
+ * :id = wix_bookings.id (UUID PK, NOT wix_booking_id)
  * Body: { scheduled_date, scheduled_time }
  */
 async function bookWixNextSession(req, res) {
@@ -1714,10 +1718,10 @@ async function bookWixNextSession(req, res) {
       return res.status(400).json({ success: false, error: 'Missing required fields: id (param), scheduled_date, scheduled_time' });
     }
 
-    // Fetch the original wix_booking row to get package info
+    // ── 1. Fetch original wix_booking row ────────────────────────────────
     const { data: wixRow, error: wixError } = await supabaseAdmin
       .from('wix_bookings')
-      .select('id, wix_booking_id, session_type, session_count, package_session_number, package_group_id, therapist_name, client_full_name, client_email')
+      .select('id, wix_booking_id, session_type, session_count, package_session_number, package_group_id, therapist_name, client_full_name, client_email, client_first_name, client_last_name, client_phone, contact_id, service_id, title, tags, currency, payload')
       .eq('id', id)
       .single();
 
@@ -1725,51 +1729,158 @@ async function bookWixNextSession(req, res) {
       return res.status(404).json({ success: false, error: 'Wix booking not found' });
     }
 
-    // Look up the linked session to get client_id and psychologist_id
+    // ── 2. Fetch linked session for client_id / psychologist_id ─────────
     const { data: linkedSession, error: sessionError } = await supabaseAdmin
       .from('sessions')
-      .select('id, client_id, psychologist_id, session_type, package_group_id, wix_payload')
+      .select('id, client_id, psychologist_id, session_type, package_group_id')
       .eq('wix_booking_id', wixRow.wix_booking_id)
       .single();
 
     if (sessionError || !linkedSession) {
-      return res.status(404).json({ success: false, error: 'Linked session not found for this Wix booking. Client/psychologist may not yet be resolved.' });
+      return res.status(404).json({ success: false, error: 'Linked session not found. Client/psychologist may not yet be resolved — try again in a minute.' });
     }
-
     if (!linkedSession.client_id || !linkedSession.psychologist_id) {
       return res.status(400).json({ success: false, error: 'Client or psychologist not yet resolved for this session. Please wait for the sync to complete.' });
     }
 
-    // Create the next session row
+    // ── 3. Determine next package_session_number ─────────────────────────
+    // Count existing non-deleted wix_booking rows for this package group.
+    const packageGroupId = linkedSession.package_group_id || wixRow.package_group_id || null;
+    let nextSessionNumber = (wixRow.package_session_number || 1) + 1;
+    if (packageGroupId) {
+      const { data: existingRows } = await supabaseAdmin
+        .from('wix_bookings')
+        .select('package_session_number')
+        .eq('package_group_id', packageGroupId)
+        .neq('status', 'deleted');
+      if (existingRows && existingRows.length > 0) {
+        const maxNum = Math.max(...existingRows.map(r => r.package_session_number || 1));
+        nextSessionNumber = maxNum + 1;
+      }
+    }
+    const totalSessions = wixRow.session_count || 0;
+
+    // ── 4. Build IST start/end times for the wix_bookings mirror ─────────
+    // Convert scheduled_date + scheduled_time to ISO strings in UTC (subtract IST offset)
+    let startTimeIso = null;
+    let endTimeIso = null;
+    try {
+      // scheduled_time is 'HH:MM:00', scheduled_date is 'YYYY-MM-DD'
+      const startLocal = new Date(`${scheduled_date}T${scheduled_time}+05:30`);
+      if (!isNaN(startLocal.getTime())) {
+        startTimeIso = startLocal.toISOString();
+        // Use original Wix session duration to compute end time if available
+        const originalPayload = wixRow.payload || {};
+        const origStart = originalPayload.startTime;
+        const origEnd = originalPayload.endTime;
+        let durMin = 50;
+        if (origStart && origEnd) {
+          const d = Math.round((new Date(origEnd) - new Date(origStart)) / 60000);
+          if (d > 0) durMin = d;
+        }
+        endTimeIso = new Date(startLocal.getTime() + durMin * 60000).toISOString();
+      }
+    } catch (_) { /* non-critical */ }
+
+    // ── 5. Create wix_bookings mirror row FIRST (sessions.wix_booking_id FK requires it) ──
+    const syntheticWixBookingId = `admin_manual_${Date.now()}`;
     const now = new Date().toISOString();
-    const newSession = {
-      source: 'admin_manual',
-      client_id: linkedSession.client_id,
-      psychologist_id: linkedSession.psychologist_id,
-      session_type: linkedSession.session_type || wixRow.session_type || 'individual',
-      package_group_id: linkedSession.package_group_id || wixRow.package_group_id || null,
-      scheduled_date,
-      scheduled_time,
-      original_scheduled_date: scheduled_date,
-      original_scheduled_time: scheduled_time,
+
+    // Always 'package' for follow-ups — we're inside bookWixNextSession so it's always a package.
+    // Use wixRow (wix_bookings ground truth) first; linkedSession.session_type can be stale/null.
+    const sessionType = wixRow.session_type === 'couple' ? 'couple'
+      : (wixRow.session_type === 'package' || totalSessions > 1) ? 'package'
+      : linkedSession.session_type || 'package';
+
+    const wixBookingsMirror = {
+      wix_booking_id: syntheticWixBookingId,
+      wix_session_id: syntheticWixBookingId,
       status: 'booked',
-      notes: wixRow.client_full_name ? `Package follow-up for ${wixRow.client_full_name}` : 'Package follow-up (Wix)',
+      session_type: sessionType,
+      session_count: totalSessions,
+      package_session_number: nextSessionNumber,
+      package_group_id: packageGroupId,
+      therapist_name: wixRow.therapist_name || null,
+      client_full_name: wixRow.client_full_name || null,
+      client_first_name: wixRow.client_first_name || null,
+      client_last_name: wixRow.client_last_name || null,
+      client_email: wixRow.client_email || null,
+      client_phone: wixRow.client_phone || null,
+      contact_id: wixRow.contact_id || null,
+      service_id: wixRow.service_id || null,
+      title: wixRow.title || null,
+      tags: wixRow.tags || null,
+      start_time: startTimeIso,
+      end_time: endTimeIso,
+      price: '0',          // already paid via original package purchase
+      currency: wixRow.currency || null,
+      locally_modified: true,
+      payload: {
+        bookingType: sessionType,
+        startTime: startTimeIso,
+        endTime: endTimeIso,
+        therapist: wixRow.therapist_name || null,
+        isAdminManual: true,
+        sourceWixBookingId: wixRow.wix_booking_id,
+        // These two fields drive deriveSessionType → "Package (2/3)"
+        planSessionNumber: nextSessionNumber,
+        creditsAvailable: totalSessions,
+      },
       created_at: now,
       updated_at: now,
+      synced_at: now,
     };
 
+    const { error: mirrorError } = await supabaseAdmin
+      .from('wix_bookings')
+      .insert(wixBookingsMirror);
+
+    if (mirrorError) {
+      console.error('[bookWixNextSession] wix_bookings mirror insert failed:', mirrorError.message);
+      return res.status(500).json({ success: false, error: 'Failed to create booking record: ' + mirrorError.message });
+    }
+    console.log(`[bookWixNextSession] wix_bookings mirror created for session ${nextSessionNumber}/${totalSessions}`);
+
+    // ── 6. Create sessions row (FK to wix_bookings now satisfied) ────────
     const { data: created, error: createError } = await supabaseAdmin
       .from('sessions')
-      .insert(newSession)
+      .insert({
+        source: 'wix',
+        wix_booking_id: syntheticWixBookingId,
+        client_id: linkedSession.client_id,
+        psychologist_id: linkedSession.psychologist_id,
+        session_type: sessionType,       // same resolved value as mirror row
+        package_group_id: packageGroupId,
+        package_session_number: nextSessionNumber,
+        scheduled_date,
+        scheduled_time,
+        original_scheduled_date: scheduled_date,
+        original_scheduled_time: scheduled_time,
+        status: 'booked',
+        price: 0,                        // already paid via original package
+        session_notes: wixRow.client_full_name ? `Package follow-up for ${wixRow.client_full_name}` : 'Package follow-up (Wix)',
+        created_at: now,
+        updated_at: now,
+      })
       .select()
       .single();
 
     if (createError) {
-      console.error('[bookWixNextSession] insert error:', createError);
+      // Roll back the mirror row to avoid orphan wix_bookings record
+      await supabaseAdmin.from('wix_bookings').delete().eq('wix_booking_id', syntheticWixBookingId);
+      console.error('[bookWixNextSession] sessions insert error:', createError);
       return res.status(500).json({ success: false, error: 'Failed to create session: ' + (createError.message || String(createError)) });
     }
 
-    console.log(`[bookWixNextSession] Created new session ${created.id} for Wix booking ${wixRow.wix_booking_id}`);
+    // ── 7. Fire meet + email + WhatsApp notifications async ──────────────
+    // Don't await — respond to admin immediately, notifications go in background
+    setImmediate(() => {
+      processOneSession(created).catch((err) => {
+        console.error('[bookWixNextSession] notification error (non-fatal):', err.message || err);
+      });
+    });
+
+    console.log(`[bookWixNextSession] Created session ${nextSessionNumber}/${totalSessions} for package ${packageGroupId}`);
     return res.json({ success: true, message: 'Next session booked successfully', data: { session: created } });
   } catch (e) {
     console.error('[bookWixNextSession]', e);

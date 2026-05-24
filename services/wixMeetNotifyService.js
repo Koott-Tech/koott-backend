@@ -290,4 +290,4 @@ async function processOneSession(session, tempPassword = null) {
   return 'processed';
 }
 
-module.exports = { processNewWixSessions };
+module.exports = { processNewWixSessions, processOneSession };
