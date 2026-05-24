@@ -241,6 +241,7 @@ async function processOneSession(session, tempPassword = null) {
       psychologistEmail: psychologistDetails.email,
       sessionDate: session.scheduled_date,
       sessionTime: session.scheduled_time,
+      durationMinutes: meetDurationMinutes,
       meetLink: meetLink,
       price: session.price ?? session.amount,
       status: session.status,

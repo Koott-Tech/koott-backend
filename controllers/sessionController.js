@@ -30,6 +30,36 @@ function isHiddenWixListRow(session) {
   return isUndefinedWix || isPackageChild;
 }
 
+function isPendingAdminSessionStatus(status) {
+  return ['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed'].includes(
+    String(status || '').toLowerCase()
+  );
+}
+
+function getSessionScheduledAtMs(session) {
+  const dateStr = session?.scheduled_date;
+  const timeStr = session?.scheduled_time;
+  if (!dateStr || !timeStr) return null;
+
+  const dateOnly = String(dateStr).slice(0, 10);
+  const cleanTime = String(timeStr).split('.')[0].trim();
+  const parts = cleanTime.split(':');
+  if (parts.length < 2) return null;
+
+  const hh = String(parts[0] || '00').padStart(2, '0');
+  const mm = String(parts[1] || '00').padStart(2, '0');
+  const ss = String((parts[2] || '00').split(' ')[0]).padStart(2, '0');
+  const ms = new Date(`${dateOnly}T${hh}:${mm}:${ss}+05:30`).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function isPendingAdminSession(session, nowMs = Date.now()) {
+  if (!isPendingAdminSessionStatus(session?.status)) return false;
+  const scheduledAtMs = getSessionScheduledAtMs(session);
+  if (scheduledAtMs == null) return false;
+  return scheduledAtMs < nowMs;
+}
+
 // Book a new session
 const bookSession = async (req, res) => {
   try {
@@ -308,10 +338,13 @@ const getAllSessions = async (req, res) => {
     };
 
     let statusList = normalizeStatusList(status);
+    const isPendingFilter = statusList.length === 1 && statusList[0].toLowerCase() === 'pending';
 
     // Admin Booked tab: include rescheduled (comma may be stripped by proxies; some clients send only booked)
     if (statusList.length === 1 && statusList[0].toLowerCase() === 'booked') {
       statusList = ['booked', 'rescheduled'];
+    } else if (isPendingFilter) {
+      statusList = ['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed'];
     }
 
     const applySessionStatusFilter = (q) => {
@@ -731,7 +764,17 @@ const getAllSessions = async (req, res) => {
       });
     }
 
-    const visibleSessions = allSessions.filter((s) => !isHiddenWixListRow(s));
+    let visibleSessions = allSessions.filter((s) => !isHiddenWixListRow(s));
+
+    if (isPendingFilter) {
+      const nowMs = Date.now();
+      visibleSessions = visibleSessions.filter((s) => isPendingAdminSession(s, nowMs));
+      visibleSessions.sort((a, b) => {
+        const aMs = getSessionScheduledAtMs(a) ?? Number.NEGATIVE_INFINITY;
+        const bMs = getSessionScheduledAtMs(b) ?? Number.NEGATIVE_INFINITY;
+        return bMs - aMs;
+      });
+    }
 
     // Apply pagination to combined results
     // Note: Since we're combining two different tables, we need to paginate in memory

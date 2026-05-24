@@ -1477,13 +1477,13 @@ const getPlatformStats = async (req, res) => {
     const [
       completedN,
       rescheduledN,
-      rescheduleRequestedN,
+      pendingN,
       noShowN,
       upcomingN,
     ] = await Promise.all([
       countStatus((b) => b.eq('status', 'completed')),
       countStatus((b) => b.eq('status', 'rescheduled')),
-      countStatus((b) => b.eq('status', 'reschedule_requested')),
+      countStatus((b) => b.in('status', ['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed']).lt('scheduled_date', today)),
       countStatus((b) => b.in('status', ['no_show', 'noshow'])),
       countStatus((b) => b.in('status', ['booked', 'rescheduled']).gte('scheduled_date', today)),
     ]);
@@ -1491,7 +1491,7 @@ const getPlatformStats = async (req, res) => {
     const bookingStatuses = {
       upcoming: upcomingN,
       rescheduled: rescheduledN,
-      rescheduleRequested: rescheduleRequestedN,
+      pending: pendingN,
       completed: completedN,
       noShow: noShowN,
       cancelled: 0,
