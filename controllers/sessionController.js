@@ -12,6 +12,12 @@ const { createRealMeetLink } = require('../utils/meetEventHelper'); // Use real 
 const meetLinkService = require('../utils/meetLinkService'); // New Meet Link Service
 const emailService = require('../utils/emailService');
 const availabilityService = require('../utils/availabilityCalendarService');
+const {
+  buildKoottSessionDescription,
+  buildKoottSessionTitle,
+  getClientDisplayName,
+  getPsychologistDisplayName,
+} = require('../utils/sessionTitleFormatter');
 const { assertClientPackageHasAvailableSlot } = require('../services/packageService');
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const {
@@ -170,9 +176,15 @@ const bookSession = async (req, res) => {
         : clientDetails.user?.email;
 
       // Prepare session data for Meet link creation (emails → Calendar invites)
+      const clientName = getClientDisplayName(clientDetails, 'Client');
+      const psychologistName = getPsychologistDisplayName(psychologistDetails);
       const sessionData = {
-        summary: `Therapy Session - ${clientDetails.child_name || clientDetails.first_name} with ${psychologistDetails.first_name}`,
-        description: `Online therapy session between ${clientDetails.child_name || clientDetails.first_name} and ${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
+        summary: buildKoottSessionTitle({ clientName, psychologistName }),
+        description: buildKoottSessionDescription({
+          clientName,
+          psychologistName,
+          clientPhone: clientDetails.phone_number,
+        }),
         startDate: scheduled_date,
         startTime: scheduled_time,
         endTime: addMinutesToTime(scheduled_time, 50), // 50-minute session
@@ -1383,25 +1395,23 @@ const rescheduleSession = async (req, res) => {
           // Continue even if email sending fails
         }
 
-        // Send WhatsApp notification to client
+        // Send WhatsApp notification to client via Interakt booking template
         try {
-          const { sendRescheduleConfirmation } = require('../utils/whatsappService');
+          const interaktService = require('../utils/interaktService');
           const clientPhone = clientDetails.phone_number || null;
           if (clientPhone) {
             const meetLink = session.google_meet_link || session.google_meet_join_url || null;
-            const clientResult = await sendRescheduleConfirmation(clientPhone, {
-              oldDate: session.scheduled_date,
-              oldTime: session.scheduled_time,
-              newDate: new_date,
-              newTime: new_time,
-              newMeetLink: meetLink,
-              isFreeAssessment: session.session_type === 'free_assessment',
-              durationMinutes: sessionRescheduleNotifyMinutes
+            const clientResult = await interaktService.sendBookingConfirmation(clientPhone, {
+              clientName: clientDetails.child_name || `${clientDetails.first_name} ${clientDetails.last_name}`,
+              psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
+              date: new_date,
+              time: new_time,
+              meetLink,
             });
             if (clientResult?.success) {
-              console.log('✅ Reschedule WhatsApp sent to client');
+              console.log('✅ Reschedule WhatsApp sent to client via Interakt booking template');
             } else {
-              console.warn('⚠️ Failed to send reschedule WhatsApp to client');
+              console.warn('⚠️ Failed to send reschedule WhatsApp to client via Interakt');
             }
           }
         } catch (waError) {

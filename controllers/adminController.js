@@ -22,6 +22,12 @@ const {
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const { getBookingTimeColumnKey } = require('../utils/sessionsBookingTimeColumn');
 const { getCalendarYmdInTimeZone } = require('../utils/sessionBookingCreatedAt');
+const {
+  buildKoottSessionDescription,
+  buildKoottSessionTitle,
+  getClientDisplayName,
+  getPsychologistDisplayName,
+} = require('../utils/sessionTitleFormatter');
 
 async function deleteChildSpecialistPackagesForPsychologist(psychologistId) {
   await deleteSyncedChildSpecialistPackages(supabaseAdmin, psychologistId);
@@ -36,6 +42,87 @@ async function upsertChildSpecialistPackages(psychologistId, normalizedPricing) 
   const { error } = await supabaseAdmin.from('packages').insert(rows);
   return { error };
 }
+
+const buildAdminManualWixMirror = ({
+  syntheticWixBookingId,
+  scheduledDate,
+  scheduledTime,
+  durationMinutes,
+  sessionType,
+  sessionCount,
+  therapistName,
+  therapistEmail,
+  therapistPhone,
+  psychologistId,
+  client,
+  amount,
+  currency = 'INR',
+  packageId = null,
+  sessionId = null,
+  title = null,
+  notes = null,
+}) => {
+  const { startTimeIso, endTimeIso } = buildWixMirrorIsoWindow(scheduledDate, scheduledTime, durationMinutes);
+
+  return {
+    wix_booking_id: syntheticWixBookingId,
+    wix_session_id: syntheticWixBookingId,
+    status: 'booked',
+    session_type: sessionType || 'individual',
+    session_count: sessionCount || 1,
+    package_session_number: sessionCount && sessionCount > 1 ? 1 : null,
+    therapist_name: therapistName || null,
+    client_full_name: `${client?.first_name || ''} ${client?.last_name || ''}`.trim() || client?.child_name || null,
+    client_first_name: client?.first_name || null,
+    client_last_name: client?.last_name || null,
+    client_email: Array.isArray(client?.user) ? client?.user?.[0]?.email || null : client?.user?.email || null,
+    client_phone: client?.phone_number || null,
+    contact_id: client?.user_id || client?.id || null,
+    service_id: psychologistId || null,
+    title: title || therapistName || 'Manual booking',
+    notes: notes || null,
+    start_time: startTimeIso,
+    end_time: endTimeIso,
+    price: amount,
+    currency,
+    synced_at: new Date().toISOString(),
+    locally_modified: true,
+    payload: {
+      id: syntheticWixBookingId,
+      status: 'booked',
+      bookingStatus: 'booked',
+      title: title || therapistName || 'Manual booking',
+      serviceName: therapistName || null,
+      bookingType: sessionType || 'individual',
+      paymentState: 'COMPLETE',
+      startTime: startTimeIso,
+      endTime: endTimeIso,
+      therapist: {
+        name: therapistName || null,
+        email: therapistEmail || null,
+        phone: therapistPhone || null,
+        staffId: psychologistId || null,
+      },
+      client: {
+        firstName: client?.first_name || null,
+        lastName: client?.last_name || null,
+        fullName: `${client?.first_name || ''} ${client?.last_name || ''}`.trim() || client?.child_name || null,
+        email: Array.isArray(client?.user) ? client?.user?.[0]?.email || null : client?.user?.email || null,
+        phone: client?.phone_number || null,
+        contactId: client?.user_id || client?.id || null,
+      },
+      isAdminManual: true,
+      manualBooking: true,
+      packageId,
+      sessionId,
+      paymentDetails: {
+        wixPayMultipleDetails: [
+          { paymentVendorName: 'inPerson' }
+        ]
+      }
+    }
+  };
+};
 
 // Helper function to get availability dates for a day of the week
 const getAvailabilityDatesForDay = (dayName, numOccurrences = 1) => {
@@ -73,6 +160,27 @@ const escapeLike = (str) => {
     .replace(/\\/g, '\\\\')
     .replace(/%/g, '\\%')
     .replace(/_/g, '\\_');
+};
+
+const buildWixMirrorIsoWindow = (scheduledDate, scheduledTime, durationMinutes = 50) => {
+  if (!scheduledDate || !scheduledTime) {
+    return { startTimeIso: null, endTimeIso: null };
+  }
+
+  try {
+    const startLocal = new Date(`${scheduledDate}T${String(scheduledTime).slice(0, 5)}:00+05:30`);
+    if (Number.isNaN(startLocal.getTime())) {
+      return { startTimeIso: null, endTimeIso: null };
+    }
+
+    const safeDuration = Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes : 50;
+    return {
+      startTimeIso: startLocal.toISOString(),
+      endTimeIso: new Date(startLocal.getTime() + safeDuration * 60000).toISOString(),
+    };
+  } catch (_) {
+    return { startTimeIso: null, endTimeIso: null };
+  }
 };
 
 // NOTE: This file was partially overwritten. Only createManualBooking function is present.
@@ -243,25 +351,13 @@ const createManualBooking = async (req, res) => {
     }
 
     // ============================================
-    // STEP 5: CHECK SLOT AVAILABILITY
+    // STEP 5: MANUAL DATE/TIME ENTRY
     // ============================================
-    const availabilityService = require('../utils/availabilityCalendarService');
-    console.log('🔍 [MANUAL BOOKING] Checking slot availability...');
-    
-    const isAvailable = await availabilityService.isTimeSlotAvailable(
-      psychologist_id, 
-      scheduled_date, 
-      scheduledTimeNormalized
-    );
-
-    if (!isAvailable) {
-      console.log(`⚠️ [MANUAL BOOKING] Slot not available: ${psychologist_id} @ ${scheduled_date} ${scheduled_time}`);
-      return res.status(400).json(
-        errorResponse('This time slot is not available. Please select another time.')
-      );
-    }
-
-    console.log('✅ [MANUAL BOOKING] Slot is available');
+    // Admin manual bookings are intentionally no longer restricted to generated
+    // availability slots. We still block duplicate inserts later via DB/session
+    // creation safeguards, but we do not reject the chosen date/time here just
+    // because it is not present in the availability calendar.
+    console.log('ℹ️ [MANUAL BOOKING] Skipping slot availability check; using manually selected date/time');
 
     // ============================================
     // STEP 5.5: PACKAGE CHECK (no block if exhausted – we allow new purchase via manual booking)
@@ -297,35 +393,60 @@ const createManualBooking = async (req, res) => {
       (typeof payment_screenshot_url === 'string' && payment_screenshot_url.trim()) ||
       null;
 
-    const { data: payment, error: paymentError } = await supabaseAdmin
-      .from('payments')
-      .insert({
-        transaction_id: transactionId,
-        session_id: null, // Will be set after session creation
-        psychologist_id: psychologist_id,
-        client_id: client.id,
-        package_id: package_id || null,
-        amount: amount,
-        session_type: packageData ? 'package' : 'individual',
-        status: 'success',
-        payment_method: normalizedPaymentMethod,
-        receipt_url: normalizedReceiptUrl,
-        razorpay_params: {
-          notes: {
-            manual: true,
-            payment_method: normalizedPaymentMethod,
-            admin_created: true,
-            created_by: req.user.id,
-            created_at: new Date().toISOString(),
-            payment_received_date: payment_received_date,
-            payment_screenshot_uploaded: Boolean(normalizedReceiptUrl)
-          }
-        },
-        completed_at: payment_received_date,
-        created_at: new Date().toISOString()
-      })
-      .select()
-      .single();
+    const basePaymentInsert = {
+      transaction_id: transactionId,
+      session_id: null, // Will be set after session creation
+      psychologist_id: psychologist_id,
+      client_id: client.id,
+      package_id: package_id || null,
+      amount: amount,
+      session_type: packageData ? 'package' : 'individual',
+      status: 'success',
+      payment_method: normalizedPaymentMethod,
+      receipt_url: normalizedReceiptUrl,
+      razorpay_params: {
+        notes: {
+          manual: true,
+          payment_method: normalizedPaymentMethod,
+          admin_created: true,
+          created_by: req.user.id,
+          created_at: new Date().toISOString(),
+          payment_received_date: payment_received_date,
+          payment_screenshot_uploaded: Boolean(normalizedReceiptUrl)
+        }
+      },
+      completed_at: payment_received_date,
+      created_at: new Date().toISOString()
+    };
+
+    let payment = null;
+    let paymentError = null;
+    let paymentInsertData = { ...basePaymentInsert };
+
+    for (let attempt = 0; attempt < 12; attempt++) {
+      ({ data: payment, error: paymentError } = await supabaseAdmin
+        .from('payments')
+        .insert(paymentInsertData)
+        .select()
+        .single());
+
+      const isMissingSchemaColumn =
+        paymentError &&
+        String(paymentError.code || '') === 'PGRST204';
+
+      if (!isMissingSchemaColumn) break;
+
+      const msg = String(paymentError.message || '');
+      const missingMatch = msg.match(/Could not find the '([^']+)' column/);
+      const missingColumn = missingMatch?.[1] || null;
+
+      if (!missingColumn || !Object.prototype.hasOwnProperty.call(paymentInsertData, missingColumn)) {
+        break;
+      }
+
+      console.warn(`[admin.createManualBooking] payments schema missing optional column '${missingColumn}'; retrying without it`);
+      delete paymentInsertData[missingColumn];
+    }
 
     if (paymentError) {
       console.error('❌ [MANUAL BOOKING] Payment creation failed:', paymentError);
@@ -347,9 +468,15 @@ const createManualBooking = async (req, res) => {
       console.log('🔄 [MANUAL BOOKING] Creating Google Meet link...');
 
       const manualMeetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
+      const clientName = getClientDisplayName(client, 'Client');
+      const psychologistName = getPsychologistDisplayName(psychologist);
       const sessionData = {
-        summary: `Therapy Session - ${client.child_name || client.first_name} with ${psychologist.first_name}`,
-        description: `Online therapy session between ${client.child_name || client.first_name} and ${psychologist.first_name} ${psychologist.last_name}`,
+        summary: buildKoottSessionTitle({ clientName, psychologistName }),
+        description: buildKoottSessionDescription({
+          clientName,
+          psychologistName,
+          clientPhone: client.phone_number,
+        }),
         startDate: scheduled_date,
         startTime: scheduledTimeNormalized,
         endTime: addMinutesToTime(scheduledTimeNormalized, manualMeetMinutes)
@@ -492,6 +619,57 @@ const createManualBooking = async (req, res) => {
     console.log('✅ [MANUAL BOOKING] Session created:', session.id);
 
     // ============================================
+    // STEP 8.5: CREATE WIX DISCOVERY MIRROR ROW
+    // ============================================
+    try {
+      const manualSessionType = packageData ? 'package' : 'individual';
+      const manualSessionCount = packageData?.session_count || 1;
+      const manualMeetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
+      const syntheticWixBookingId = `admin_manual_${Date.now()}`;
+      const wixMirrorRow = buildAdminManualWixMirror({
+        syntheticWixBookingId,
+        scheduledDate: scheduled_date,
+        scheduledTime: scheduledTimeNormalized,
+        durationMinutes: manualMeetMinutes,
+        sessionType: manualSessionType,
+        sessionCount: manualSessionCount,
+        therapistName: `${psychologist.first_name || ''} ${psychologist.last_name || ''}`.trim(),
+        therapistEmail: psychologist.email || null,
+        therapistPhone: psychologist.phone || null,
+        psychologistId: psychologist_id,
+        client,
+        amount,
+        currency: 'INR',
+        packageId: package_id || null,
+        sessionId: session.id,
+        title: psychologist.first_name ? `${psychologist.first_name} ${psychologist.last_name || ''}`.trim() : 'Manual booking',
+        notes: notes || null,
+      });
+
+      const { error: wixMirrorError } = await supabaseAdmin
+        .from('wix_bookings')
+        .insert([wixMirrorRow]);
+
+      if (wixMirrorError) {
+        console.warn('⚠️ [MANUAL BOOKING] Failed to create wix_bookings mirror row:', wixMirrorError.message);
+      } else {
+        const { error: linkSessionError } = await supabaseAdmin
+          .from('sessions')
+          .update({ wix_booking_id: syntheticWixBookingId })
+          .eq('id', session.id);
+
+        if (linkSessionError) {
+          console.warn('⚠️ [MANUAL BOOKING] Failed to link session to wix_bookings mirror:', linkSessionError.message);
+        } else {
+          session.wix_booking_id = syntheticWixBookingId;
+          console.log('✅ [MANUAL BOOKING] Wix discovery mirror created:', syntheticWixBookingId);
+        }
+      }
+    } catch (wixMirrorCreateError) {
+      console.warn('⚠️ [MANUAL BOOKING] Unexpected wix mirror creation error:', wixMirrorCreateError.message);
+    }
+
+    // ============================================
     // STEP 9: UPDATE AVAILABILITY
     // ============================================
     try {
@@ -598,12 +776,6 @@ const createManualBooking = async (req, res) => {
     // ============================================
     // Send notifications asynchronously - don't block response
     (async () => {
-      const BOOKING_NOTIFICATIONS_TEMP_DISABLED = true;
-      if (BOOKING_NOTIFICATIONS_TEMP_DISABLED) {
-        console.log('ℹ️ [MANUAL BOOKING] Notifications temporarily disabled (email + WhatsApp)');
-        return;
-      }
-
       const sessionTypeLabel = packageData
         ? `Package of ${packageData.session_count}`
         : 'Individual session';
@@ -1129,7 +1301,7 @@ const getAllUsers = async (req, res) => {
     // For clients, we need to join with the clients table to get name information
     if (role === 'client') {
       // Query clients table first, then fetch user emails separately (no FK embed)
-    let query = supabaseAdmin
+      let query = supabaseAdmin
         .from('clients')
         .select(`
           id,
@@ -1144,7 +1316,30 @@ const getAllUsers = async (req, res) => {
 
       if (search) {
         const escapedSearch = escapeLike(search);
-        query = query.or(`first_name.ilike.%${escapedSearch}%,last_name.ilike.%${escapedSearch}%,child_name.ilike.%${escapedSearch}%`);
+        let emailMatchedUserIds = [];
+        const { data: matchedUsers, error: matchedUsersError } = await supabaseAdmin
+          .from('users')
+          .select('id')
+          .ilike('email', `%${escapedSearch}%`)
+          .limit(500);
+
+        if (matchedUsersError) {
+          console.warn('[admin.getAllUsers] client email search lookup failed:', matchedUsersError.message);
+        } else {
+          emailMatchedUserIds = (matchedUsers || []).map((row) => row.id).filter(Boolean);
+        }
+
+        const searchTerms = [
+          `first_name.ilike.%${escapedSearch}%`,
+          `last_name.ilike.%${escapedSearch}%`,
+          `child_name.ilike.%${escapedSearch}%`,
+        ];
+
+        if (emailMatchedUserIds.length > 0) {
+          searchTerms.push(`user_id.in.(${emailMatchedUserIds.join(',')})`);
+        }
+
+        query = query.or(searchTerms.join(','));
       }
 
       query = query.range(offset, offset + limit - 1).order('created_at', { ascending: false });
@@ -3126,14 +3321,16 @@ const updateSession = async (req, res) => {
         const clientEmail = Array.isArray(clientForMeet.user)
           ? clientForMeet.user?.[0]?.email
           : clientForMeet.user?.email;
-        let clientName = clientForMeet.child_name;
-        if (!clientName || clientName.trim() === '' || String(clientName).toLowerCase() === 'pending') {
-          clientName = `${clientForMeet.first_name || ''} ${clientForMeet.last_name || ''}`.trim() || 'Client';
-        }
+        const clientName = getClientDisplayName(clientForMeet, 'Client');
+        const psychologistName = getPsychologistDisplayName(newPsych);
         const endTime = addMinutesToTime(effectiveTime, adminRescheduleMeetMinutes);
         const meetSessionData = {
-          summary: `Therapy Session - ${clientName} with ${newPsych.first_name}`,
-          description: `Online therapy session between ${clientName} and ${newPsych.first_name} ${newPsych.last_name}`,
+          summary: buildKoottSessionTitle({ clientName, psychologistName }),
+          description: buildKoottSessionDescription({
+            clientName,
+            psychologistName,
+            clientPhone: clientForMeet.phone_number,
+          }),
           startDate: effectiveDate,
           startTime: effectiveTime,
           endTime,
@@ -3229,15 +3426,18 @@ const updateSession = async (req, res) => {
         const clientEmail = Array.isArray(clientForMeet.user)
           ? clientForMeet.user?.[0]?.email
           : clientForMeet.user?.email;
-        let clientName = clientForMeet.child_name;
-        if (!clientName || clientName.trim() === '' || String(clientName).toLowerCase() === 'pending') {
-          clientName = `${clientForMeet.first_name || ''} ${clientForMeet.last_name || ''}`.trim() || 'Client';
-        }
+        const clientName = getClientDisplayName(clientForMeet, 'Client');
+        const psychologistName = getPsychologistDisplayName(psychForMeet);
 
         const endTime = addMinutesToTime(effectiveTime, adminRescheduleMeetMinutes);
         const meetSessionData = {
-          summary: `Therapy Session - ${clientName} with ${psychForMeet.first_name}`,
-          description: `Rescheduled therapy session between ${clientName} and ${psychForMeet.first_name} ${psychForMeet.last_name}`,
+          summary: buildKoottSessionTitle({ clientName, psychologistName }),
+          description: buildKoottSessionDescription({
+            clientName,
+            psychologistName,
+            clientPhone: clientForMeet.phone_number,
+            isRescheduled: true,
+          }),
           startDate: effectiveDate,
           startTime: effectiveTime,
           endTime,
@@ -3272,6 +3472,10 @@ const updateSession = async (req, res) => {
     if (client_id) updateData.client_id = client_id; // Keep original client (read-only on frontend)
     if (scheduled_date) updateData.scheduled_date = scheduled_date;
     if (scheduled_time) updateData.scheduled_time = scheduled_time;
+    if (scheduleChanged) {
+      updateData.status = 'rescheduled';
+      updateData.reminder_sent = false;
+    }
     if (original_scheduled_date !== undefined) {
       // Allow setting original_scheduled_date explicitly (for finance calculations)
       // If empty string, use scheduled_date as fallback
@@ -3297,21 +3501,108 @@ const updateSession = async (req, res) => {
       updateData.therapist_commission = parsedComm;
     }
 
-    // Update session
-    const { data: updatedSession, error: updateError } = await supabaseAdmin
-      .from('sessions')
-      .update(updateData)
-      .eq('id', sessionId)
-      .select(`
-        *,
-        psychologist:psychologists(id, first_name, last_name, email, phone),
-        client:clients(id, first_name, last_name, child_name, phone_number)
-      `)
-      .single();
+    // Update session. Some environments may not yet have optional Google Calendar
+    // columns in the sessions schema cache, so retry without them instead of failing
+    // the whole reschedule/update flow.
+    const sessionSelect = `
+      *,
+      psychologist:psychologists(id, first_name, last_name, email, phone),
+      client:clients(id, first_name, last_name, child_name, phone_number)
+    `;
+    let updatedSession = null;
+    let updateError = null;
+
+    let retryData = { ...updateData };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      ({ data: updatedSession, error: updateError } = await supabaseAdmin
+        .from('sessions')
+        .update(retryData)
+        .eq('id', sessionId)
+        .select(sessionSelect)
+        .single());
+
+      const isMissingSchemaColumn =
+        updateError &&
+        String(updateError.code || '') === 'PGRST204';
+
+      if (!isMissingSchemaColumn) break;
+
+      const msg = String(updateError.message || '');
+      const missingMatch = msg.match(/Could not find the '([^']+)' column/);
+      const missingColumn = missingMatch?.[1] || null;
+
+      if (!missingColumn || !Object.prototype.hasOwnProperty.call(retryData, missingColumn)) {
+        break;
+      }
+
+      console.warn(`[admin.updateSession] sessions schema missing optional column '${missingColumn}'; retrying without it`);
+      delete retryData[missingColumn];
+    }
 
     if (updateError) {
       console.error('Error updating session:', updateError);
       return res.status(500).json(errorResponse('Failed to update session'));
+    }
+
+    if (updatedSession?.wix_booking_id) {
+      const wixMirrorUpdates = {
+        locally_modified: true,
+        synced_at: new Date().toISOString(),
+      };
+
+      const nextWixStatus = updateData.status || updatedSession.status;
+      if (nextWixStatus) {
+        wixMirrorUpdates.status = nextWixStatus;
+      }
+
+      if (scheduleChanged || scheduled_date || scheduled_time) {
+        const mirrorDate = updatedSession.scheduled_date || effectiveDate;
+        const mirrorTime = updatedSession.scheduled_time || effectiveTime;
+        const { startTimeIso, endTimeIso } = buildWixMirrorIsoWindow(
+          mirrorDate,
+          mirrorTime,
+          adminRescheduleMeetMinutes
+        );
+
+        if (startTimeIso) wixMirrorUpdates.start_time = startTimeIso;
+        if (endTimeIso) wixMirrorUpdates.end_time = endTimeIso;
+      }
+
+      try {
+        const { data: wixMirrorRow, error: wixFetchError } = await supabaseAdmin
+          .from('wix_bookings')
+          .select('id, payload')
+          .eq('wix_booking_id', updatedSession.wix_booking_id)
+          .maybeSingle();
+
+        if (wixFetchError) {
+          console.warn('[admin.updateSession] failed to fetch linked wix_bookings row:', wixFetchError.message);
+        } else if (wixMirrorRow?.id) {
+          const existingPayload = wixMirrorRow.payload && typeof wixMirrorRow.payload === 'object'
+            ? { ...wixMirrorRow.payload }
+            : {};
+
+          if (wixMirrorUpdates.start_time) existingPayload.startTime = wixMirrorUpdates.start_time;
+          if (wixMirrorUpdates.end_time) existingPayload.endTime = wixMirrorUpdates.end_time;
+          if (wixMirrorUpdates.status) {
+            existingPayload.status = wixMirrorUpdates.status;
+            existingPayload.bookingStatus = wixMirrorUpdates.status;
+          }
+
+          wixMirrorUpdates.payload = existingPayload;
+
+          const { error: wixUpdateError } = await supabaseAdmin
+            .from('wix_bookings')
+            .update(wixMirrorUpdates)
+            .eq('id', wixMirrorRow.id);
+
+          if (wixUpdateError) {
+            console.warn('[admin.updateSession] failed to mirror session update into wix_bookings:', wixUpdateError.message);
+          }
+        }
+      } catch (mirrorErr) {
+        console.warn('[admin.updateSession] unexpected error while mirroring to wix_bookings:', mirrorErr.message);
+      }
     }
 
     // Update payment details if provided
@@ -3504,7 +3795,8 @@ const updateSession = async (req, res) => {
       (async () => {
         try {
           const emailService = require('../utils/emailService');
-          const { sendRescheduleConfirmation, sendWhatsAppTextWithRetry, formatFriendlyTime } = require('../utils/whatsappService');
+          const interaktService = require('../utils/interaktService');
+          const { sendWhatsAppTextWithRetry, formatFriendlyTime } = require('../utils/whatsappService');
           const oldDate = currentSession.scheduled_date;
           const oldTime = currentSession.scheduled_time;
           const newDate = updatedSession.scheduled_date;
@@ -3556,19 +3848,17 @@ const updateSession = async (req, res) => {
 
           const clientPhone = clientWithUser?.phone_number || updatedSession.client?.phone_number || null;
           if (clientPhone) {
-            const waResult = await sendRescheduleConfirmation(clientPhone, {
-              oldDate,
-              oldTime,
-              newDate,
-              newTime,
-              newMeetLink: meetLink,
-              isFreeAssessment: updatedSession.session_type === 'free_assessment',
-              durationMinutes: adminRescheduleMeetMinutes
+            const waResult = await interaktService.sendBookingConfirmation(clientPhone, {
+              clientName,
+              psychologistName,
+              date: newDate,
+              time: newTime,
+              meetLink,
             });
             if (waResult?.success) {
-              console.log('✅ [Admin] Reschedule WhatsApp sent to client');
+              console.log('✅ [Admin] Reschedule WhatsApp sent to client via Interakt booking template');
             } else {
-              console.warn('⚠️ [Admin] Failed to send reschedule WhatsApp to client');
+              console.warn('⚠️ [Admin] Failed to send reschedule WhatsApp to client via Interakt');
             }
           }
 
@@ -4210,9 +4500,15 @@ const bookPackageNextSession = async (req, res) => {
 
         const clientEmail = Array.isArray(clientDetails?.user) ? clientDetails?.user?.[0]?.email : clientDetails?.user?.email;
         const nextPkgMeetMinutes = getMeetEventDurationMinutes(clientPackage.package?.package_type);
+        const clientName = getClientDisplayName(clientDetails, 'Client');
+        const psychologistName = getPsychologistDisplayName(psychologistDetails);
         const meetSessionData = {
-          summary: `Therapy Session - ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
-          description: `Therapy session between ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'} ${psychologistDetails?.last_name || ''}`,
+          summary: buildKoottSessionTitle({ clientName, psychologistName }),
+          description: buildKoottSessionDescription({
+            clientName,
+            psychologistName,
+            clientPhone: clientDetails?.phone_number,
+          }),
           startDate: scheduled_date,
           startTime: scheduled_time,
           endTime: addMinutesToTime(scheduled_time, nextPkgMeetMinutes),
@@ -4255,8 +4551,6 @@ const bookPackageNextSession = async (req, res) => {
           remainingSessions: updatedRemaining,
           packageType: clientPackage.package?.package_type || null
         };
-        const clientName = clientDetails?.child_name || `${clientDetails?.first_name || ''} ${clientDetails?.last_name || ''}`.trim();
-        const psychologistName = `${psychologistDetails?.first_name || ''} ${psychologistDetails?.last_name || ''}`.trim();
 
         console.log('ℹ️ [BOOK PACKAGE NEXT] Notifications temporarily disabled (email + WhatsApp)');
 

@@ -14,6 +14,12 @@ const emailService = require('../utils/emailService');
 const userInteractionLogger = require('../utils/userInteractionLogger');
 const { generateAndStoreReceipt } = require('../services/receiptService');
 const { processPaymentCaptured } = require('./razorpayWebhookController');
+const {
+  buildKoottSessionDescription,
+  buildKoottSessionTitle,
+  getClientDisplayName,
+  getPsychologistDisplayName,
+} = require('../utils/sessionTitleFormatter');
 
 // Generate and store PDF receipt in Supabase storage
 /**
@@ -2256,9 +2262,15 @@ const handlePaymentSuccess = async (req, res) => {
           } else {
           console.log('🔄 Creating Google Meet meeting via OAuth2 (async)...');
           
+          const clientName = getClientDisplayName(clientDetails, 'Client');
+          const psychologistName = getPsychologistDisplayName(psychologistDetails);
           const meetSessionData = {
-        summary: `Therapy Session - ${clientDetails.child_name || clientDetails.first_name} with ${psychologistDetails.first_name}`,
-        description: `Online therapy session between ${clientDetails.child_name || clientDetails.first_name} and ${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
+        summary: buildKoottSessionTitle({ clientName, psychologistName }),
+        description: buildKoottSessionDescription({
+          clientName,
+          psychologistName,
+          clientPhone: clientDetails.phone_number,
+        }),
         startDate: actualScheduledDate,
         startTime: actualScheduledTime,
             endTime: addMinutesToTime(actualScheduledTime, meetDurationMinutes),

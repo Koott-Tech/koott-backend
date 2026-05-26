@@ -17,6 +17,12 @@ const { addMinutesToTime } = require('../utils/helpers');
 const { resolveSessionDurationMinutes } = require('../utils/sessionMeetDuration');
 const emailService = require('../utils/emailService');
 const interaktService = require('../utils/interaktService');
+const {
+  buildKoottSessionDescription,
+  buildKoottSessionTitle,
+  getClientDisplayName,
+  getPsychologistDisplayName,
+} = require('../utils/sessionTitleFormatter');
 
 const LOG_PREFIX = '[wixMeetNotify]';
 
@@ -128,14 +134,8 @@ async function processOneSession(session, tempPassword = null) {
   }
 
   // ── Resolve names ─────────────────────────────────────────────────────
-  let clientName = clientDetails.child_name;
-  if (!clientName || clientName.trim() === '' || clientName.toLowerCase() === 'pending') {
-    const firstName = clientDetails.first_name || '';
-    const lastName = clientDetails.last_name || '';
-    clientName = `${firstName} ${lastName}`.trim() || '';
-  }
-
-  const psychologistName = `${psychologistDetails.first_name || ''} ${psychologistDetails.last_name || ''}`.trim() || 'Therapist';
+  const clientName = getClientDisplayName(clientDetails, 'Client');
+  const psychologistName = getPsychologistDisplayName(psychologistDetails, 'Therapist');
 
   // Normalize client email (Supabase can return user relation as object or array)
   const clientUserData = Array.isArray(clientDetails.user)
@@ -166,14 +166,26 @@ async function processOneSession(session, tempPassword = null) {
   const endTime = addMinutesToTime(session.scheduled_time || '00:00', meetDurationMinutes);
 
   // ── Create Google Meet link ───────────────────────────────────────────
+  // oauth_email = the Google account the therapist authorised (may differ from psychologists.email)
+  // calendarOwnerEmail tells meetLinkService which account NOT to double-add as attendee.
+  const oauthEmail = psychologistDetails.google_calendar_credentials?.oauth_email || null;
+
   const meetSessionData = {
-    summary: `Therapy Session - ${clientName} with ${psychologistDetails.first_name || 'Therapist'}`,
-    description: `Online therapy session between ${clientName} and ${psychologistName}`,
+    summary: buildKoottSessionTitle({ clientName, psychologistName }),
+    description: buildKoottSessionDescription({
+      clientName,
+      psychologistName,
+      clientPhone,
+    }),
     startDate: session.scheduled_date,
     startTime: session.scheduled_time,
     endTime,
     clientEmail: clientEmail || null,
     psychologistEmail: psychologistDetails.email || null,
+    // If the OAuth account differs from the notification email, tell meetLinkService
+    // to treat the OAuth account as the calendar owner so the notification email
+    // gets added as a proper attendee and receives the calendar invite.
+    calendarOwnerEmail: oauthEmail || psychologistDetails.email || null,
   };
 
   // Use psychologist OAuth credentials if available

@@ -379,9 +379,12 @@ class MeetLinkService {
       const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
       // Owner email for de-duping attendee list.
+      // Prefer sessionData.calendarOwnerEmail (the actual OAuth account) over psychologistEmail.
+      // When they differ, the notification email will be added as a proper attendee so the
+      // therapist gets a calendar invite on their work account too.
       let calendarOwnerEmail = null;
       if (userAuth?.access_token) {
-        calendarOwnerEmail = sessionData.psychologistEmail || null;
+        calendarOwnerEmail = sessionData.calendarOwnerEmail || sessionData.psychologistEmail || null;
       }
 
       // Build attendees array - OAuth can use attendees
@@ -422,7 +425,7 @@ class MeetLinkService {
       if (adminEmail) pushUniqueEmail(adminEmail);
 
       const event = {
-        summary: sessionData.summary || 'Therapy Session',
+        summary: sessionData.summary || 'Koott Session',
         description: sessionData.description || 'Therapy session with Google Meet',
         start: {
           dateTime: `${sessionData.startDate}T${this.formatTime(sessionData.startTime)}`,
@@ -628,7 +631,7 @@ class MeetLinkService {
 
       // Create event WITHOUT attendees field (service account limitation)
       const event = {
-        summary: sessionData.summary || 'Therapy Session',
+        summary: sessionData.summary || 'Koott Session',
         description: description,
         start: {
           dateTime: `${sessionData.startDate}T${this.formatTime(sessionData.startTime)}`,
@@ -1026,7 +1029,7 @@ class MeetLinkService {
       
       // Prepare session data - include emails for attendees (KEY to bypassing host approval)
       const meetSessionData = {
-        summary: sessionData.summary || 'Therapy Session',
+        summary: sessionData.summary || 'Koott Session',
         description: sessionData.description || 'Therapy session',
         startDate: sessionData.startDate,
         startTime: sessionData.startTime,

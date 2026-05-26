@@ -923,7 +923,7 @@ async function listWixBookings(req, res) {
     if (wixBookingIds.length > 0) {
       const { data: sessionsData } = await supabaseAdmin
         .from('sessions')
-        .select('id, wix_booking_id, package_id, client_id, psychologist_id, package_session_number, session_count, status')
+        .select('id, wix_booking_id, package_id, client_id, psychologist_id, package_session_number, session_count, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link')
         .in('wix_booking_id', wixBookingIds);
       
       if (sessionsData) {
@@ -991,6 +991,10 @@ async function listWixBookings(req, res) {
             package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
             session_count: row.session_count ?? linkedSession.session_count ?? null,
             session_status: linkedSession.status || null,
+            google_meet_link: linkedSession.google_meet_link || null,
+            google_meet_join_url: linkedSession.google_meet_join_url || null,
+            google_meet_start_url: linkedSession.google_meet_start_url || null,
+            google_calendar_link: linkedSession.google_calendar_link || null,
           };
         }),
         pagination: {

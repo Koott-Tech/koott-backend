@@ -30,7 +30,19 @@ router.post('/connect', authenticateToken, requirePsychologist, async (req, res)
     );
 
     const { tokens } = await oAuth2Client.getToken(code);
-    
+
+    // Fetch the Google account email that authorised the OAuth so we can store it.
+    // This is used later to correctly identify the calendar owner vs the notification email.
+    let oauthEmail = null;
+    try {
+      oAuth2Client.setCredentials(tokens);
+      const oauth2 = google.oauth2({ version: 'v2', auth: oAuth2Client });
+      const { data: userInfo } = await oauth2.userinfo.get();
+      oauthEmail = userInfo.email || null;
+    } catch (e) {
+      console.warn('[googleCalendar] could not fetch OAuth account email (non-fatal):', e.message);
+    }
+
     // Store tokens in database
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
     const { error } = await supabaseAdmin
@@ -42,7 +54,8 @@ router.post('/connect', authenticateToken, requirePsychologist, async (req, res)
           scope: tokens.scope,
           token_type: tokens.token_type,
           expiry_date: tokens.expiry_date,
-          connected_at: new Date().toISOString()
+          connected_at: new Date().toISOString(),
+          oauth_email: oauthEmail,   // actual Google account these tokens belong to
         },
         updated_at: new Date().toISOString()
       })

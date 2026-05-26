@@ -17,6 +17,12 @@ const meetLinkService = require('../utils/meetLinkService');
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const emailService = require('../utils/emailService');
 const userInteractionLogger = require('../utils/userInteractionLogger');
+const {
+  buildKoottSessionDescription,
+  buildKoottSessionTitle,
+  getClientDisplayName,
+  getPsychologistDisplayName,
+} = require('../utils/sessionTitleFormatter');
 
 /**
  * Create session from slot lock (idempotent)
@@ -476,18 +482,8 @@ class MeetLinkCreationQueue {
 
     // Create Google Meet link
     // Handle client name: prefer child_name, but skip if it's "Pending" or empty
-    let clientName = clientDetails.child_name;
-    if (!clientName || clientName.trim() === '' || clientName.toLowerCase() === 'pending') {
-      // Fall back to first_name + last_name
-      const firstName = clientDetails.first_name || '';
-      const lastName = clientDetails.last_name || '';
-      clientName = `${firstName} ${lastName}`.trim();
-      // If still empty, use a default
-      if (!clientName) {
-        clientName = 'Client';
-      }
-    }
-    const psychologistName = `${psychologistDetails.first_name} ${psychologistDetails.last_name}`;
+    const clientName = getClientDisplayName(clientDetails, 'Client');
+    const psychologistName = getPsychologistDisplayName(psychologistDetails);
 
     // Normalize client email: Supabase can return user relation as object or array
     const clientEmail = Array.isArray(clientDetails.user)
@@ -495,8 +491,12 @@ class MeetLinkCreationQueue {
       : clientDetails.user?.email;
 
     const meetSessionData = {
-      summary: `Therapy Session - ${clientName} with ${psychologistDetails.first_name}`,
-      description: `Online therapy session between ${clientName} and ${psychologistName}`,
+      summary: buildKoottSessionTitle({ clientName, psychologistName }),
+      description: buildKoottSessionDescription({
+        clientName,
+        psychologistName,
+        clientPhone: clientDetails.phone_number,
+      }),
       startDate: slotLock.scheduled_date,
       startTime: slotLock.scheduled_time,
       endTime: endTime,
@@ -635,5 +635,3 @@ module.exports = {
   createSessionFromSlotLock,
   enqueueMeetLinkCreation
 };
-
-

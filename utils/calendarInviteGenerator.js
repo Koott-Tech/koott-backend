@@ -4,6 +4,7 @@
  */
 
 const crypto = require('crypto');
+const { buildKoottSessionTitle } = require('./sessionTitleFormatter');
 
 /**
  * Generate a calendar invite (.ics) file content
@@ -53,6 +54,7 @@ function generateCalendarInvite(sessionData) {
   const uid = `session-${sessionId}-${crypto.randomUUID()}@koott.com`;
 
   // Calendar invite content with IST timezone
+  const sessionTitle = buildKoottSessionTitle({ clientName, psychologistName });
   const icalContent = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -73,7 +75,7 @@ function generateCalendarInvite(sessionData) {
     `DTSTAMP:${createdDate}`,
     `DTSTART;TZID=Asia/Kolkata:${startDate}`,
     `DTEND;TZID=Asia/Kolkata:${endDate}`,
-    `SUMMARY:Therapy Session - ${clientName} with ${psychologistName}`,
+    `SUMMARY:${sessionTitle}`,
     `DESCRIPTION:Online therapy session scheduled through Koott.\\n\\n` +
     `Client: ${clientName}\\n` +
     `Psychologist: ${psychologistName}\\n\\n` +
@@ -161,7 +163,7 @@ function generateGoogleCalendarLink(sessionData) {
   const endDate = formatGoogleDateIST(endDateTime);
 
   const meetText = meetLink && String(meetLink).trim() ? meetLink : 'Join link will be shared separately';
-  const title = encodeURIComponent(`Therapy Session - ${clientName} with ${psychologistName}`);
+  const title = encodeURIComponent(buildKoottSessionTitle({ clientName, psychologistName }));
   const details = encodeURIComponent(
     `Online therapy session\n\nJoin via Google Meet: ${meetText}\n\nPlease join 5 minutes early.`
   );
@@ -190,7 +192,7 @@ function generateOutlookCalendarLink(sessionData) {
   const endDateTime = new Date(sessionDateTime.getTime() + (duration * 60000));
 
   const meetText = meetLink && String(meetLink).trim() ? meetLink : 'Join link will be shared separately';
-  const title = encodeURIComponent(`Therapy Session - ${clientName} with ${psychologistName}`);
+  const title = encodeURIComponent(buildKoottSessionTitle({ clientName, psychologistName }));
   const body = encodeURIComponent(
     `Online therapy session\n\nJoin via Google Meet: ${meetText}\n\nPlease join 5 minutes early.`
   );

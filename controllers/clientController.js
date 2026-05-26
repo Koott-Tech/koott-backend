@@ -17,6 +17,12 @@ const meetLinkService = require('../utils/meetLinkService');
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const userInteractionLogger = require('../utils/userInteractionLogger');
 const { reserveAssessmentSlot, bookAssessment, getAssessmentSessions } = require('./assessmentBookingController');
+const {
+  buildKoottSessionDescription,
+  buildKoottSessionTitle,
+  getClientDisplayName,
+  getPsychologistDisplayName,
+} = require('../utils/sessionTitleFormatter');
 
 // Get client profile
 const getProfile = async (req, res) => {
@@ -1035,9 +1041,15 @@ const bookSession = async (req, res) => {
         ? clientDetails.user[0]?.email
         : clientDetails.user?.email;
       const meetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
+      const clientName = getClientDisplayName(clientDetails, 'Client');
+      const psychologistName = getPsychologistDisplayName(psychologistDetails);
       const sessionData = {
-        summary: `Therapy Session - ${clientDetails?.child_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
-        description: `Therapy session between ${clientDetails?.child_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'}`,
+        summary: buildKoottSessionTitle({ clientName, psychologistName }),
+        description: buildKoottSessionDescription({
+          clientName,
+          psychologistName,
+          clientPhone: clientDetails?.phone_number,
+        }),
         startDate: scheduled_date,
         startTime: scheduled_time,
         endTime: addMinutesToTime(scheduled_time, meetMinutes),
@@ -2415,10 +2427,18 @@ const rescheduleSession = async (req, res) => {
       const sessionDataForMeet = {
         summary: isFreeAssessment 
           ? `Free Assessment - ${clientDetails?.child_name || clientDetails?.first_name}`
-          : `Therapy Session - ${clientDetails?.child_name || clientDetails?.first_name} with ${psychologistDetails?.first_name}`,
+          : buildKoottSessionTitle({
+              clientName: getClientDisplayName(clientDetails, 'Client'),
+              psychologistName: getPsychologistDisplayName(psychologistDetails),
+            }),
         description: isFreeAssessment
           ? `Rescheduled free 20-minute assessment session`
-          : `Rescheduled therapy session between ${clientDetails?.child_name || clientDetails?.first_name} and ${psychologistDetails?.first_name} ${psychologistDetails?.last_name}`,
+          : buildKoottSessionDescription({
+              clientName: getClientDisplayName(clientDetails, 'Client'),
+              psychologistName: getPsychologistDisplayName(psychologistDetails),
+              clientPhone: clientDetails?.phone_number,
+              isRescheduled: true,
+            }),
         startDate: new_date,
         startTime: newTime24Hour,
         endTime: isFreeAssessment 
@@ -3941,9 +3961,15 @@ const bookRemainingSession = async (req, res) => {
         console.log('🔄 Creating real Google Meet link for package session (async)...');
         
         const meetMinutes = getMeetEventDurationMinutes(packageInfo.packageType);
+        const clientName = getClientDisplayName(clientDetails, 'Client');
+        const psychologistName = getPsychologistDisplayName(psychologistDetails);
         const meetSessionData = {
-          summary: `Therapy Session - ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
-          description: `Therapy session between ${clientDetails?.child_name || clientDetails?.first_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'} ${psychologistDetails?.last_name || ''}`,
+          summary: buildKoottSessionTitle({ clientName, psychologistName }),
+          description: buildKoottSessionDescription({
+            clientName,
+            psychologistName,
+            clientPhone: clientDetails?.phone_number,
+          }),
           startDate: scheduled_date,
           startTime: scheduled_time,
           endTime: addMinutesToTime(scheduled_time, meetMinutes),
@@ -4734,9 +4760,15 @@ const bookSessionWithCredit = async (req, res) => {
         console.log('✅ Credit booking: using psychologist Google Calendar OAuth');
       }
 
+      const clientName = getClientDisplayName(clientDetails, 'Client');
+      const psychologistName = getPsychologistDisplayName(psychologistDetails);
       const sessionData = {
-        summary: `Therapy Session - ${clientDetails?.child_name || 'Client'} with ${psychologistDetails?.first_name || 'Psychologist'}`,
-        description: `Therapy session between ${clientDetails?.child_name || 'Client'} and ${psychologistDetails?.first_name || 'Psychologist'}`,
+        summary: buildKoottSessionTitle({ clientName, psychologistName }),
+        description: buildKoottSessionDescription({
+          clientName,
+          psychologistName,
+          clientPhone: clientDetails?.phone_number,
+        }),
         startDate: scheduled_date,
         startTime: scheduled_time,
         endTime: addMinutesToTime(scheduled_time, creditMeetMinutes),
