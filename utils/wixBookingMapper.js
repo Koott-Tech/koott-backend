@@ -46,9 +46,23 @@ function sessionTypeFromBooking(b) {
   // 2. Now apply couple/package tags (duration didn't fire, so session is ≤75 min)
   if (hasCoupleTag)  return 'couple';
   if (hasPackageTag) return 'package';
+  // Explicit INDIVIDUAL tag wins over plan-credit signals (moved up so it fires before step 3)
+  if (hasExplicitIndividualTag) return 'individual';
 
-  // 3. Pricing plan / subscription → individual package (not couple — would have been caught above)
-  if (b.pricingPlanInfo || b.subscriptionId) return 'package';
+  // 3. Pricing plan / subscription signals — only 'package' when session count > 1.
+  //    Single-session plan-credit bookings (inPerson + UNDEFINED) must stay 'individual'.
+  const _vendor = (
+    b.paymentDetails?.wixPayMultipleDetails?.[0]?.paymentVendorName ||
+    b.paymentVendorName || ''
+  ).toLowerCase();
+  const _pState = (b.paymentState || b.paymentDetails?.state || '').toUpperCase();
+  const isPlanCredit = !!(b.pricingPlanInfo || b.subscriptionId || b.isPlanCreditBooking ||
+    (_vendor === 'inperson' && _pState === 'UNDEFINED'));
+
+  if (isPlanCredit) {
+    const count = sessionCountFromBooking(b);
+    return count > 1 ? 'package' : 'individual';
+  }
 
   // 4. Short + free → discovery
   if (durMin != null && durMin < 45) {
@@ -153,16 +167,36 @@ function discoverRowToDb(booking) {
     b.pricingPlanInfo?.price?.currency ??
     null;
   const paymentState = String(b.paymentDetails?.state || '').toUpperCase();
-  const isZeroPayment = paymentState === 'UNDEFINED' || paymentState === 'FREE' || parseFloat(finalPriceAmount || '-1') === 0;
+  // Plan-credit bookings: paid via Wix Pricing Plan credits — no direct charge captured.
+  // Velo sets b.isPlanCreditBooking=true; also detect via two raw payment patterns:
+  //   Pattern A: wixPayMultipleDetails[0].paymentVendorName === "inPerson" + UNDEFINED state
+  //   Pattern B: empty wixPayMultipleDetails + empty balance + CONFIRMED + UNDEFINED state
+  const _vendor = (b.paymentDetails?.wixPayMultipleDetails?.[0]?.paymentVendorName || '').toLowerCase();
+  const _hasEmptyBalance = !b.paymentDetails?.balance?.finalPrice?.amount;
+  const _status = String(b.status || '').toUpperCase();
+  const isPlanCreditBooking =
+    b.isPlanCreditBooking === true ||
+    (paymentState === 'UNDEFINED' && !b.pricingPlanInfo && (
+      _vendor === 'inperson' ||
+      (!_vendor && _hasEmptyBalance && (!b.amountReceived || parseFloat(b.amountReceived) === 0) && _status === 'CONFIRMED')
+    ));
+  const isZeroPayment = !isPlanCreditBooking && (paymentState === 'UNDEFINED' || paymentState === 'FREE' || parseFloat(finalPriceAmount || '-1') === 0);
 
-  const resolvedPrice = isZeroPayment ? 0 : (finalPriceAmount != null && parseFloat(finalPriceAmount) > 0 ? finalPriceAmount : (planPrice ?? b.price ?? rate?.amount ?? null));
+  // For plan-credit bookings use the raw session rate (b.price or rate.amount) as the price
+  // since finalPriceAmount will be 0 (no direct charge — plan credits were consumed).
+  const resolvedPrice = isZeroPayment
+    ? 0
+    : isPlanCreditBooking
+      ? (b.price ?? rate?.amount ?? planPrice ?? null)
+      : (finalPriceAmount != null && parseFloat(finalPriceAmount) > 0 ? finalPriceAmount : (planPrice ?? b.price ?? rate?.amount ?? null));
   const resolvedCurrency = (finalPriceAmount != null && parseFloat(finalPriceAmount) > 0) ? finalPriceCurrency : (planCurrency || b.currency || rate?.currency || null);
 
-  // For type/count detection, inject the resolved price so ratio math uses
-  // the actual paid amount rather than the catalog rate stored in b.price.
-  const augmented = resolvedPrice != null && parseFloat(resolvedPrice) > 0
-    ? { ...b, _resolvedPrice: resolvedPrice }
-    : b;
+  // For type/count detection, inject resolved price AND isPlanCreditBooking so
+  // sessionTypeFromBooking can detect Pattern B plan-credit bookings correctly.
+  const augmented = {
+    ...(resolvedPrice != null && parseFloat(resolvedPrice) > 0 ? { ...b, _resolvedPrice: resolvedPrice } : b),
+    isPlanCreditBooking,  // always inject — overrides Velo's false with backend's true when Pattern B
+  };
   const createdAt = wixBookingCreatedIso(b) || new Date().toISOString();
   const updatedAt = new Date().toISOString();
 
@@ -270,10 +304,21 @@ function discoverRowToSessionDb(booking) {
     b.pricingPlanInfo?.totalPrice ??
     null;
   const paymentState = String(b.paymentDetails?.state || '').toUpperCase();
-  const isZeroPayment = paymentState === 'UNDEFINED' || paymentState === 'FREE' || parseFloat(finalPaid || '-1') === 0;
+  const _sv = (b.paymentDetails?.wixPayMultipleDetails?.[0]?.paymentVendorName || '').toLowerCase();
+  const _sb = !b.paymentDetails?.balance?.finalPrice?.amount;
+  const _ss = String(b.status || '').toUpperCase();
+  const isPlanCreditBooking =
+    b.isPlanCreditBooking === true ||
+    (paymentState === 'UNDEFINED' && !b.pricingPlanInfo && (
+      _sv === 'inperson' ||
+      (!_sv && _sb && (!b.amountReceived || parseFloat(b.amountReceived) === 0) && _ss === 'CONFIRMED')
+    ));
+  const isZeroPayment = !isPlanCreditBooking && (paymentState === 'UNDEFINED' || paymentState === 'FREE' || parseFloat(finalPaid || '-1') === 0);
 
   const amount = isZeroPayment ? 0 : parseAmount(
-    (finalPaid != null && parseFloat(finalPaid) > 0) ? finalPaid : (planPriceRaw ?? b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount)
+    isPlanCreditBooking
+      ? (b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount ?? planPriceRaw)
+      : (finalPaid != null && parseFloat(finalPaid) > 0) ? finalPaid : (planPriceRaw ?? b.price ?? b.rawBookedEntity?.rate?.defaultVariedPrice?.amount)
   );
   const fromWixInstant = wixBookingCreatedIso(b);
   /** Keep sessions.created_at aligned with Wix booking time when payload provides it */
@@ -281,14 +326,16 @@ function discoverRowToSessionDb(booking) {
   const updatedAt = new Date().toISOString();
 
   // Package / plan tracking — populated when booking is via Wix Pricing Plan
+  // Inject backend-detected isPlanCreditBooking so sessionTypeFromBooking sees it.
+  const bWithPlanFlag = { ...b, isPlanCreditBooking };
   const planSessionNumber = b.planSessionNumber != null ? Number(b.planSessionNumber) : null;
-  const sessionCount = sessionCountFromBooking(b);
+  const sessionCount = sessionCountFromBooking(bWithPlanFlag);
   const packageGroupId = b.subscriptionId || null;
 
   return {
     wix_booking_id: b.id != null ? String(b.id) : null,
     source: 'wix',
-    session_type: sessionTypeFromBooking(b) || 'individual',
+    session_type: sessionTypeFromBooking(bWithPlanFlag) || 'individual',
     session_count: sessionCount,
     package_session_number: planSessionNumber || null,
     package_group_id: packageGroupId,

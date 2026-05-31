@@ -68,6 +68,7 @@ router.patch('/wix/bookings/:id', wixBookingsController.editWixBooking);
 router.delete('/wix/bookings/:id', wixBookingsController.deleteWixBooking);
 router.patch('/wix/bookings/:id/complete', wixBookingsController.completeWixBooking);
 router.patch('/wix/bookings/:id/no-show', wixBookingsController.noShowWixBooking);
+router.patch('/wix/bookings/:id/cancel-refund', wixBookingsController.cancelRefundWixBooking);
 router.post('/wix/bookings/:id/book-next-session', wixBookingsController.bookWixNextSession);
 router.get('/wix/therapists', wixBookingsController.listWixTherapists);
 router.post('/wix/backfill-clients', wixBookingsController.backfillWixClients);
@@ -98,8 +99,9 @@ router.get('/sessions/:sessionId', sessionController.getSessionById);
 // Session rescheduling
 router.put('/sessions/:sessionId', adminController.updateSession);
 router.put('/sessions/:sessionId/no-show', sessionController.markSessionAsNoShow);
-router.post('/sessions/:sessionId/complete', sessionController.completeSession); // Allow admins to complete sessions (especially free assessments)
-router.delete('/sessions/:sessionId', sessionController.deleteSession); // Delete session (admin only)
+router.post('/sessions/:sessionId/complete', sessionController.completeSession);
+router.patch('/sessions/:sessionId/cancel-refund', sessionController.cancelRefundSession);
+router.delete('/sessions/:sessionId', sessionController.deleteSession);
 router.get('/psychologists/:psychologistId/availability', adminController.getPsychologistAvailabilityForReschedule);
 
 // Manual booking (admin only - for edge cases)

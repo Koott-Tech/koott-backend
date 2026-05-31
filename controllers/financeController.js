@@ -1,5 +1,6 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { successResponse, errorResponse } = require('../utils/helpers');
+const { computeSessionDoctorWallet } = require('../utils/sessionCommission');
 const auditLogger = require('../utils/auditLogger');
 const {
   getSessionBookingCreatedAtIso,
@@ -984,7 +985,7 @@ const getDashboard = async (req, res) => {
         if (sessionIds.length > 0) {
           const { data: history } = await supabaseAdmin
             .from('commission_history')
-            .select('session_id, commission_amount, session_amount, payment_status, payout_id')
+            .select('session_id, commission_amount, session_amount, payment_status')
             .in('session_id', sessionIds);
           commissionHistory = history || [];
         }
@@ -1175,178 +1176,24 @@ const getDashboard = async (req, res) => {
             commissionToCompany = 0;
             toDoctorWallet = 0;
           } else if (isCompleted) {
-            // Completed session
-            const isPackage = s.package_id && s.package_id !== 'null' && s.package_id !== 'undefined' && s.package_id !== 'individual' ||
-                             s.session_type === 'Package Session' || 
-                             (s.session_type && s.session_type.toLowerCase().includes('package'));
-            
-            if (isPackage && s.package_id) {
-              if (historyRecord) {
-                const commissionAmount = parseFloat(historyRecord.commission_amount || 0);
-                const sessionAmount = parseFloat(historyRecord.session_amount || sessionPrice);
-                commissionToCompany = commissionAmount;
-                toDoctorWallet = sessionAmount - commissionAmount;
-              } else {
-                const commissionRecord = commissionRecordsMap[s.psychologist_id] || {};
-                const pkg = packagePricesMap[s.psychologist_id]?.find(p => p.id === s.package_id);
-                const packageType = pkg?.type || packageTypeMap[s.package_id] || 'package';
-                const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-                let doctorCommission = 0;
+            // Completed session — use shared utility for consistent per-session split
+            const dc = commissionRecordsMap[s.psychologist_id] || null;
+            const ch = historyRecord || null;
+            toDoctorWallet = computeSessionDoctorWallet(s, dc, ch);
+            commissionToCompany = Math.max(0, sessionPrice - toDoctorWallet);
 
-                if (isInitialPackageSession) {
-                  const firstKey = `${packageType}_first_session`;
-                  doctorCommission = parseFloat(
-                    doctorCommissionPackages[firstKey] ?? commissionRecord?.doctor_commission_first_session_package ?? 0
-                  ) || 0;
-                } else {
-                  const followKey = `${packageType}_followup`;
-                  doctorCommission = parseFloat(
-                    doctorCommissionPackages[followKey] ?? commissionRecord?.doctor_commission_followup_package ?? 0
-                  ) || 0;
-                }
-
-                commissionToCompany = Math.max(0, sessionPrice - doctorCommission);
-                toDoctorWallet = Math.min(sessionPrice, Math.max(0, doctorCommission));
-              }
-
-              if (shouldIncludeForCompleted) {
-                totalCompanyCommissionCompleted += commissionToCompany;
-                completedDoctorWalletInRange += toDoctorWallet;
-              }
-              if (shouldIncludeForCompletedCount && isCompleted) {
-                completedSessionsCount++;
-              }
-            } else {
-              // Individual session
-              if (historyRecord) {
-                // Use commission_history if it exists (already calculated)
-                const commissionAmount = parseFloat(historyRecord.commission_amount || 0);
-                const sessionAmount = parseFloat(historyRecord.session_amount || sessionPrice);
-                commissionToCompany = commissionAmount;
-                toDoctorWallet = sessionAmount - commissionAmount;
-              } else {
-                // Commission history doesn't exist yet - calculate from commission settings
-                const commissionAmounts = commissionAmountsMap[s.psychologist_id];
-                const commissionRecord = commissionRecordsMap[s.psychologist_id] || {};
-                
-                let doctorCommission = 0;
-                
-                // Individual/couple session
-                const isCoupleSession = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
-                if (isCoupleSession) {
-                  const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-                  doctorCommission = parseFloat(
-                    doctorCommissionPackages.couple_session ??
-                    doctorCommissionPackages.cpl_session ??
-                    commissionRecord.doctor_commission_individual ??
-                    0
-                  ) || 0;
-                } else if (isFirstSession && commissionRecord.doctor_commission_first_session !== null && commissionRecord.doctor_commission_first_session !== undefined) {
-                  doctorCommission = parseFloat(commissionRecord.doctor_commission_first_session) || 0;
-                } else if (!isFirstSession && commissionRecord.doctor_commission_followup !== null && commissionRecord.doctor_commission_followup !== undefined) {
-                  doctorCommission = parseFloat(commissionRecord.doctor_commission_followup) || 0;
-                } else {
-                  // Fallback to individual commission calculation
-                  const commissionAmount = parseFloat(commissionAmounts?.individual || 0);
-                  doctorCommission = sessionPrice - commissionAmount;
-                }
-                
-                commissionToCompany = Math.max(0, sessionPrice - doctorCommission);
-                toDoctorWallet = Math.min(sessionPrice, Math.max(0, doctorCommission));
-              }
-              
-              // Add to completed company commission (for net profit calculation) - only if in date range
-              if (shouldIncludeForCompleted) {
-                totalCompanyCommissionCompleted += commissionToCompany;
-                // Completed sessions contribute to eligible doctor wallet in period.
-                completedDoctorWalletInRange += toDoctorWallet;
-              }
-              
-              // Count completed sessions: that month booked only (original_scheduled_date)
-              if (shouldIncludeForCompletedCount && isCompleted) {
-                completedSessionsCount++;
-              }
+            if (shouldIncludeForCompleted) {
+              totalCompanyCommissionCompleted += commissionToCompany;
+              completedDoctorWalletInRange += toDoctorWallet;
+            }
+            if (shouldIncludeForCompletedCount && isCompleted) {
+              completedSessionsCount++;
             }
           } else {
-            // Booked/Non-completed - calculate from commission settings (pending payout)
-            const commissionAmounts = commissionAmountsMap[s.psychologist_id];
-            const commissionRecord = commissionRecordsMap[s.psychologist_id] || {};
-            
-            const isPackage = s.package_id && s.package_id !== 'null' && s.package_id !== 'undefined' && s.package_id !== 'individual' ||
-                             s.session_type === 'Package Session' || 
-                             (s.session_type && s.session_type.toLowerCase().includes('package'));
-            
-            let doctorCommission = 0;
-            
-            if (isPackage && s.package_id) {
-              const pkg = packagePricesMap[s.psychologist_id]?.find(p => p.id === s.package_id);
-              const packageType = pkg?.type || packageTypeMap[s.package_id] || 'package';
-              const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-
-              if (isInitialPackageSession) {
-                const firstKey = `${packageType}_first_session`;
-                doctorCommission = parseFloat(
-                  doctorCommissionPackages[firstKey] ?? commissionRecord?.doctor_commission_first_session_package ?? 0
-                ) || 0;
-              } else {
-                const followKey = `${packageType}_followup`;
-                doctorCommission = parseFloat(
-                  doctorCommissionPackages[followKey] ?? commissionRecord?.doctor_commission_followup_package ?? 0
-                ) || 0;
-              }
-
-              commissionToCompany = Math.max(0, sessionPrice - doctorCommission);
-              toDoctorWallet = Math.min(sessionPrice, Math.max(0, doctorCommission));
-
-              // Pending payout amount should be based on completed-unpaid only.
-            } else {
-              // Individual/couple session
-              const isCoupleSession = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
-              if (isCoupleSession) {
-                const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-                doctorCommission = parseFloat(
-                  doctorCommissionPackages.couple_session ??
-                  doctorCommissionPackages.cpl_session ??
-                  commissionRecord.doctor_commission_individual ??
-                  0
-                ) || 0;
-              } else if (isFirstSession && commissionRecord.doctor_commission_first_session !== null && commissionRecord.doctor_commission_first_session !== undefined) {
-                doctorCommission = parseFloat(commissionRecord.doctor_commission_first_session) || 0;
-              } else if (!isFirstSession && commissionRecord.doctor_commission_followup !== null && commissionRecord.doctor_commission_followup !== undefined) {
-                doctorCommission = parseFloat(commissionRecord.doctor_commission_followup) || 0;
-              } else {
-                // Fallback to individual commission calculation
-                const commissionAmount = parseFloat(commissionAmounts?.individual || 0);
-                doctorCommission = sessionPrice - commissionAmount;
-              }
-              
-              commissionToCompany = Math.max(0, sessionPrice - doctorCommission);
-              toDoctorWallet = Math.min(sessionPrice, Math.max(0, doctorCommission));
-              
-              // Add to pending payout (non-completed sessions including no_show, rescheduled, etc.)
-              // Only include if scheduled_date is in the selected date range
-              // For no_show sessions, shouldIncludeForPending should be set to schedInRange (line 750)
-              // Pending payout amount should be based on completed-unpaid only.
-              
-              // Debug logging for no_show sessions to trace the issue
-              if (s.status === 'no_show' || s.status === 'noshow') {
-                console.log(`[NO_SHOW DEBUG] Session ${s.id.substring(0, 8)}...:`, {
-                  status: s.status,
-                  scheduled_date: s.scheduled_date?.split('T')[0],
-                  original_scheduled_date: s.original_scheduled_date?.split('T')[0],
-                  isCompleted,
-                  shouldIncludeForPending,
-                  shouldIncludeForRevenue,
-                  schedInRange,
-                  mtdFrom,
-                  mtdTo,
-                  doctorWallet: toDoctorWallet,
-                  price: sessionPrice,
-                  'pendingPayoutAfter': pendingPayout,
-                  'totalDoctorWalletBefore': totalDoctorWallet
-                });
-              }
-            }
+            // Booked/Non-completed — pending payout, use shared utility for consistent split
+            const dc = commissionRecordsMap[s.psychologist_id] || null;
+            toDoctorWallet = computeSessionDoctorWallet(s, dc, null);
+            commissionToCompany = Math.max(0, sessionPrice - toDoctorWallet);
           }
           
           // Add to commission totals based on different criteria:
@@ -1428,27 +1275,27 @@ const getDashboard = async (req, res) => {
             let paidHistoryErr = null;
             ({ data: paidHistoryRows, error: paidHistoryErr } = await supabaseAdmin
               .from('commission_history')
-              .select('session_id, session_amount, commission_amount, payment_status, payout_id, payment_id')
+              .select('session_id, session_amount, commission_amount, payment_status, payment_id')
               .in('session_id', completedIds));
 
             if (paidHistoryErr && String(paidHistoryErr.message || '').includes('payment_status')) {
               ({ data: paidHistoryRows, error: paidHistoryErr } = await supabaseAdmin
                 .from('commission_history')
-                .select('session_id, session_amount, commission_amount, payout_id, payment_id')
+                .select('session_id, session_amount, commission_amount, payment_id')
                 .in('session_id', completedIds));
             }
 
             if (paidHistoryErr && String(paidHistoryErr.message || '').includes('session_amount')) {
               ({ data: paidHistoryRows, error: paidHistoryErr } = await supabaseAdmin
                 .from('commission_history')
-                .select('session_id, commission_amount, payment_status, payout_id, payment_id')
+                .select('session_id, commission_amount, payment_status, payment_id')
                 .in('session_id', completedIds));
             }
 
             if (paidHistoryErr && String(paidHistoryErr.message || '').includes('payment_status')) {
               ({ data: paidHistoryRows, error: paidHistoryErr } = await supabaseAdmin
                 .from('commission_history')
-                .select('session_id, commission_amount, payout_id, payment_id')
+                .select('session_id, commission_amount, payment_id')
                 .in('session_id', completedIds));
             }
 
@@ -1456,7 +1303,7 @@ const getDashboard = async (req, res) => {
 
             const sessionPriceMap = new Map((completedInRange || []).map(s => [s.id, parseFloat(s.price || 0) || 0]));
             payout = (paidHistoryRows || []).reduce((sum, row) => {
-              if (!(row?.payment_status === 'paid' || row?.payout_id || row?.payment_id)) return sum;
+              if (!(row?.payment_status === 'paid' || row?.payment_id)) return sum;
               const sessionAmount = parseFloat(row?.session_amount ?? sessionPriceMap.get(row.session_id) ?? 0) || 0;
               const companyCommission = parseFloat(row?.commission_amount || 0) || 0;
               const wallet = Math.max(0, sessionAmount - companyCommission);
@@ -1525,27 +1372,27 @@ const getDashboard = async (req, res) => {
               let chErr = null;
               ({ data: chRows, error: chErr } = await supabaseAdmin
                 .from('commission_history')
-                .select('session_id, session_amount, commission_amount, payment_status, payout_id, payment_id')
+                .select('session_id, session_amount, commission_amount, payment_status, payment_id')
                 .in('session_id', completedIds));
 
               if (chErr && String(chErr.message || '').includes('payment_status')) {
                 ({ data: chRows, error: chErr } = await supabaseAdmin
                   .from('commission_history')
-                  .select('session_id, session_amount, commission_amount, payout_id, payment_id')
+                  .select('session_id, session_amount, commission_amount, payment_id')
                   .in('session_id', completedIds));
               }
 
               if (chErr && String(chErr.message || '').includes('session_amount')) {
                 ({ data: chRows, error: chErr } = await supabaseAdmin
                   .from('commission_history')
-                  .select('session_id, commission_amount, payment_status, payout_id, payment_id')
+                  .select('session_id, commission_amount, payment_status, payment_id')
                   .in('session_id', completedIds));
               }
 
               if (chErr && String(chErr.message || '').includes('payment_status')) {
                 ({ data: chRows, error: chErr } = await supabaseAdmin
                   .from('commission_history')
-                  .select('session_id, commission_amount, payout_id, payment_id')
+                  .select('session_id, commission_amount, payment_id')
                   .in('session_id', completedIds));
               }
 
@@ -1559,7 +1406,7 @@ const getDashboard = async (req, res) => {
                   const companyCommission = parseFloat(row?.commission_amount || 0) || 0;
                   const wallet = Math.max(0, sessionAmount - companyCommission);
                   completedWalletFromHistory += wallet;
-                  if (!(row?.payment_status === 'paid' || row?.payout_id || row?.payment_id)) {
+                  if (!(row?.payment_status === 'paid' || row?.payment_id)) {
                     pendingWalletFromHistory += wallet;
                   }
                 });
@@ -2047,121 +1894,12 @@ const getDoctorPayouts = async (req, res) => {
       let commissionToCompany = 0;
       let toDoctorWallet = sessionPrice;
       
-      if (isCompleted) {
-        if (historyRecord) {
-          const commissionAmount = parseFloat(historyRecord.commission_amount || 0);
-          const sessionAmount = parseFloat(historyRecord.session_amount || sessionPrice);
-          commissionToCompany = commissionAmount;
-          toDoctorWallet = sessionAmount - commissionAmount;
-        } else {
-          // Calculate from commission settings
-          const commissionAmounts = commissionAmountsMap[s.psychologist_id];
-          const commissionRecord = commissionRecordsMap[s.psychologist_id] || {};
-          
-          const isPackage = s.package_id && s.package_id !== 'null' && s.package_id !== 'undefined' && s.package_id !== 'individual' ||
-                           s.session_type === 'Package Session' || 
-                           (s.session_type && s.session_type.toLowerCase().includes('package'));
-          
-          let doctorCommission = 0;
-          
-          if (isPackage) {
-            const pkg = packagePricesMap[s.psychologist_id]?.find(p => p.id === s.package_id);
-            const packageType = pkg?.type || packageTypeMap[s.package_id] || 'package';
-            const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-
-            if (isInitialPackageSession) {
-              const firstKey = `${packageType}_first_session`;
-              doctorCommission = parseFloat(
-                doctorCommissionPackages[firstKey] ?? commissionRecord.doctor_commission_first_session_package ?? 0
-              ) || 0;
-            } else {
-              const followKey = `${packageType}_followup`;
-              doctorCommission = parseFloat(
-                doctorCommissionPackages[followKey] ?? commissionRecord.doctor_commission_followup_package ?? 0
-              ) || 0;
-            }
-
-            if (!doctorCommission) {
-              const commissionAmount = parseFloat(commissionAmounts?.[packageType] || commissionAmounts?.package || 0);
-              doctorCommission = sessionPrice - commissionAmount;
-            }
-          } else {
-            const isCoupleSession = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
-            if (isCoupleSession) {
-              const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-              doctorCommission = parseFloat(
-                doctorCommissionPackages.couple_session ??
-                doctorCommissionPackages.cpl_session ??
-                commissionRecord.doctor_commission_individual ??
-                0
-              ) || 0;
-            } else if (isFirstSession && commissionRecord.doctor_commission_first_session !== null && commissionRecord.doctor_commission_first_session !== undefined) {
-              doctorCommission = parseFloat(commissionRecord.doctor_commission_first_session) || 0;
-            } else if (!isFirstSession && commissionRecord.doctor_commission_followup !== null && commissionRecord.doctor_commission_followup !== undefined) {
-              doctorCommission = parseFloat(commissionRecord.doctor_commission_followup) || 0;
-            } else {
-              const commissionAmount = parseFloat(commissionAmounts?.individual || 0);
-              doctorCommission = sessionPrice - commissionAmount;
-            }
-          }
-          
-          commissionToCompany = Math.max(0, sessionPrice - doctorCommission);
-          toDoctorWallet = Math.min(sessionPrice, Math.max(0, doctorCommission));
-        }
-      } else {
-        // Non-completed: calculate from commission settings
-        const commissionAmounts = commissionAmountsMap[s.psychologist_id];
-        const commissionRecord = commissionRecordsMap[s.psychologist_id] || {};
-        
-        const isPackage = s.package_id && s.package_id !== 'null' && s.package_id !== 'undefined' && s.package_id !== 'individual' ||
-                         s.session_type === 'Package Session' || 
-                         (s.session_type && s.session_type.toLowerCase().includes('package'));
-        
-        let doctorCommission = 0;
-        
-        if (isPackage) {
-          const pkg = packagePricesMap[s.psychologist_id]?.find(p => p.id === s.package_id);
-          const packageType = pkg?.type || packageTypeMap[s.package_id] || 'package';
-          const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-
-          if (isInitialPackageSession) {
-            const firstKey = `${packageType}_first_session`;
-            doctorCommission = parseFloat(
-              doctorCommissionPackages[firstKey] ?? commissionRecord.doctor_commission_first_session_package ?? 0
-            ) || 0;
-          } else {
-            const followKey = `${packageType}_followup`;
-            doctorCommission = parseFloat(
-              doctorCommissionPackages[followKey] ?? commissionRecord.doctor_commission_followup_package ?? 0
-            ) || 0;
-          }
-
-          if (!doctorCommission) {
-            const commissionAmount = parseFloat(commissionAmounts?.[packageType] || commissionAmounts?.package || 0);
-            doctorCommission = sessionPrice - commissionAmount;
-          }
-        } else {
-          const isCoupleSession = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
-          if (isCoupleSession) {
-            const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-            doctorCommission = parseFloat(
-              doctorCommissionPackages.couple_session ??
-              doctorCommissionPackages.cpl_session ??
-              commissionRecord.doctor_commission_individual ??
-              0
-            ) || 0;
-          } else if (isFirstSession && commissionRecord.doctor_commission_first_session !== null && commissionRecord.doctor_commission_first_session !== undefined) {
-            doctorCommission = parseFloat(commissionRecord.doctor_commission_first_session) || 0;
-          } else if (!isFirstSession && commissionRecord.doctor_commission_followup !== null && commissionRecord.doctor_commission_followup !== undefined) {
-            doctorCommission = parseFloat(commissionRecord.doctor_commission_followup) || 0;
-          } else {
-            const commissionAmount = parseFloat(commissionAmounts?.individual || 0);
-            doctorCommission = sessionPrice - commissionAmount;
-          }
-        }
-        
-        commissionToCompany = Math.max(0, sessionPrice - doctorCommission);
-        toDoctorWallet = Math.min(sessionPrice, Math.max(0, doctorCommission));
+      {
+        // Use shared utility — consistent per-session split for packages everywhere
+        const dc = commissionRecordsMap[s.psychologist_id] || null;
+        const ch = historyRecord || null;
+        toDoctorWallet = computeSessionDoctorWallet(s, dc, ch);
+        commissionToCompany = Math.max(0, sessionPrice - toDoctorWallet);
       }
       
       // Initialize doctor payout if not exists
@@ -2658,8 +2396,7 @@ const getSessionDetails = async (req, res) => {
           child_name,
           child_age,
           phone_number,
-          date_of_birth,
-          gender,
+          email,
           user:users(
             email
           )
@@ -2760,12 +2497,113 @@ const getSessionDetails = async (req, res) => {
       }
     }
 
+    // Extract Razorpay / payment gateway info from wix_payload for Wix sessions
+    const wixPayDetails = session.wix_payload?.paymentDetails || null;
+    const wixVendorDetails = wixPayDetails?.wixPayMultipleDetails?.[0] || null;
+    const wixPaymentInfo = wixVendorDetails ? {
+      vendor: wixVendorDetails.paymentVendorName || null,           // e.g. "Razorpay"
+      razorpay_order_id: wixVendorDetails.orderId || null,          // Razorpay order ID from Wix
+      wix_transaction_id: wixVendorDetails.txId || null,            // Wix transaction ID
+      order_status: wixVendorDetails.orderStatus || null,           // e.g. "COMPLETE"
+      amount: wixVendorDetails.orderAmount || null,
+      approved_at: wixVendorDetails.orderApprovalTime || null,
+    } : null;
+
     // Get commission data
     const { data: commission } = await supabaseAdmin
       .from('commission_history')
       .select('*')
       .eq('session_id', sessionId)
       .single();
+
+    // Determine first vs follow-up by checking if client has any earlier session
+    let isFirstSession = false;
+    if (session.client_id) {
+      const { data: earlierSessions } = await supabaseAdmin
+        .from('sessions')
+        .select('id, created_at')
+        .eq('client_id', session.client_id)
+        .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+        .lt('created_at', session.created_at)
+        .limit(1);
+      isFirstSession = !earlierSessions?.length;
+    }
+
+    const sessionAmount = parseFloat(
+      commission?.session_amount ??
+      paymentDetails?.amount ??
+      session.price ??
+      0
+    ) || 0;
+
+    // Fetch psychologist commission settings from doctor_commissions table
+    let commissionSettings = null;
+    if (session.psychologist_id) {
+      const { data: commSettingsRows } = await supabaseAdmin
+        .from('doctor_commissions')
+        .select('commission_amounts, commission_amount_individual, commission_amount_package, doctor_commission_first_session, doctor_commission_followup, doctor_commission_individual, doctor_commission_first_session_package, doctor_commission_followup_package, doctor_commission_packages')
+        .eq('psychologist_id', session.psychologist_id)
+        .eq('is_active', true)
+        .order('effective_from', { ascending: false })
+        .limit(1);
+      commissionSettings = commSettingsRows?.[0] || null;
+    }
+
+    // Helper: derive company commission from doctor_commissions settings
+    const deriveDefaultCommission = (cs, sessionType, amount, firstSession) => {
+      if (!cs || amount <= 0) return null;
+      const type = String(sessionType || '').toLowerCase();
+      const isCouple = type.includes('couple') || type.includes('cpl');
+      const isPackage = type.includes('package');
+      const dp = cs.doctor_commission_packages || {};
+
+      let doctorAmount = 0;
+
+      if (isCouple) {
+        doctorAmount = parseFloat(dp.couple_session ?? dp.cpl_session ?? cs.doctor_commission_individual ?? 0) || 0;
+      } else if (isPackage) {
+        doctorAmount = parseFloat(dp.package_followup ?? cs.doctor_commission_followup_package ?? cs.doctor_commission_followup ?? 0) || 0;
+      } else {
+        // Individual: use first vs followup rate correctly
+        if (firstSession && cs.doctor_commission_first_session != null) {
+          doctorAmount = parseFloat(cs.doctor_commission_first_session) || 0;
+        } else if (!firstSession && cs.doctor_commission_followup != null) {
+          doctorAmount = parseFloat(cs.doctor_commission_followup) || 0;
+        } else if (cs.doctor_commission_individual != null) {
+          doctorAmount = parseFloat(cs.doctor_commission_individual) || 0;
+        } else if (cs.commission_amounts?.individual != null) {
+          const companyFixed = parseFloat(cs.commission_amounts.individual) || 0;
+          doctorAmount = Math.max(0, amount - companyFixed);
+        } else if (cs.commission_amount_individual != null) {
+          const companyFixed = parseFloat(cs.commission_amount_individual) || 0;
+          doctorAmount = Math.max(0, amount - companyFixed);
+        }
+      }
+
+      return Math.max(0, amount - Math.min(doctorAmount, amount));
+    };
+
+    let companyCommission;
+    let commissionSource;
+
+    if (commission?.commission_amount != null) {
+      companyCommission = parseFloat(commission.commission_amount) || 0;
+      commissionSource = 'commission_history';
+    } else if (session.therapist_commission != null && parseFloat(session.therapist_commission) > 0) {
+      // therapist_commission stores doctor wallet amount (only use if explicitly set to non-zero)
+      const tc = parseFloat(session.therapist_commission) || 0;
+      companyCommission = Math.max(0, sessionAmount - tc);
+      commissionSource = 'session';
+    } else {
+      // Derive from psychologist commission settings
+      const derived = deriveDefaultCommission(commissionSettings, session.session_type, sessionAmount, isFirstSession);
+      companyCommission = derived;
+      commissionSource = derived != null ? 'calculated' : 'unavailable';
+    }
+
+    const doctorWallet = companyCommission != null
+      ? Math.max(0, sessionAmount - companyCommission)
+      : null;
 
     await auditLogger.logAction({
       userId: req.user.id,
@@ -2785,12 +2623,20 @@ const getSessionDetails = async (req, res) => {
     res.json(successResponse({
       session: {
         id: session.id,
-        session_date: session.scheduled_date,
-        session_time: session.scheduled_time,
+        source: session.source || null,
+        wix_booking_id: session.wix_booking_id || null,
+        wix_order_number: session.wix_order_number || null,
+        wix_payload: session.wix_payload || null,
+        scheduled_date: session.scheduled_date,
+        scheduled_time: session.scheduled_time,
+        session_date: session.scheduled_date,   // legacy alias
+        session_time: session.scheduled_time,   // legacy alias
         status: session.status,
         session_type: session.session_type,
         price: session.price,
         package_id: session.package_id,
+        package_session_number: session.package_session_number ?? null,
+        session_count: session.session_count ?? null,
         booking_created_at: bookedInstant,
         created_at: session.created_at,
         updated_at: session.updated_at,
@@ -2809,14 +2655,23 @@ const getSessionDetails = async (req, res) => {
           first_name: session.client.first_name,
           last_name: session.client.last_name,
           child_name: session.client.child_name,
+          child_age: session.client.child_age,
           phone_number: session.client.phone_number,
-          email: session.client.user?.email || null,
-          date_of_birth: session.client.date_of_birth,
-          gender: session.client.gender
+          email: session.client.email || session.client.user?.email || null,
         } : null,
         payment: paymentDetails,
+        wix_payment: wixPaymentInfo,
         receipt: receiptDetails,
-        commission: commission || null
+        is_first_session: isFirstSession,
+        commission: commission || null,
+        commission_split: {
+          session_amount: sessionAmount,
+          company_commission: companyCommission,
+          doctor_wallet: doctorWallet,
+          is_first_session: isFirstSession,
+          commission_payment_status: commission?.payment_status || null,
+          source: commissionSource,
+        }
       }
     }, 'Session details fetched successfully'));
 
@@ -2825,6 +2680,61 @@ const getSessionDetails = async (req, res) => {
     res.status(500).json(
       errorResponse('Internal server error while fetching session details')
     );
+  }
+};
+
+const getPsychologistOptions = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    if (!['finance', 'admin', 'superadmin'].includes(userRole)) {
+      return res.status(403).json(errorResponse('Access denied. Finance role required.'));
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, first_name, last_name, email')
+      .order('first_name', { ascending: true });
+
+    if (error) throw error;
+
+    res.json(successResponse({ psychologists: data || [] }, 'Psychologists fetched successfully'));
+  } catch (error) {
+    console.error('Get finance psychologist options error:', error);
+    res.status(500).json(errorResponse('Internal server error while fetching psychologists'));
+  }
+};
+
+const getClientOptions = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    if (!['finance', 'admin', 'superadmin'].includes(userRole)) {
+      return res.status(403).json(errorResponse('Access denied. Finance role required.'));
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('clients')
+      .select(`
+        id,
+        user_id,
+        first_name,
+        last_name,
+        phone_number,
+        user:users(email)
+      `)
+      .order('first_name', { ascending: true });
+
+    if (error) throw error;
+
+    const clients = (data || []).map((client) => ({
+      ...client,
+      email: Array.isArray(client.user) ? client.user?.[0]?.email || null : client.user?.email || null,
+      display_name: `${client.first_name || ''} ${client.last_name || ''}`.trim() || (Array.isArray(client.user) ? client.user?.[0]?.email : client.user?.email) || 'Unknown',
+    }));
+
+    res.json(successResponse({ clients }, 'Clients fetched successfully'));
+  } catch (error) {
+    console.error('Get finance client options error:', error);
+    res.status(500).json(errorResponse('Internal server error while fetching clients'));
   }
 };
 
@@ -4766,8 +4676,7 @@ const getPendingPayouts = async (req, res) => {
         session_amount,
         commission_amount,
         session_type,
-        payment_status,
-        payout_id
+        payment_status
       `)
       .in('session_id', sessionIds));
 
@@ -4779,8 +4688,7 @@ const getPendingPayouts = async (req, res) => {
           psychologist_id,
           commission_amount,
           session_type,
-          payment_status,
-          payout_id
+          payment_status
         `)
         .in('session_id', sessionIds));
     }
@@ -4824,7 +4732,7 @@ const getPendingPayouts = async (req, res) => {
     // Filter out sessions that have already been paid (have payout_id or payment_status = 'paid')
     const paidSessionIds = new Set(
       (commissionHistory || [])
-        .filter(ch => ch.payment_status === 'paid' || ch.payout_id)
+        .filter(ch => ch.payment_status === 'paid')
         .map(ch => ch.session_id)
     );
 
@@ -5142,7 +5050,6 @@ const processPayout = async (req, res) => {
       .from('commission_history')
       .update({
         payment_status: 'paid',
-        payout_id: payout.id,
         updated_at: new Date().toISOString()
       })
       .eq('psychologist_id', psychologist_id)
@@ -5354,7 +5261,6 @@ const markPayoutAsPaid = async (req, res) => {
       .from('commission_history')
       .update({
         payment_status: 'paid',
-        payout_id: payout.id,
         updated_at: new Date().toISOString()
       })
       .in('session_id', sessionIds)
@@ -5829,11 +5735,117 @@ const createIncomeSource = async (req, res) => {
   }
 };
 
+/**
+ * Update commission split for a single session.
+ * Upserts into commission_history (source of truth for finance dashboard).
+ * Also syncs sessions.therapist_commission as a fallback field.
+ */
+const updateSessionCommission = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    if (!['finance', 'admin', 'superadmin'].includes(userRole)) {
+      return res.status(403).json(errorResponse('Access denied. Finance role required.'));
+    }
+
+    const { sessionId } = req.params;
+    const { commission_amount } = req.body;
+
+    if (commission_amount === undefined || commission_amount === null || isNaN(Number(commission_amount))) {
+      return res.status(400).json(errorResponse('commission_amount is required and must be a number'));
+    }
+
+    const companyCommission = Math.max(0, Number(commission_amount));
+
+    // Fetch session to get session_amount and psychologist_id
+    const { data: session, error: sessionError } = await supabaseAdmin
+      .from('sessions')
+      .select('id, price, psychologist_id, payment_id')
+      .eq('id', sessionId)
+      .single();
+
+    if (sessionError || !session) {
+      return res.status(404).json(errorResponse('Session not found'));
+    }
+
+    const sessionAmount = parseFloat(session.price || 0);
+    const doctorWallet = Math.max(0, sessionAmount - companyCommission);
+
+    // Check if commission_history row already exists
+    const { data: existing } = await supabaseAdmin
+      .from('commission_history')
+      .select('id')
+      .eq('session_id', sessionId)
+      .maybeSingle();
+
+    let upsertError;
+    if (existing?.id) {
+      // Update existing row
+      ({ error: upsertError } = await supabaseAdmin
+        .from('commission_history')
+        .update({
+          commission_amount: companyCommission,
+          session_amount: sessionAmount,
+        })
+        .eq('session_id', sessionId));
+    } else {
+      // Insert new row
+      ({ error: upsertError } = await supabaseAdmin
+        .from('commission_history')
+        .insert({
+          session_id: sessionId,
+          psychologist_id: session.psychologist_id,
+          payment_id: session.payment_id || null,
+          commission_amount: companyCommission,
+          session_amount: sessionAmount,
+          payment_status: 'pending',
+        }));
+    }
+
+    if (upsertError) {
+      console.error('updateSessionCommission upsert error:', upsertError.message);
+      return res.status(500).json(errorResponse('Failed to update commission record'));
+    }
+
+    // Sync sessions.therapist_commission (doctor wallet) as fallback
+    await supabaseAdmin
+      .from('sessions')
+      .update({ therapist_commission: doctorWallet })
+      .eq('id', sessionId);
+
+    await auditLogger.logAction({
+      userId: req.user.id,
+      userEmail: req.user.email,
+      userRole,
+      action: 'SESSION_COMMISSION_UPDATED',
+      resource: 'sessions',
+      resourceId: sessionId,
+      details: { commission_amount: companyCommission, doctor_wallet: doctorWallet, session_amount: sessionAmount },
+      endpoint: `/api/finance/sessions/${sessionId}/commission`,
+      method: 'PUT',
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    }).catch(() => {});
+
+    return res.json(successResponse({
+      session_id: sessionId,
+      session_amount: sessionAmount,
+      commission_amount: companyCommission,
+      doctor_wallet: doctorWallet,
+    }, 'Commission updated successfully'));
+
+  } catch (error) {
+    console.error('updateSessionCommission error:', error);
+    return res.status(500).json(errorResponse('Internal server error'));
+  }
+};
+
 module.exports = {
   getDashboard,
   getSessions,
   getDoctorBookings,
   getSessionDetails,
+  getPsychologistOptions,
+  getClientOptions,
   getRevenue,
   getExpenses,
   createExpense,
@@ -5842,6 +5854,7 @@ module.exports = {
   deleteExpense,
   getCommissions,
   updateCommissionRate,
+  updateSessionCommission,
   getPendingPayouts,
   processPayout,
   getIncome,
@@ -6133,11 +6146,8 @@ const getPayoutDetails = async (req, res) => {
       );
     }
 
-    // Get related commission history
-    const { data: commissions } = await supabaseAdmin
-      .from('commission_history')
-      .select('*')
-      .eq('payout_id', payoutId);
+    // commission_history has no payout_id column — payout↔commission link not stored
+    const commissions = [];
 
     await auditLogger.logAction({
       userId: req.user.id,
@@ -6172,6 +6182,8 @@ module.exports = {
   getSessions,
   getDoctorBookings,
   getSessionDetails,
+  getPsychologistOptions,
+  getClientOptions,
   getRevenue,
   getExpenses,
   createExpense,
@@ -6378,6 +6390,8 @@ module.exports = {
   getSessions,
   getDoctorBookings,
   getSessionDetails,
+  getPsychologistOptions,
+  getClientOptions,
   getRevenue,
   getExpenses,
   createExpense,
@@ -6386,6 +6400,7 @@ module.exports = {
   deleteExpense,
   getCommissions,
   updateCommissionRate,
+  updateSessionCommission,
   getPendingPayouts,
   processPayout,
   getIncome,

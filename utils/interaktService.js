@@ -178,9 +178,7 @@ async function sendTemplateWithRetry(toPhone, templateName, languageCode = 'en',
 // then sync them to your Interakt dashboard.
 const TEMPLATES = {
   BOOKING_CONFIRMATION: process.env.INTERAKT_TPL_BOOKING_CONFIRMATION || 'booking_confirmation_v1',
-  WELCOME_CLIENT: process.env.INTERAKT_TPL_WELCOME_CLIENT || 'welcome_client',
   SESSION_NOTIFICATION_PSYCHOLOGIST: process.env.INTERAKT_TPL_SESSION_NOTIFICATION || 'session_notification_psychologist',
-  WELCOME_PSYCHOLOGIST: process.env.INTERAKT_TPL_WELCOME_PSYCHOLOGIST || 'welcome_psychologist',
 };
 
 /**
@@ -232,21 +230,6 @@ async function sendBookingConfirmation(toPhone, details) {
 }
 
 /**
- * Send welcome credentials to a new client.
- *
- * Expected template body variables (in order):
- *   {{1}} = email
- *   {{2}} = temporary password
- *   {{3}} = login URL
- */
-async function sendWelcomeClient(toPhone, { email, tempPassword, loginUrl }) {
-  return sendTemplateWithRetry(toPhone, TEMPLATES.WELCOME_CLIENT, 'en', {
-    bodyValues: [email, tempPassword, loginUrl || 'https://www.koott.com/login'],
-    callbackData: 'wix_welcome_client',
-  });
-}
-
-/**
  * Send session notification to psychologist.
  *
  * Expected template body variables (in order):
@@ -292,28 +275,11 @@ async function sendSessionNotificationPsychologist(toPhone, details) {
   });
 }
 
-/**
- * Send welcome credentials to a new psychologist.
- *
- * Expected template body variables (in order):
- *   {{1}} = email
- *   {{2}} = temporary password
- *   {{3}} = login URL
- */
-async function sendWelcomePsychologist(toPhone, { email, tempPassword, loginUrl }) {
-  return sendTemplateWithRetry(toPhone, TEMPLATES.WELCOME_PSYCHOLOGIST, 'en', {
-    bodyValues: [email, tempPassword, loginUrl || 'https://www.koott.com/psychologist/login'],
-    callbackData: 'wix_welcome_psychologist',
-  });
-}
-
 module.exports = {
   parsePhone,
   sendTemplateMessage,
   sendTemplateWithRetry,
   sendBookingConfirmation,
-  sendWelcomeClient,
   sendSessionNotificationPsychologist,
-  sendWelcomePsychologist,
   TEMPLATES,
 };

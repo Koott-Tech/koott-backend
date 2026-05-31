@@ -124,6 +124,64 @@ const buildAdminManualWixMirror = ({
   };
 };
 
+const normalizeManualSessionSelection = (rawType, packageData = null) => {
+  const input = String(rawType || '').trim().toLowerCase();
+  const packageType = String(packageData?.package_type || '').trim().toLowerCase();
+
+  if (packageData) {
+    const isCouplePackage = packageType.includes('couple');
+    return {
+      sessionType: isCouplePackage ? 'couple' : 'package',
+      sessionCount: Number(packageData.session_count) || 1,
+      isPackage: true,
+      isCouplePackage,
+    };
+  }
+
+  if (input === 'couple') {
+    return { sessionType: 'couple', sessionCount: 1, isPackage: false, isCouplePackage: false };
+  }
+  if (input === 'package_3') {
+    return { sessionType: 'package', sessionCount: 3, isPackage: true, isCouplePackage: false };
+  }
+  if (input === 'package_6') {
+    return { sessionType: 'package', sessionCount: 6, isPackage: true, isCouplePackage: false };
+  }
+  if (input === 'package_9') {
+    return { sessionType: 'package', sessionCount: 9, isPackage: true, isCouplePackage: false };
+  }
+  if (input === 'couple_package_3') {
+    return { sessionType: 'couple', sessionCount: 3, isPackage: true, isCouplePackage: true };
+  }
+
+  return { sessionType: 'individual', sessionCount: 1, isPackage: false, isCouplePackage: false };
+};
+
+const getManualSessionDurationMinutes = (sessionType, packageData = null) => {
+  if (packageData?.package_type) {
+    const pkgType = String(packageData.package_type).toLowerCase();
+    if (pkgType.includes('couple')) return 80;
+    return getMeetEventDurationMinutes(packageData.package_type);
+  }
+
+  if (sessionType === 'couple' || sessionType === 'couple_package') {
+    return 80;
+  }
+
+  return 50;
+};
+
+const getManualSessionLabel = (sessionType, sessionStage, packageData = null, sessionCount = 1) => {
+  const stageLabel = sessionStage === 'follow_up' ? 'Follow-up' : 'First session';
+  const totalSessions = Number(packageData?.session_count) || Number(sessionCount) || 1;
+  if (totalSessions > 1) {
+    const prefix = sessionType === 'couple' ? 'Couple package' : 'Package';
+    return `${prefix} of ${totalSessions} (${stageLabel})`;
+  }
+  if (sessionType === 'couple') return `Couple session (${stageLabel})`;
+  return `Individual session (${stageLabel})`;
+};
+
 // Helper function to get availability dates for a day of the week
 const getAvailabilityDatesForDay = (dayName, numOccurrences = 1) => {
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -211,6 +269,8 @@ const createManualBooking = async (req, res) => {
       client_id, 
       psychologist_id, 
       package_id, 
+      session_type,
+      session_stage,
       scheduled_date, 
       scheduled_time, 
       amount,
@@ -350,6 +410,12 @@ const createManualBooking = async (req, res) => {
       packageData = pkg;
     }
 
+    const manualSelection = normalizeManualSessionSelection(session_type, packageData);
+    const manualSessionType = manualSelection.sessionType;
+    const manualSessionStage = session_stage === 'follow_up' ? 'follow_up' : 'first';
+    const manualSessionCount = manualSelection.sessionCount;
+    const manualPackageSessionNumber = manualSessionCount > 1 ? (manualSessionStage === 'follow_up' ? 2 : 1) : null;
+
     // ============================================
     // STEP 5: MANUAL DATE/TIME ENTRY
     // ============================================
@@ -400,7 +466,7 @@ const createManualBooking = async (req, res) => {
       client_id: client.id,
       package_id: package_id || null,
       amount: amount,
-      session_type: packageData ? 'package' : 'individual',
+      session_type: manualSessionType,
       status: 'success',
       payment_method: normalizedPaymentMethod,
       receipt_url: normalizedReceiptUrl,
@@ -467,7 +533,7 @@ const createManualBooking = async (req, res) => {
     try {
       console.log('🔄 [MANUAL BOOKING] Creating Google Meet link...');
 
-      const manualMeetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
+      const manualMeetMinutes = getManualSessionDurationMinutes(manualSessionType, packageData);
       const clientName = getClientDisplayName(client, 'Client');
       const psychologistName = getPsychologistDisplayName(psychologist);
       const sessionData = {
@@ -554,6 +620,9 @@ const createManualBooking = async (req, res) => {
       client_id: client.id,
       psychologist_id: psychologist_id,
       package_id: package_id || null,
+      session_type: manualSessionType,
+      session_count: manualSessionCount,
+      package_session_number: manualPackageSessionNumber,
       scheduled_date: scheduled_date,
       scheduled_time: scheduledTimeNormalized,
       status: 'booked',
@@ -563,6 +632,7 @@ const createManualBooking = async (req, res) => {
       session_notes: notes || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      booking_created_at: new Date().toISOString(),
       original_scheduled_date: scheduled_date
     };
 
@@ -622,9 +692,7 @@ const createManualBooking = async (req, res) => {
     // STEP 8.5: CREATE WIX DISCOVERY MIRROR ROW
     // ============================================
     try {
-      const manualSessionType = packageData ? 'package' : 'individual';
-      const manualSessionCount = packageData?.session_count || 1;
-      const manualMeetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
+      const manualMeetMinutes = getManualSessionDurationMinutes(manualSessionType, packageData);
       const syntheticWixBookingId = `admin_manual_${Date.now()}`;
       const wixMirrorRow = buildAdminManualWixMirror({
         syntheticWixBookingId,
@@ -645,6 +713,17 @@ const createManualBooking = async (req, res) => {
         title: psychologist.first_name ? `${psychologist.first_name} ${psychologist.last_name || ''}`.trim() : 'Manual booking',
         notes: notes || null,
       });
+
+      wixMirrorRow.package_session_number = manualPackageSessionNumber;
+      wixMirrorRow.payload.planSessionNumber = manualPackageSessionNumber;
+      wixMirrorRow.payload.creditsAvailable = manualSessionCount;
+      wixMirrorRow.payload.manualSessionStage = manualSessionStage;
+      wixMirrorRow.payload.manualSessionLabel = getManualSessionLabel(
+        manualSessionType,
+        manualSessionStage,
+        packageData,
+        manualSessionCount
+      );
 
       const { error: wixMirrorError } = await supabaseAdmin
         .from('wix_bookings')
@@ -776,19 +855,22 @@ const createManualBooking = async (req, res) => {
     // ============================================
     // Send notifications asynchronously - don't block response
     (async () => {
-      const sessionTypeLabel = packageData
-        ? `Package of ${packageData.session_count}`
-        : 'Individual session';
+      const sessionTypeLabel = getManualSessionLabel(
+        manualSessionType,
+        manualSessionStage,
+        packageData,
+        manualSessionCount
+      );
       // First session just booked: completedSessions = 0 so template shows "1 of N sessions booked"
-      const packageInfoForNotification = packageData
+      const packageInfoForNotification = manualSessionCount > 1
         ? {
-            totalSessions: packageData.session_count,
-            completedSessions: 0,
-            remainingSessions: Math.max((packageData.session_count || 1) - 1, 0),
-            packageType: packageData.package_type || `package_${packageData.session_count}`
+            totalSessions: manualSessionCount,
+            completedSessions: Math.max((manualPackageSessionNumber || 1) - 1, 0),
+            remainingSessions: Math.max(manualSessionCount - (manualPackageSessionNumber || 1), 0),
+            packageType: packageData?.package_type || (manualSessionType === 'couple' ? `couple_package_${manualSessionCount}` : `package_${manualSessionCount}`)
           }
         : null;
-      const manualNotifyMeetMinutes = getMeetEventDurationMinutes(packageData?.package_type);
+      const manualNotifyMeetMinutes = getManualSessionDurationMinutes(manualSessionType, packageData);
 
       try {
         // Email notifications
@@ -1176,6 +1258,7 @@ const createRecordOnlyBooking = async (req, res) => {
       session_notes: notes || null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      booking_created_at: new Date().toISOString(),
       original_scheduled_date: scheduled_date
     };
 
@@ -1253,6 +1336,46 @@ const createRecordOnlyBooking = async (req, res) => {
           .from('client_packages')
           .insert([clientPackageData]);
       }
+    }
+
+    // Create wix_bookings mirror so this record appears on the Wix Discovery page
+    try {
+      const syntheticWixBookingId = `admin_manual_${Date.now()}`;
+      const sessionType = package_id && packageData
+        ? (packageData.package_type?.includes('couple') ? 'couple' : 'package')
+        : 'individual';
+      const sessionCount = packageData?.session_count || 1;
+
+      const wixMirrorRow = buildAdminManualWixMirror({
+        syntheticWixBookingId,
+        scheduledDate: scheduled_date,
+        scheduledTime: scheduledTimeNormalized,
+        durationMinutes: 50,
+        sessionType,
+        sessionCount,
+        therapistName: `${psychologist.first_name || ''} ${psychologist.last_name || ''}`.trim(),
+        therapistEmail: psychologist.email || null,
+        psychologistId: psychologist_id,
+        client,
+        amount,
+        currency: 'INR',
+        packageId: package_id || null,
+        sessionId: session.id,
+        title: `${psychologist.first_name || ''} ${psychologist.last_name || ''}`.trim() || 'Record-only booking',
+        notes: notes || null,
+      });
+      wixMirrorRow.status = sessionStatus;
+      wixMirrorRow.payload.status = sessionStatus;
+
+      const { error: mirrorErr } = await supabaseAdmin.from('wix_bookings').insert([wixMirrorRow]);
+      if (mirrorErr) {
+        console.warn('⚠️ [RECORD ONLY] Failed to create wix_bookings mirror:', mirrorErr.message);
+      } else {
+        await supabaseAdmin.from('sessions').update({ wix_booking_id: syntheticWixBookingId }).eq('id', session.id);
+        console.log('✅ [RECORD ONLY] Wix discovery mirror created:', syntheticWixBookingId);
+      }
+    } catch (mirrorCreateErr) {
+      console.warn('⚠️ [RECORD ONLY] Unexpected wix mirror error:', mirrorCreateErr.message);
     }
 
     const { data: completeSession } = await supabaseAdmin
@@ -1669,18 +1792,33 @@ const getPlatformStats = async (req, res) => {
       return count ?? 0;
     };
 
+    // Cancelled needs its own base query — the default base excludes cancelled
+    const countCancelled = async () => {
+      let q = supabaseAdmin
+        .from('sessions')
+        .select('id', { count: 'exact', head: true })
+        .neq('session_type', 'free_assessment')
+        .eq('status', 'cancelled');
+      if (start_date) q = q.gte('booking_created_at', `${start_date}T00:00:00.000+05:30`);
+      if (end_date)   q = q.lte('booking_created_at', `${end_date}T23:59:59.999+05:30`);
+      const { count } = await q;
+      return count ?? 0;
+    };
+
     const [
       completedN,
       rescheduledN,
       pendingN,
       noShowN,
       upcomingN,
+      cancelledN,
     ] = await Promise.all([
       countStatus((b) => b.eq('status', 'completed')),
       countStatus((b) => b.eq('status', 'rescheduled')),
       countStatus((b) => b.in('status', ['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed']).lt('scheduled_date', today)),
       countStatus((b) => b.in('status', ['no_show', 'noshow'])),
       countStatus((b) => b.in('status', ['booked', 'rescheduled']).gte('scheduled_date', today)),
+      countCancelled(),
     ]);
 
     const bookingStatuses = {
@@ -1689,7 +1827,7 @@ const getPlatformStats = async (req, res) => {
       pending: pendingN,
       completed: completedN,
       noShow: noShowN,
-      cancelled: 0,
+      cancelled: cancelledN,
     };
 
     return res.json(successResponse({

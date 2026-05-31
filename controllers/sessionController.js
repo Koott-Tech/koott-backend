@@ -2176,6 +2176,18 @@ const completeSession = async (req, res) => {
       );
     }
 
+    // Mirror status to wix_bookings so Wix Discovery page shows completed
+    if (updatedSession?.wix_booking_id) {
+      try {
+        await supabaseAdmin
+          .from('wix_bookings')
+          .update({ status: 'completed', synced_at: new Date().toISOString() })
+          .eq('wix_booking_id', updatedSession.wix_booking_id);
+      } catch (wixMirrorErr) {
+        console.warn('⚠️ Failed to mirror completed status to wix_bookings:', wixMirrorErr.message);
+      }
+    }
+
     // If this is a free assessment, also update the free_assessments table status
     if (isFreeAssessment) {
       try {
@@ -2449,10 +2461,22 @@ const markSessionAsNoShow = async (req, res) => {
       );
     }
 
+    // Mirror status to wix_bookings so Wix Discovery page shows no_show
+    if (updatedSession?.wix_booking_id) {
+      try {
+        await supabaseAdmin
+          .from('wix_bookings')
+          .update({ status: 'no_show', synced_at: new Date().toISOString() })
+          .eq('wix_booking_id', updatedSession.wix_booking_id);
+      } catch (wixMirrorErr) {
+        console.warn('⚠️ Failed to mirror no_show status to wix_bookings:', wixMirrorErr.message);
+      }
+    }
+
     // No WhatsApp, email, or in-app notification for no-show (per product requirement)
 
     console.log(`✅ Session ${sessionId} marked as no-show by ${userRole} ${userId}`);
-    
+
     res.json(
       successResponse(updatedSession, 'Session marked as no-show successfully')
     );
@@ -2551,5 +2575,71 @@ module.exports = {
   handleRescheduleRequest,
   completeSession,
   markSessionAsNoShow,
-  getRescheduleRequests
+  getRescheduleRequests,
+  cancelRefundSession,
 };
+
+/**
+ * PATCH /admin/sessions/:sessionId/cancel-refund
+ * Mark a session as refunded + remove Google Calendar event so the slot reopens.
+ */
+async function cancelRefundSession(req, res) {
+  try {
+    const { sessionId } = req.params;
+
+    const { data: session, error: fetchErr } = await supabaseAdmin
+      .from('sessions')
+      .select('id, status, psychologist_id, wix_booking_id, google_calendar_event_id')
+      .eq('id', sessionId)
+      .single();
+
+    if (fetchErr || !session) {
+      return res.status(404).json(errorResponse('Session not found'));
+    }
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('sessions')
+      .update({ status: 'refunded', updated_at: new Date().toISOString() })
+      .eq('id', sessionId);
+    if (updateErr) return res.status(500).json(errorResponse(updateErr.message));
+
+    // Mirror to wix_bookings if linked (no locally_modified — terminal status protects from sync)
+    if (session.wix_booking_id) {
+      await supabaseAdmin
+        .from('wix_bookings')
+        .update({ status: 'cancelled', synced_at: new Date().toISOString() })
+        .eq('wix_booking_id', session.wix_booking_id);
+    }
+
+    // Remove Google Calendar event
+    let calendarEventRemoved = false;
+    if (session.google_calendar_event_id) {
+      try {
+        let userAuth = null;
+        if (session.psychologist_id) {
+          const { data: psych } = await supabaseAdmin
+            .from('psychologists')
+            .select('google_calendar_credentials')
+            .eq('id', session.psychologist_id)
+            .single();
+          const creds = psych?.google_calendar_credentials;
+          if (creds?.access_token) userAuth = { access_token: creds.access_token, refresh_token: creds.refresh_token, expiry_date: creds.expiry_date };
+        }
+        const delResult = await meetLinkService.deleteCalendarEvent(session.google_calendar_event_id, userAuth);
+        calendarEventRemoved = !!delResult?.success;
+        if (!calendarEventRemoved) console.warn('[cancelRefundSession] calendar delete non-fatal:', delResult?.error);
+      } catch (calErr) {
+        console.warn('[cancelRefundSession] calendar delete failed (non-fatal):', calErr.message || calErr);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Session cancelled and marked as refunded. Calendar event removed.',
+      data: { sessionId, calendarEventRemoved },
+    });
+  } catch (e) {
+    console.error('[cancelRefundSession]', e);
+    return res.status(500).json(errorResponse(e.message || String(e)));
+  }
+}

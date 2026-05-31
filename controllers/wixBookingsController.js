@@ -1,5 +1,6 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { getBookingTimeColumnKey } = require('../utils/sessionsBookingTimeColumn');
+const meetLinkService = require('../utils/meetLinkService');
 const { fetchWixDiscover, extractBookingsList } = require('../utils/wixDiscoverClient');
 const { discoverRowToDb, discoverRowToSessionDb, wixBookingCreatedIso } = require('../utils/wixBookingMapper');
 const { resolveClientsForBookings } = require('../services/wixClientResolverService');
@@ -110,34 +111,31 @@ function bookingDisplayNameProbablySamePsychologist(bookingDisplayNameRaw, psych
 }
 
 /**
- * Fetch wix_booking_ids that have been locally modified (edited/deleted by admin).
- * These rows must be excluded from Wix sync upserts so local edits are never overwritten.
+ * Fetch wix_booking_ids that must be excluded from Wix sync upserts.
+ * Two categories:
+ *  1. locally_modified=true  → admin edited fields (therapist, price, notes, etc.)
+ *  2. Terminal statuses       → completed/no_show/cancelled/refunded/deleted
+ *     (status-only changes don't set locally_modified so they don't appear as "Edited locally")
  */
 async function getLocallyModifiedWixIds() {
+  const TERMINAL = ['completed', 'no_show', 'cancelled', 'refunded', 'deleted'];
   try {
-    // Check wix_bookings table
-    const { data: wixData, error: wixError } = await supabaseAdmin
-      .from('wix_bookings')
-      .select('wix_booking_id')
-      .eq('locally_modified', true);
-    
-    // Check sessions table
-    const { data: sessionData, error: sessionError } = await supabaseAdmin
-      .from('sessions')
-      .select('wix_booking_id')
-      .eq('locally_modified', true)
-      .not('wix_booking_id', 'is', null);
+    const [
+      { data: wixEdited },
+      { data: wixTerminal },
+      { data: sessEdited },
+      { data: sessTerminal },
+    ] = await Promise.all([
+      supabaseAdmin.from('wix_bookings').select('wix_booking_id').eq('locally_modified', true),
+      supabaseAdmin.from('wix_bookings').select('wix_booking_id').in('status', TERMINAL),
+      supabaseAdmin.from('sessions').select('wix_booking_id').eq('locally_modified', true).not('wix_booking_id', 'is', null),
+      supabaseAdmin.from('sessions').select('wix_booking_id').in('status', TERMINAL).not('wix_booking_id', 'is', null),
+    ]);
 
     const ids = new Set();
-    
-    if (!wixError && wixData) {
-      wixData.forEach(r => { if (r.wix_booking_id) ids.add(r.wix_booking_id); });
+    for (const r of [...(wixEdited || []), ...(wixTerminal || []), ...(sessEdited || []), ...(sessTerminal || [])]) {
+      if (r.wix_booking_id) ids.add(r.wix_booking_id);
     }
-    
-    if (!sessionError && sessionData) {
-      sessionData.forEach(r => { if (r.wix_booking_id) ids.add(r.wix_booking_id); });
-    }
-
     return ids;
   } catch (err) {
     console.warn('[getLocallyModifiedWixIds] error:', err.message || err);
@@ -871,9 +869,46 @@ async function listWixBookings(req, res) {
   try {
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || '10'), 10) || 10));
-    const { dateFrom, dateTo, search, session_type } = req.query;
+    const { dateFrom, dateTo, search, session_type, status } = req.query;
     const fromIdx = (page - 1) * limit;
     const toIdx = fromIdx + limit - 1;
+
+    const getEffectiveStatus = (row) => {
+      const linked = String(row?.session_status || '').toLowerCase();
+      const primary = String(row?.status || '').toLowerCase();
+      return linked || primary;
+    };
+
+    const getStartTimeMs = (row) => {
+      const iso = row?.start_time;
+      if (!iso) return 0;
+      const ms = new Date(iso).getTime();
+      return Number.isFinite(ms) ? ms : 0;
+    };
+
+    const matchesStatusFilter = (row) => {
+      const normalizedStatus = String(status || '').toLowerCase();
+      if (!normalizedStatus || normalizedStatus === 'all') return true;
+
+      const effective = getEffectiveStatus(row);
+      const startMs = getStartTimeMs(row);
+      const now = Date.now();
+      const activeStatuses = new Set(['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed']);
+
+      if (normalizedStatus === 'booked') {
+        // Upcoming = all booked/active sessions regardless of whether start time is past or future
+        return activeStatuses.has(effective);
+      }
+      if (normalizedStatus === 'pending') {
+        // Pending = booked sessions whose start time has already passed (past-due)
+        return activeStatuses.has(effective) && startMs > 0 && startMs < now;
+      }
+      if (normalizedStatus === 'no_show') {
+        return effective === 'no_show' || effective === 'noshow';
+      }
+
+      return effective === normalizedStatus;
+    };
 
     let q = supabaseAdmin.from('wix_bookings').select('*');
 
@@ -954,8 +989,9 @@ async function listWixBookings(req, res) {
         return row.status !== 'deleted' && !!row.wix_session_id;
       });
 
-    const totalVisible = allVisibleRows.length;
-    const dedupedData = allVisibleRows.slice(fromIdx, toIdx + 1);
+    const statusFilteredRows = allVisibleRows.filter(matchesStatusFilter);
+    const totalVisible = statusFilteredRows.length;
+    const dedupedData = statusFilteredRows.slice(fromIdx, toIdx + 1);
 
     // Compute total *sessions* (a Package of 3 = 3 sessions, children of a package = 0)
     // by aggregating session_count and package linkage across the same date range.
@@ -1633,12 +1669,13 @@ async function deleteWixBooking(req, res) {
 
 /**
  * PATCH /admin/wix/bookings/:id/complete
- * Mark a Wix booking as completed + locally_modified=true.
+ * Mark a Wix booking as completed. Does NOT set locally_modified so Wix admin panel
+ * won't show "Edited locally". Sync protection is handled via terminal status exclusion.
  */
 async function completeWixBooking(req, res) {
   try {
     const { id } = req.params;
-    const updates = { status: 'completed', locally_modified: true, synced_at: new Date().toISOString() };
+    const updates = { status: 'completed', synced_at: new Date().toISOString() };
 
     let { data, error } = await supabaseAdmin
       .from('wix_bookings')
@@ -1654,11 +1691,11 @@ async function completeWixBooking(req, res) {
       return res.status(404).json({ success: false, error: 'Wix booking not found' });
     }
 
-    // Mirror to sessions
+    // Mirror to sessions (no locally_modified — terminal status protects from sync)
     if (data.wix_booking_id) {
       await supabaseAdmin
         .from('sessions')
-        .update({ status: 'completed', locally_modified: true })
+        .update({ status: 'completed' })
         .eq('wix_booking_id', data.wix_booking_id);
     }
 
@@ -1671,12 +1708,12 @@ async function completeWixBooking(req, res) {
 
 /**
  * PATCH /admin/wix/bookings/:id/no-show
- * Mark a Wix booking as no-show + locally_modified=true.
+ * Mark a Wix booking as no-show. No locally_modified — terminal status protects from sync.
  */
 async function noShowWixBooking(req, res) {
   try {
     const { id } = req.params;
-    const updates = { status: 'no_show', locally_modified: true, synced_at: new Date().toISOString() };
+    const updates = { status: 'no_show', synced_at: new Date().toISOString() };
 
     let { data, error } = await supabaseAdmin
       .from('wix_bookings')
@@ -1688,17 +1725,106 @@ async function noShowWixBooking(req, res) {
     if (error) return res.status(500).json({ success: false, error: error.message });
     if (!data) return res.status(404).json({ success: false, error: 'Wix booking not found' });
 
-    // Mirror to sessions
+    // Mirror to sessions (no locally_modified — terminal status protects from sync)
     if (data.wix_booking_id) {
       await supabaseAdmin
         .from('sessions')
-        .update({ status: 'no_show', locally_modified: true })
+        .update({ status: 'no_show' })
         .eq('wix_booking_id', data.wix_booking_id);
     }
 
     return res.json({ success: true, message: 'Wix booking marked as no-show', data: { booking: data } });
   } catch (e) {
     console.error('[noShowWixBooking]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
+/**
+ * PATCH /admin/wix/bookings/:id/cancel-refund
+ * Cancel a Wix booking and mark it as refunded.
+ * - wix_bookings.status  → 'cancelled'
+ * - sessions.status      → 'refunded'  (finance treats this as a refund, not a mere cancel)
+ * - Removes the therapist's Google Calendar event so the slot opens up for new bookings
+ */
+async function cancelRefundWixBooking(req, res) {
+  try {
+    const { id } = req.params;
+
+    // 1. Fetch the wix_booking row (need wix_booking_id + calendar info)
+    const { data: booking, error: fetchErr } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('id, wix_booking_id, psychologist_id, google_calendar_event_id, status')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !booking) {
+      return res.status(404).json({ success: false, error: 'Wix booking not found' });
+    }
+
+    // 2. Update wix_bookings → cancelled (no locally_modified — terminal status protects from sync)
+    const { error: wbErr } = await supabaseAdmin
+      .from('wix_bookings')
+      .update({ status: 'cancelled', synced_at: new Date().toISOString() })
+      .eq('id', id);
+    if (wbErr) return res.status(500).json({ success: false, error: wbErr.message });
+
+    // 3. Update sessions → refunded (finance counts refunds separately from cancels)
+    let sessionRow = null;
+    if (booking.wix_booking_id) {
+      const { data: sess } = await supabaseAdmin
+        .from('sessions')
+        .update({ status: 'refunded' })
+        .eq('wix_booking_id', booking.wix_booking_id)
+        .select('id, psychologist_id, google_calendar_event_id, google_calendar_credentials_snapshot')
+        .single();
+      sessionRow = sess || null;
+    }
+
+    // 4. Delete Google Calendar event so the therapist's slot reopens
+    const calEventId =
+      booking.google_calendar_event_id ||
+      sessionRow?.google_calendar_event_id ||
+      null;
+
+    if (calEventId) {
+      try {
+        // Get therapist OAuth credentials
+        const psychId = booking.psychologist_id || sessionRow?.psychologist_id || null;
+        let userAuth = null;
+        if (psychId) {
+          const { data: psych } = await supabaseAdmin
+            .from('psychologists')
+            .select('google_calendar_credentials')
+            .eq('id', psychId)
+            .single();
+          const creds = psych?.google_calendar_credentials;
+          if (creds?.access_token) {
+            userAuth = {
+              access_token: creds.access_token,
+              refresh_token: creds.refresh_token,
+              expiry_date: creds.expiry_date,
+            };
+          }
+        }
+        const delResult = await meetLinkService.deleteCalendarEvent(calEventId, userAuth);
+        if (!delResult?.success) {
+          console.warn('[cancelRefundWixBooking] calendar delete non-fatal:', delResult?.error);
+        } else {
+          console.log('[cancelRefundWixBooking] removed calendar event', calEventId);
+        }
+      } catch (calErr) {
+        console.warn('[cancelRefundWixBooking] calendar delete failed (non-fatal):', calErr.message || calErr);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Booking cancelled and marked as refunded. Calendar event removed.',
+      data: { wix_booking_id: booking.wix_booking_id, calendarEventRemoved: !!calEventId },
+    });
+  } catch (e) {
+    console.error('[cancelRefundWixBooking]', e);
     return res.status(500).json({ success: false, error: e.message || String(e) });
   }
 }
@@ -1762,7 +1888,11 @@ async function bookWixNextSession(req, res) {
         nextSessionNumber = maxNum + 1;
       }
     }
-    const totalSessions = wixRow.session_count || 0;
+    const totalSessions = wixRow.session_count
+      || wixRow.payload?.creditsAvailable
+      || wixRow.payload?.detectedSessionCount
+      || wixRow.payload?.pricingPlanInfo?.credits?.available
+      || 0;
 
     // ── 4. Build IST start/end times for the wix_bookings mirror ─────────
     // Convert scheduled_date + scheduled_time to ISO strings in UTC (subtract IST offset)
@@ -1865,6 +1995,7 @@ async function bookWixNextSession(req, res) {
         session_notes: wixRow.client_full_name ? `Package follow-up for ${wixRow.client_full_name}` : 'Package follow-up (Wix)',
         created_at: now,
         updated_at: now,
+        booking_created_at: now,
       })
       .select()
       .single();
@@ -1906,6 +2037,7 @@ module.exports = {
   deleteWixBooking,
   completeWixBooking,
   noShowWixBooking,
+  cancelRefundWixBooking,
   bookWixNextSession,
   handleWixWebhook,
 };

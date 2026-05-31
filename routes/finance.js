@@ -3,6 +3,7 @@ const router = express.Router();
 const { authenticateToken, requireFinance } = require('../middleware/auth');
 const financeController = require('../controllers/financeController');
 const sessionController = require('../controllers/sessionController');
+const adminController = require('../controllers/adminController');
 const { createRateLimiters } = require('../middleware/security');
 
 // Apply rate limiting
@@ -30,9 +31,10 @@ router.get('/sessions', financeController.getSessions);
 router.get('/doctors/:psychologistId/bookings', financeController.getDoctorBookings);
 router.get('/sessions/all', sessionController.getAllSessions); // Use same method as admin for consistency
 router.get('/sessions/:sessionId', financeController.getSessionDetails);
-
-// Free Assessments Management
-router.get('/free-assessments', financeController.getFreeAssessments);
+router.put('/sessions/:sessionId', adminController.updateSession);
+router.put('/sessions/:sessionId/commission', financeController.updateSessionCommission);
+router.get('/psychologists', financeController.getPsychologistOptions);
+router.get('/clients', financeController.getClientOptions);
 
 // Revenue Management
 router.get('/revenue', financeController.getRevenue);
@@ -86,4 +88,3 @@ router.post('/payouts', financeController.processPayout);
 router.post('/payouts/mark-paid', financeController.markPayoutAsPaid);
 
 module.exports = router;
-

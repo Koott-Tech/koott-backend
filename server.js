@@ -27,13 +27,10 @@ const notificationRoutes = require('./routes/notifications');
 const clientNotificationRoutes = require('./routes/clientNotifications');
 const messageRoutes = require('./routes/messages');
 const paymentRoutes = require('./routes/payment');
-const freeAssessmentRoutes = require('./routes/freeAssessments');
-const freeAssessmentTimeslotRoutes = require('./routes/freeAssessmentTimeslots');
 const emailVerificationRoutes = require('./routes/emailVerification');
 const calendarSyncService = require('./services/calendarSyncService');
 const sessionReminderService = require('./services/sessionReminderService');
 const dailyAvailabilityService = require('./services/dailyAvailabilityService');
-const dailyFreeAssessmentService = require('./services/dailyFreeAssessmentService');
 const dailyCalendarConflictAlert = require('./services/dailyCalendarConflictAlert');
 const wixRealtimeSyncService = require('./services/wixRealtimeSyncService');
 const monthlyFinanceSnapshotService = require('./services/monthlyFinanceSnapshotService');
@@ -883,8 +880,6 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/client-notifications', clientNotificationRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/payment', paymentRoutes);
-app.use('/api/free-assessments', freeAssessmentRoutes);
-app.use('/api/free-assessment-timeslots', freeAssessmentTimeslotRoutes);
 app.use('/api/email-verification', emailVerificationLimiter, emailVerificationRoutes);
 app.use('/api', oauthRoutes);
 app.use('/api/psychologists/google-calendar', googleCalendarRoutes);
@@ -974,9 +969,6 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
   
   // Start Daily Availability service (adds next day at 12 AM)
   dailyAvailabilityService.start();
-  
-  // Start Daily Free Assessment Availability service (adds next day at 12 AM)
-  dailyFreeAssessmentService.start();
   
   // Start Daily Calendar Conflict Monitor service (checks for conflicts at 1 AM)
   dailyCalendarConflictAlert.start();

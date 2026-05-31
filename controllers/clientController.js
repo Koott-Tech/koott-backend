@@ -478,6 +478,17 @@ const getSessions = async (req, res) => {
         .from('sessions')
         .select(`
           *,
+          client:clients(
+            id,
+            first_name,
+            last_name,
+            child_name,
+            child_age,
+            phone_number,
+            user:users(
+              email
+            )
+          ),
           psychologist:psychologists(
             id,
             first_name,
@@ -592,7 +603,15 @@ const getSessions = async (req, res) => {
 
         // Apply pagination after filtering
         const offset = (page - 1) * limit;
-        sessions = filteredSessions.slice(offset, offset + limit);
+        sessions = filteredSessions.slice(offset, offset + limit).map((session) => {
+          if (session?.client) {
+            if (!session.client.user) session.client.user = {};
+            if (!session.client.user.email && req.user?.email) {
+              session.client.user.email = req.user.email;
+            }
+          }
+          return session;
+        });
       } else {
         // Regular pagination for non-upcoming
         // First get total count for pagination
@@ -613,7 +632,15 @@ const getSessions = async (req, res) => {
           throw error;
         }
         
-        sessions = fetchedSessions || [];
+        sessions = (fetchedSessions || []).map((session) => {
+          if (session?.client) {
+            if (!session.client.user) session.client.user = {};
+            if (!session.client.user.email && req.user?.email) {
+              session.client.user.email = req.user.email;
+            }
+          }
+          return session;
+        });
         upcomingTotalCount = null; // Not applicable for non-upcoming
       }
 
@@ -2459,79 +2486,37 @@ const rescheduleSession = async (req, res) => {
 
           // Get OAuth credentials for Meet link creation
       let userAuth = null;
-      if (isFreeAssessment) {
-            // For free assessments, use assessment psychologist's OAuth credentials
-        const { ensureAssessmentPsychologist } = require('./freeAssessmentController');
-        const defaultPsychologist = await ensureAssessmentPsychologist();
-        
-        if (defaultPsychologist?.id) {
-          const { data: assessmentPsychologist } = await supabaseAdmin
-            .from('psychologists')
-            .select('id, email, google_calendar_credentials')
-            .eq('id', defaultPsychologist.id)
-            .single();
-          
-          if (assessmentPsychologist?.google_calendar_credentials) {
-            const credentials = assessmentPsychologist.google_calendar_credentials;
-            const now = Date.now();
-            const bufferTime = 5 * 60 * 1000; // 5 minutes buffer
-            
-            if (credentials.access_token) {
-              const expiryDate = credentials.expiry_date ? new Date(credentials.expiry_date).getTime() : null;
-              if (!expiryDate || expiryDate > (now + bufferTime)) {
-                userAuth = {
-                  access_token: credentials.access_token,
-                  refresh_token: credentials.refresh_token,
-                  expiry_date: credentials.expiry_date
-                };
-                console.log('✅ Using assessment psychologist OAuth credentials for Meet link');
-              } else if (credentials.refresh_token) {
-                userAuth = {
-                  access_token: credentials.access_token,
-                  refresh_token: credentials.refresh_token,
-                  expiry_date: credentials.expiry_date
-                };
-                console.log('⚠️ Assessment psychologist OAuth token expired, but refresh token available');
-              }
+      // Use the session's psychologist OAuth credentials
+      if (psychologistDetails?.google_calendar_credentials) {
+        try {
+          const credentials = psychologistDetails.google_calendar_credentials;
+          const now = Date.now();
+          const bufferTime = 5 * 60 * 1000; // 5 minutes buffer
+          if (credentials.access_token) {
+            const expiryDate = credentials.expiry_date ? new Date(credentials.expiry_date).getTime() : null;
+            if (!expiryDate || expiryDate > (now + bufferTime)) {
+              userAuth = {
+                access_token: credentials.access_token,
+                refresh_token: credentials.refresh_token,
+                expiry_date: credentials.expiry_date
+              };
+              console.log('✅ Using psychologist OAuth credentials for Meet link creation (token valid)');
+            } else if (credentials.refresh_token) {
+              userAuth = {
+                access_token: credentials.access_token,
+                refresh_token: credentials.refresh_token,
+                expiry_date: credentials.expiry_date
+              };
+              console.log('⚠️ Psychologist OAuth token expired, but refresh token available - service will attempt refresh');
+            } else {
+              console.log('⚠️ Psychologist OAuth credentials expired and no refresh token - will use fallback method');
             }
           }
+        } catch (credError) {
+          console.warn('⚠️ Error parsing psychologist OAuth credentials:', credError.message);
         }
-          } else {
-            // For regular therapy sessions, use the session's psychologist OAuth credentials
-            if (psychologistDetails?.google_calendar_credentials) {
-              try {
-                const credentials = psychologistDetails.google_calendar_credentials;
-                const now = Date.now();
-                const bufferTime = 5 * 60 * 1000; // 5 minutes buffer
-                
-                if (credentials.access_token) {
-                  const expiryDate = credentials.expiry_date ? new Date(credentials.expiry_date).getTime() : null;
-                  if (!expiryDate || expiryDate > (now + bufferTime)) {
-                    // Token is valid
-                    userAuth = {
-                      access_token: credentials.access_token,
-                      refresh_token: credentials.refresh_token,
-                      expiry_date: credentials.expiry_date
-                    };
-                    console.log('✅ Using psychologist OAuth credentials for Meet link creation (token valid)');
-                  } else if (credentials.refresh_token) {
-                    // Token expired but we have refresh token - pass both to service for auto-refresh
-                    userAuth = {
-                      access_token: credentials.access_token, // May be expired, service will refresh
-                      refresh_token: credentials.refresh_token,
-                      expiry_date: credentials.expiry_date
-                    };
-                    console.log('⚠️ Psychologist OAuth token expired, but refresh token available - service will attempt refresh');
-                  } else {
-                    console.log('⚠️ Psychologist OAuth credentials expired and no refresh token - will use fallback method');
-                  }
-                }
-              } catch (credError) {
-                console.warn('⚠️ Error parsing psychologist OAuth credentials:', credError.message);
-              }
-            } else {
-              console.log('ℹ️ Psychologist does not have Google Calendar connected - will use service account method (may not create real Meet link)');
-            }
+      } else {
+        console.log('ℹ️ Psychologist does not have Google Calendar connected - will use service account method');
       }
 
       const meetResult = await meetLinkService.generateSessionMeetLink(sessionDataForMeet, userAuth);
@@ -3189,6 +3174,17 @@ const getSession = async (req, res) => {
       .from('sessions')
       .select(`
         *,
+        client:clients(
+          id,
+          first_name,
+          last_name,
+          child_name,
+          child_age,
+          phone_number,
+          user:users(
+            email
+          )
+        ),
         psychologist:psychologists(
           id,
           first_name,
@@ -3205,6 +3201,13 @@ const getSession = async (req, res) => {
       return res.status(404).json(
         errorResponse('Session not found')
       );
+    }
+
+    if (session?.client) {
+      if (!session.client.user) session.client.user = {};
+      if (!session.client.user.email && req.user?.email) {
+        session.client.user.email = req.user.email;
+      }
     }
 
     // If session has a package_id, fetch package and calculate progress

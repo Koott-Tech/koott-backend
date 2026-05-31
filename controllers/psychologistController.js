@@ -1,4 +1,5 @@
 const { supabaseAdmin } = require('../config/supabase');
+const { computeSessionDoctorWallet } = require('../utils/sessionCommission');
 const { 
   successResponse, 
   errorResponse,
@@ -223,8 +224,6 @@ const getSessions = async (req, res) => {
             id,
             first_name,
             last_name,
-            child_name,
-            child_age,
             phone_number,
             user:users(
               email
@@ -333,8 +332,6 @@ const getSessions = async (req, res) => {
               id,
               first_name,
               last_name,
-              child_name,
-              child_age,
               phone_number,
               user:users(
                 email
@@ -456,8 +453,6 @@ const getSessions = async (req, res) => {
                     id,
                     first_name,
                     last_name,
-                    child_name,
-                    child_age,
                     phone_number,
                     user:users(email)
                   ),
@@ -522,6 +517,79 @@ const getSessions = async (req, res) => {
       } catch (assessError) {
         console.error('❌ Assessment sessions fetch error:', assessError);
       }
+
+      // ── Wix package session numbering ────────────────────────────────────────
+      // Wix parent sessions (original booking) have package_session_number=null.
+      // Admin follow-ups (book-next) get 2, 3, … so null → infer as #1.
+      // Also propagate session_count across sibling sessions (same client+psychologist)
+      // because admin-created follow-up rows sometimes have session_count=null.
+      const wixPkgSessions = enrichedRegular.filter(
+        s => s.session_type === 'package' && !s.package_id
+      );
+      if (wixPkgSessions.length > 0) {
+        // Group by client_id + psychologist_id to find siblings
+        const groups = {};
+        wixPkgSessions.forEach(s => {
+          const key = `${s.client_id}_${s.psychologist_id}`;
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(s);
+        });
+
+        Object.values(groups).forEach(grp => {
+          // Find the best session_count across all siblings (prefer the highest non-null value)
+          const bestCount = grp.reduce((best, s) => {
+            const c = parseInt(s.session_count, 10);
+            return (!isNaN(c) && c > best) ? c : best;
+          }, 0);
+
+          grp.forEach(s => {
+            // Propagate session_count
+            if (bestCount > 0 && !(parseInt(s.session_count, 10) > 0)) {
+              s.session_count = bestCount;
+            }
+            // Infer session #1 for parent Wix session (null pkg number)
+            if (
+              s.source === 'wix' &&
+              (s.package_session_number === null || s.package_session_number === undefined)
+            ) {
+              s.package_session_number = 1;
+            }
+          });
+        });
+      }
+      // ─────────────────────────────────────────────────────────────────────────
+
+      // ── Commission: attach doctor_wallet to each regular session ──────────
+      // Priority: 1) commission_history  2) therapist_commission > 0  3) doctor_commissions rates
+      try {
+        const regularSessionIds = enrichedRegular.map(s => s.id).filter(Boolean);
+
+        // Fetch commission_history rows for these sessions (batch)
+        let commissionHistoryMap = {};
+        if (regularSessionIds.length > 0) {
+          const { data: chRows } = await supabaseAdmin
+            .from('commission_history')
+            .select('session_id, commission_amount, session_amount')
+            .in('session_id', regularSessionIds);
+          (chRows || []).forEach(r => { commissionHistoryMap[r.session_id] = r; });
+        }
+
+        // Fetch doctor_commissions config for this psychologist
+        const { data: dcRows } = await supabaseAdmin
+          .from('doctor_commissions')
+          .select('commission_amount_individual, commission_amount_package, commission_amounts, doctor_commission_first_session, doctor_commission_followup, doctor_commission_first_session_package, doctor_commission_followup_package, doctor_commission_packages')
+          .eq('psychologist_id', psychologistId)
+          .eq('is_active', true)
+          .limit(1);
+        const dc = dcRows?.[0] || null;
+
+        enrichedRegular.forEach(s => {
+          s.doctor_wallet = computeSessionDoctorWallet(s, dc, commissionHistoryMap[s.id] || null);
+        });
+      } catch (commErr) {
+        console.warn('[psychologist/sessions] commission calc error (non-fatal):', commErr.message);
+      }
+      // ────────────────────────────────────────────────────────────────────────
 
       // Combine regular sessions and assessment sessions
       // Sort: pending sessions first (for scheduling), then by date
