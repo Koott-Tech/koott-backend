@@ -96,19 +96,32 @@ async function resolveOrCreateWixClient({ email, firstName, lastName, phone }) {
   if (existingClients?.length) {
     const clientId = existingClients[0].id;
     // Backfill name if missing — Wix sends fullName which wasn't split on first creation
-    if (firstName || lastName) {
-      const { data: existing } = await supabaseAdmin
-        .from('clients')
-        .select('first_name, last_name')
-        .eq('id', clientId)
-        .single();
-      if (existing && !existing.first_name && !existing.last_name) {
+    // Also update phone number if the new booking has a different one
+    const { data: existing } = await supabaseAdmin
+      .from('clients')
+      .select('first_name, last_name, phone_number')
+      .eq('id', clientId)
+      .single();
+      
+    if (existing) {
+      const updates = {};
+      if (!existing.first_name && !existing.last_name && (firstName || lastName)) {
+        updates.first_name = firstName || null;
+        updates.last_name = lastName || null;
+      }
+      // Update phone number if it's provided and different
+      if (phone && phone !== existing.phone_number) {
+        updates.phone_number = phone;
+      }
+      
+      if (Object.keys(updates).length > 0) {
         await supabaseAdmin
           .from('clients')
-          .update({ first_name: firstName || null, last_name: lastName || null })
+          .update(updates)
           .eq('id', clientId);
       }
     }
+    
     return { clientId, isNew: isNewUser, tempPassword };
   }
 
