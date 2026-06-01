@@ -1711,11 +1711,23 @@ const getPlatformStats = async (req, res) => {
         .neq('session_type', 'free_assessment')
         .neq('status', 'cancelled'); // Exclude soft-deleted sessions
 
-    /** YYYY-MM-DD params = IST midnight bounds (finance / Wix-aligned). */
+    // Rule (matches finance/therapist dashboards):
+    //   • Total bookings  → booking_created_at in range  (when the booking was made)
+    //   • Status-based   → scheduled_date in range       (which sessions are in this period)
+    //   • Cancelled      → booking_created_at in range   (cancellation is a booking event)
+    /** Date-filter by booking creation date (used by Total Bookings and Cancelled). */
     const applyBookingDayRange = (q) => {
       let x = q;
       if (start_date) x = x.gte(bookingTimeCol, `${start_date}T00:00:00.000+05:30`);
       if (end_date) x = x.lte(bookingTimeCol, `${end_date}T23:59:59.999+05:30`);
+      return x;
+    };
+
+    /** Date-filter by scheduled_date (used by Upcoming / Completed / Rescheduled / NoShow). */
+    const applyScheduledDayRange = (q) => {
+      let x = q;
+      if (start_date) x = x.gte('scheduled_date', start_date);
+      if (end_date) x = x.lte('scheduled_date', end_date);
       return x;
     };
 
@@ -1728,15 +1740,16 @@ const getPlatformStats = async (req, res) => {
       start_date || end_date ? scopedSessions : sessionsNoFreeSelect(),
     ]);
 
-    const countStatus = async (build) => {
+    /** Count sessions by status, filtered by scheduled_date (in-range == happening this month). */
+    const countByScheduledDate = async (build) => {
       const base = sessionsNoFreeSelect();
       let q = build(base);
-      q = applyBookingDayRange(q);
+      q = applyScheduledDayRange(q);
       const { count } = await q;
       return count ?? 0;
     };
 
-    // Cancelled needs its own base query — the default base excludes cancelled
+    // Cancelled — own base query (default base excludes cancelled), filtered by booking_created_at
     const countCancelled = async () => {
       let q = supabaseAdmin
         .from('sessions')
@@ -1757,11 +1770,16 @@ const getPlatformStats = async (req, res) => {
       upcomingN,
       cancelledN,
     ] = await Promise.all([
-      countStatus((b) => b.eq('status', 'completed')),
-      countStatus((b) => b.eq('status', 'rescheduled')),
-      countStatus((b) => b.in('status', ['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed']).lt('scheduled_date', today)),
-      countStatus((b) => b.in('status', ['no_show', 'noshow'])),
-      countStatus((b) => b.in('status', ['booked', 'rescheduled']).gte('scheduled_date', today)),
+      // Completed sessions whose scheduled_date is in range
+      countByScheduledDate((b) => b.eq('status', 'completed')),
+      // Rescheduled sessions whose (new) scheduled_date is in range
+      countByScheduledDate((b) => b.eq('status', 'rescheduled')),
+      // Pending = booked/rescheduled whose scheduled_date already passed (within range)
+      countByScheduledDate((b) => b.in('status', ['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed']).lt('scheduled_date', today)),
+      // No-show sessions whose scheduled_date is in range
+      countByScheduledDate((b) => b.in('status', ['no_show', 'noshow'])),
+      // Upcoming = booked/rescheduled whose scheduled_date is in range and not yet past
+      countByScheduledDate((b) => b.in('status', ['booked', 'rescheduled']).gte('scheduled_date', today)),
       countCancelled(),
     ]);
 

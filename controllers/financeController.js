@@ -1079,31 +1079,42 @@ const getDashboard = async (req, res) => {
           let shouldIncludeForCompletedCount = false;
           
           // Always use mtdFrom/mtdTo for filtering (defaults to current month if not provided)
+          //
+          // Rule (consistent across admin / finance / therapist dashboards):
+          //   • Total / Revenue / Refund  → booking_created_at in range (when money / booking happened)
+          //   • Upcoming / Completed / Rescheduled / NoShow → scheduled_date in range
+          //     (when the session is/was actually happening)
           let origInRange = false;
           let schedInRange = false;
           if (mtdFrom && mtdTo) {
             const bookedCreatedYmd = getSessionBookingCreatedIstDateString(s);
             const bookingCreatedInRange = !!(bookedCreatedYmd && bookedCreatedYmd >= mtdFrom && bookedCreatedYmd <= mtdTo);
+            const scheduledYmd = s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null;
+            const scheduledInRange = !!(scheduledYmd && scheduledYmd >= mtdFrom && scheduledYmd <= mtdTo);
             origInRange = bookingCreatedInRange;
-            schedInRange = bookingCreatedInRange;
+            schedInRange = scheduledInRange;
 
             // Revenue & totals: customer booking created in picker range (IST day)
             shouldIncludeForRevenue = bookingCreatedInRange;
             shouldIncludeForTotal = bookingCreatedInRange;
 
-            if (s.status === 'rescheduled') shouldIncludeForRescheduledCount = bookingCreatedInRange;
-            if (s.status === 'no_show' || s.status === 'noshow') shouldIncludeForNoShowCount = bookingCreatedInRange;
-            if (s.status === 'reschedule_requested') shouldIncludeForRescheduleRequestedCount = bookingCreatedInRange;
+            // Status counts: based on scheduled_date (when work is happening this month)
+            if (s.status === 'rescheduled') shouldIncludeForRescheduledCount = scheduledInRange;
+            if (s.status === 'no_show' || s.status === 'noshow') shouldIncludeForNoShowCount = scheduledInRange;
+            if (s.status === 'reschedule_requested') shouldIncludeForRescheduleRequestedCount = scheduledInRange;
 
-            if ((s.status === 'booked' || s.status === 'rescheduled') && bookingCreatedInRange) {
+            if ((s.status === 'booked' || s.status === 'rescheduled') && scheduledInRange) {
               shouldIncludeForUpcoming = true;
             }
 
             const bookedInPreviousWindow = !!(bookedCreatedYmd && mtdFrom && bookedCreatedYmd < mtdFrom);
 
             if (isCompleted) {
-              shouldIncludeForCompleted = bookingCreatedInRange;
-              shouldIncludeForCompletedCount = bookingCreatedInRange;
+              // Completed counts: prefer completion_date if available, else scheduled_date
+              const completionYmd = s.completion_date ? String(s.completion_date).slice(0, 10) : scheduledYmd;
+              const completedInRange = !!(completionYmd && completionYmd >= mtdFrom && completionYmd <= mtdTo);
+              shouldIncludeForCompleted = completedInRange;
+              shouldIncludeForCompletedCount = completedInRange;
 
               if (s.completion_date) {
                 const completionDateStr = s.completion_date.split('T')[0];
