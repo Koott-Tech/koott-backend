@@ -178,7 +178,10 @@ async function sendTemplateWithRetry(toPhone, templateName, languageCode = 'en',
 // then sync them to your Interakt dashboard.
 const TEMPLATES = {
   BOOKING_CONFIRMATION: process.env.INTERAKT_TPL_BOOKING_CONFIRMATION || 'booking_confirmation_v1',
-  SESSION_NOTIFICATION_PSYCHOLOGIST: process.env.INTERAKT_TPL_SESSION_NOTIFICATION || 'session_notification_psychologist',
+  SESSION_NOTIFICATION_PSYCHOLOGIST: process.env.INTERAKT_TPL_SESSION_NOTIFICATION || 'therapistconfirmation',
+  RESCHEDULED_LINK_SHARING: process.env.INTERAKT_TPL_RESCHEDULED || 'rescheduled_link_sharing',
+  SESSION_FOLLOW_UP: process.env.INTERAKT_TPL_SESSION_FOLLOW_UP || 'session_follow_up_v2',
+  SESSION_REMINDER: process.env.INTERAKT_TPL_SESSION_REMINDER || 'sessionreminderautomatic',
 };
 
 /**
@@ -230,17 +233,32 @@ async function sendBookingConfirmation(toPhone, details) {
 }
 
 /**
- * Send session notification to psychologist.
+ * Send session notification to therapist.
  *
- * Expected template body variables (in order):
- *   {{1}} = client name
- *   {{2}} = date
- *   {{3}} = time
- *   {{4}} = duration
+ * Template: therapistconfirmation
+ * Body:
+ *   Hi {{1}},
+ *   A new session has been booked with you.
+ *   Client: {{2}}
+ *   When: {{3}} at {{4}}
+ *   Join here: {{5}}
+ *   Thank you,
+ *   Koott Care
+ *
+ * Variables (5):
+ *   {{1}} = therapist name
+ *   {{2}} = client name
+ *   {{3}} = date  (e.g. "Mon, 03 Jun 2026")
+ *   {{4}} = time  (e.g. "11:00 PM")
  *   {{5}} = meet link
+ *
+ * @param {string} toPhone
+ * @param {object} details
+ *   - therapistName, clientName, date (YYYY-MM-DD), time (HH:MM), meetLink
+ *   (durationMinutes accepted for backward compat — ignored, this template has no duration variable)
  */
 async function sendSessionNotificationPsychologist(toPhone, details) {
-  const { clientName, date, time, durationMinutes, meetLink } = details || {};
+  const { therapistName, clientName, date, time, meetLink } = details || {};
 
   // Format date
   let formattedDate = date || '';
@@ -266,12 +284,151 @@ async function sendSessionNotificationPsychologist(toPhone, details) {
     }
   } catch { /* keep raw */ }
 
-  const duration = `${durationMinutes || 50} min`;
   const link = meetLink || 'Link will be shared shortly';
 
   return sendTemplateWithRetry(toPhone, TEMPLATES.SESSION_NOTIFICATION_PSYCHOLOGIST, 'en', {
-    bodyValues: [(clientName || '').trim(), formattedDate, formattedTime, duration, link],
-    callbackData: 'wix_session_notification_psychologist',
+    bodyValues: [
+      (therapistName || '').trim() || 'there',
+      (clientName || '').trim() || 'your client',
+      formattedDate,
+      formattedTime,
+      link,
+    ],
+    callbackData: 'session_notification_therapist',
+  });
+}
+
+/**
+ * Send reschedule notification.
+ *
+ * Template: rescheduled_link_sharing
+ * Expected template body variables (in order):
+ *   {{1}} = recipient name (client or therapist receiving the message)
+ *   {{2}} = other party name (therapist if client receives; client if therapist receives)
+ *   {{3}} = new date  (e.g. "Mon, 12 Jan 2026")
+ *   {{4}} = new time  (e.g. "10:00 AM")
+ *   {{5}} = meet link
+ *
+ * @param {string} toPhone
+ * @param {object} details
+ *   - recipientName, otherPartyName, date (YYYY-MM-DD), time (HH:MM), meetLink
+ */
+async function sendRescheduleNotification(toPhone, details) {
+  const { recipientName, otherPartyName, date, time, meetLink } = details || {};
+
+  // Format date
+  let formattedDate = date || '';
+  try {
+    if (date) {
+      const d = new Date(`${date}T00:00:00+05:30`);
+      formattedDate = d.toLocaleDateString('en-IN', {
+        weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata',
+      });
+    }
+  } catch { /* keep raw */ }
+
+  // Format time
+  let formattedTime = time || '';
+  try {
+    if (time) {
+      const [h, m] = time.split(':');
+      const hours = parseInt(h, 10);
+      const minutes = parseInt(m || '0', 10);
+      const period = hours >= 12 ? 'PM' : 'AM';
+      const displayH = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
+      formattedTime = `${displayH}:${minutes.toString().padStart(2, '0')} ${period}`;
+    }
+  } catch { /* keep raw */ }
+
+  const link = meetLink || 'Link will be shared shortly';
+
+  return sendTemplateWithRetry(toPhone, TEMPLATES.RESCHEDULED_LINK_SHARING, 'en', {
+    bodyValues: [
+      (recipientName || '').trim() || 'there',
+      (otherPartyName || '').trim() || 'our team',
+      formattedDate,
+      formattedTime,
+      link,
+    ],
+    callbackData: 'session_reschedule',
+  });
+}
+
+/**
+ * Send session completion follow-up to client.
+ *
+ * Template: session_follow_up_v2
+ * Body:
+ *   Hi {{1}},
+ *   Your Koott session with {{2}} was completed on {{3}}
+ *   Therapist note: {{4}}
+ *   Feedback: https://www.koott.in/feedback
+ *   If you require any assistance or follow-up, please reply to this message.
+ *   Koott Care
+ *
+ * Variables (in order):
+ *   {{1}} = client name
+ *   {{2}} = therapist name
+ *   {{3}} = completion date (e.g. "Mon, 12 Jan 2026")
+ *   {{4}} = therapist note (summary)
+ */
+async function sendSessionFollowUp(toPhone, details) {
+  const { clientName, psychologistName, completedAt, therapistNote } = details || {};
+
+  // Format completion date
+  let formattedDate = '';
+  try {
+    const src = completedAt || new Date().toISOString();
+    const d = new Date(src.length === 10 ? `${src}T00:00:00+05:30` : src);
+    formattedDate = d.toLocaleDateString('en-IN', {
+      weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata',
+    });
+  } catch {
+    formattedDate = String(completedAt || '').slice(0, 10);
+  }
+
+  // Trim and bound therapist note (WhatsApp template variables can't have line breaks)
+  let note = String(therapistNote || '').replace(/\s+/g, ' ').trim();
+  if (!note) note = 'No additional notes from your therapist for this session.';
+  if (note.length > 250) note = note.slice(0, 247) + '...';
+
+  return sendTemplateWithRetry(toPhone, TEMPLATES.SESSION_FOLLOW_UP, 'en', {
+    bodyValues: [
+      (clientName || '').trim() || 'there',
+      (psychologistName || '').trim() || 'your therapist',
+      formattedDate,
+      note,
+    ],
+    callbackData: 'session_completed_followup',
+  });
+}
+
+/**
+ * Send session reminder.
+ *
+ * Template: sessionreminderautomatic
+ * Variables (in order, 4 total):
+ *   {{1}} = recipient name (client or therapist receiving the reminder)
+ *   {{2}} = other party name
+ *   {{3}} = meet link
+ *   {{4}} = time-to-start text (e.g. "30 minutes", "1 hour")
+ *
+ * @param {string} toPhone
+ * @param {object} details
+ *   - recipientName, otherPartyName, meetLink
+ *   - timeToStart (optional, default "30 minutes")
+ */
+async function sendSessionReminder(toPhone, details) {
+  const { recipientName, otherPartyName, meetLink, timeToStart } = details || {};
+  const link = meetLink || 'Link will be shared shortly';
+  return sendTemplateWithRetry(toPhone, TEMPLATES.SESSION_REMINDER, 'en', {
+    bodyValues: [
+      (recipientName || '').trim() || 'there',
+      (otherPartyName || '').trim() || 'our team',
+      link,
+      (timeToStart || '').trim() || '30 minutes',
+    ],
+    callbackData: 'session_reminder',
   });
 }
 
@@ -281,5 +438,8 @@ module.exports = {
   sendTemplateWithRetry,
   sendBookingConfirmation,
   sendSessionNotificationPsychologist,
+  sendRescheduleNotification,
+  sendSessionFollowUp,
+  sendSessionReminder,
   TEMPLATES,
 };

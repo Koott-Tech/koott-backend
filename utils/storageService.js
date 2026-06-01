@@ -7,6 +7,31 @@ const path = require('path');
 const BLOG_IMAGES_BUCKET = 'blog-images';
 const COUNSELLING_IMAGES_BUCKET = 'counselling-images';
 
+/** Ensure a Supabase Storage bucket exists; create it if missing. */
+async function ensureBucket(name) {
+  try {
+    const { error } = await supabase.storage.createBucket(name, {
+      public: true,
+      allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+      fileSizeLimit: 10 * 1024 * 1024,
+    });
+    if (error && !/already exists|already_exists/i.test(error.message || '')) {
+      console.warn(`[storageService] ensureBucket("${name}") failed:`, error.message);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn(`[storageService] ensureBucket("${name}") threw:`, e.message);
+    return false;
+  }
+}
+
+/** True if a storage error means "bucket doesn't exist". */
+function isBucketNotFoundError(err) {
+  if (!err) return false;
+  return err.statusCode === '404' || /bucket not found/i.test(err.message || '');
+}
+
 /**
  * Sanitize file path for storage: reject empty/absolute, posix-normalize, detect '..'.
  * Uses '/' for splitting so it works with path.posix.normalize() on all platforms.
@@ -39,13 +64,20 @@ function sanitizeFilePath(filePath) {
  */
 async function uploadBlogImage(fileBuffer, fileName, mimeType) {
   try {
-    const { data, error } = await supabase.storage
+    let { data, error } = await supabase.storage
       .from(BLOG_IMAGES_BUCKET)
       .upload(fileName, fileBuffer, {
         contentType: mimeType,
         cacheControl: '3600',
         upsert: false // Don't overwrite existing files
       });
+
+    if (isBucketNotFoundError(error)) {
+      await ensureBucket(BLOG_IMAGES_BUCKET);
+      ({ data, error } = await supabase.storage
+        .from(BLOG_IMAGES_BUCKET)
+        .upload(fileName, fileBuffer, { contentType: mimeType, cacheControl: '3600', upsert: false }));
+    }
 
     if (error) {
       console.error('Supabase upload error:', error);
@@ -185,13 +217,20 @@ function validateImageFile(file) {
  */
 async function uploadCounsellingImage(fileBuffer, fileName, mimeType) {
   try {
-    const { data, error } = await supabase.storage
+    let { data, error } = await supabase.storage
       .from(COUNSELLING_IMAGES_BUCKET)
       .upload(fileName, fileBuffer, {
         contentType: mimeType,
         cacheControl: '3600',
         upsert: true // Allow overwriting for counselling pages
       });
+
+    if (isBucketNotFoundError(error)) {
+      await ensureBucket(COUNSELLING_IMAGES_BUCKET);
+      ({ data, error } = await supabase.storage
+        .from(COUNSELLING_IMAGES_BUCKET)
+        .upload(fileName, fileBuffer, { contentType: mimeType, cacheControl: '3600', upsert: true }));
+    }
 
     if (error) {
       console.error('Supabase upload error:', error);

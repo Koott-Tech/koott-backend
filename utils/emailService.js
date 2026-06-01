@@ -374,10 +374,8 @@ class EmailService {
         console.log('⚠️ Skipping psychologist email (placeholder or missing):', psychologistEmail);
       }
 
-      // Send email to company admin and meet.koott@gmail.com (same content)
-      const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
-      const meetKoottEmail = 'meet.koott@gmail.com';
-      const adminRecipients = [adminEmail, meetKoottEmail].filter(Boolean).join(', ');
+      // Send email to company admin
+      const adminRecipients = process.env.COMPANY_ADMIN_EMAIL;
       if (adminRecipients) {
         await this.sendAdminNotification({
           to: adminRecipients,
@@ -931,7 +929,7 @@ class EmailService {
   }
 
   /**
-   * Send reschedule request notification to admin and meet.koott@gmail.com
+   * Send reschedule request notification to admin
    * Called when a client requests reschedule that requires admin approval (within 24h or 2nd+ reschedule)
    */
   async sendRescheduleRequestNotification(emailData) {
@@ -1117,7 +1115,7 @@ class EmailService {
   }
 
   /**
-   * Send new user registration notification to admin and meet.koott@gmail.com
+   * Send new user registration notification to admin
    * Called when a new user (client or psychologist) creates an account
    */
   async sendNewUserRegistrationNotification(emailData) {

@@ -101,6 +101,7 @@ router.put('/sessions/:sessionId', adminController.updateSession);
 router.put('/sessions/:sessionId/no-show', sessionController.markSessionAsNoShow);
 router.post('/sessions/:sessionId/complete', sessionController.completeSession);
 router.patch('/sessions/:sessionId/cancel-refund', sessionController.cancelRefundSession);
+router.patch('/sessions/:sessionId/verify-payment', sessionController.verifyPayment);
 router.delete('/sessions/:sessionId', sessionController.deleteSession);
 router.get('/psychologists/:psychologistId/availability', adminController.getPsychologistAvailabilityForReschedule);
 
@@ -194,15 +195,42 @@ router.post('/upload/image', upload.single('file'), async (req, res) => {
     const filename = `${uuid}${ext}`;
     const objectPath = `${filename}`; // flat path; change to folders if needed
 
-    const bucket = 'profile-pictures';
+    // Caller can choose which bucket to upload into via ?bucket= or form-data field `bucket`.
+    // Allowlist: only these buckets can be targeted from this endpoint.
+    const ALLOWED_BUCKETS = ['profile-pictures', 'manual-bookings', 'blog-images', 'counselling-images'];
+    const requestedBucket = String(req.body?.bucket || req.query?.bucket || 'profile-pictures').toLowerCase();
+    const bucket = ALLOWED_BUCKETS.includes(requestedBucket) ? requestedBucket : 'profile-pictures';
+    // manual-bookings is a private (sensitive) bucket — payment proofs/IDs.
+    const isPrivate = bucket === 'manual-bookings';
 
     // Upload to Supabase Storage using admin client (bypasses RLS)
-    const { error: uploadError } = await supabaseAdmin.storage
+    let { error: uploadError } = await supabaseAdmin.storage
       .from(bucket)
       .upload(objectPath, req.file.buffer, {
         contentType: req.file.mimetype,
         upsert: false
       });
+
+    // Auto-heal: if the bucket doesn't exist yet, create it and retry once.
+    if (uploadError && (uploadError.statusCode === '404' || /bucket not found/i.test(uploadError.message || ''))) {
+      console.warn(`[upload/image] Bucket "${bucket}" missing — creating it now...`);
+      const { error: createErr } = await supabaseAdmin.storage.createBucket(bucket, {
+        public: !isPrivate,
+        allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+        fileSizeLimit: 10 * 1024 * 1024,
+      });
+      if (createErr && !/already exists|already_exists/i.test(createErr.message || '')) {
+        console.error('[upload/image] createBucket failed:', createErr);
+        return res.status(500).json({ success: false, error: `Storage bucket "${bucket}" missing and could not be created: ${createErr.message}` });
+      }
+      console.log(`✅ [upload/image] Bucket "${bucket}" created. Retrying upload...`);
+      ({ error: uploadError } = await supabaseAdmin.storage
+        .from(bucket)
+        .upload(objectPath, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false,
+        }));
+    }
 
     if (uploadError) {
       console.error('Supabase Storage upload error:', uploadError);

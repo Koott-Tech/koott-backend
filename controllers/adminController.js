@@ -8,17 +8,8 @@ const {
   addMinutesToTime
 } = require('../utils/helpers');
 const { validatePassword } = require('../utils/passwordPolicy');
-const { formatFriendlyTime } = require('../utils/whatsappService');
 const { deriveSessionCount } = require('../services/packageService');
 const availabilityService = require('../utils/availabilityCalendarService');
-const {
-  normalizeChildSpecialistPricing,
-  validateChildSpecialistPricing,
-  buildChildSpecialistPackageRows,
-  minInitialPrice,
-  deleteSyncedChildSpecialistPackages,
-  isChildSpecialistEffective,
-} = require('../utils/childSpecialistPricing');
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const { getBookingTimeColumnKey } = require('../utils/sessionsBookingTimeColumn');
 const { getCalendarYmdInTimeZone } = require('../utils/sessionBookingCreatedAt');
@@ -28,20 +19,6 @@ const {
   getClientDisplayName,
   getPsychologistDisplayName,
 } = require('../utils/sessionTitleFormatter');
-
-async function deleteChildSpecialistPackagesForPsychologist(psychologistId) {
-  await deleteSyncedChildSpecialistPackages(supabaseAdmin, psychologistId);
-}
-
-async function upsertChildSpecialistPackages(psychologistId, normalizedPricing) {
-  await deleteChildSpecialistPackagesForPsychologist(psychologistId);
-  const rows = buildChildSpecialistPackageRows(normalizedPricing, psychologistId);
-  if (!rows.length) {
-    return { error: new Error('Child specialist pricing produced no package rows') };
-  }
-  const { error } = await supabaseAdmin.from('packages').insert(rows);
-  return { error };
-}
 
 const buildAdminManualWixMirror = ({
   syntheticWixBookingId,
@@ -80,7 +57,7 @@ const buildAdminManualWixMirror = ({
     contact_id: client?.user_id || client?.id || null,
     service_id: psychologistId || null,
     title: title || therapistName || 'Manual booking',
-    notes: notes || null,
+    // notes column not present on wix_bookings — pushed into payload instead (see below)
     start_time: startTimeIso,
     end_time: endTimeIso,
     price: amount,
@@ -115,6 +92,7 @@ const buildAdminManualWixMirror = ({
       manualBooking: true,
       packageId,
       sessionId,
+      notes: notes || null,
       paymentDetails: {
         wixPayMultipleDetails: [
           { paymentVendorName: 'inPerson' }
@@ -536,6 +514,12 @@ const createManualBooking = async (req, res) => {
       const manualMeetMinutes = getManualSessionDurationMinutes(manualSessionType, packageData);
       const clientName = getClientDisplayName(client, 'Client');
       const psychologistName = getPsychologistDisplayName(psychologist);
+
+      // Resolve client email from the joined `user` relation (clients.user_id → users.email)
+      const clientEmailResolved = Array.isArray(client?.user)
+        ? client.user?.[0]?.email
+        : client?.user?.email;
+
       const sessionData = {
         summary: buildKoottSessionTitle({ clientName, psychologistName }),
         description: buildKoottSessionDescription({
@@ -545,7 +529,10 @@ const createManualBooking = async (req, res) => {
         }),
         startDate: scheduled_date,
         startTime: scheduledTimeNormalized,
-        endTime: addMinutesToTime(scheduledTimeNormalized, manualMeetMinutes)
+        endTime: addMinutesToTime(scheduledTimeNormalized, manualMeetMinutes),
+        // Attendees — these are what was missing, causing "Not provided" / no client guest
+        clientEmail: clientEmailResolved || null,
+        psychologistEmail: psychologist?.email || null,
       };
       
       // Try to use psychologist's OAuth credentials
@@ -904,98 +891,54 @@ const createManualBooking = async (req, res) => {
     }
 
     try {
-        // WhatsApp notifications
-      const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-      
-      const clientName = (client.child_name && 
-        client.child_name.trim() !== '' && 
-        client.child_name.toLowerCase() !== 'pending')
-        ? client.child_name
-        : `${client.first_name || ''} ${client.last_name || ''}`.trim();
-      const psychologistName = `${psychologist.first_name} ${psychologist.last_name}`.trim();
+      // WhatsApp notifications via Interakt templates (same as Wix-flow bookings)
+      const interaktService = require('../utils/interaktService');
 
-        // Send to client
+      // Use the shared display-name resolver — handles "Not provided", "Pending" etc.
+      const clientName = getClientDisplayName(client, 'Client');
+      const psychologistName = `${psychologist.first_name} ${psychologist.last_name}`.trim();
+      const meetLinkOrPending = meetData?.meetLink && !meetData.meetLink.includes('meet.google.com/new')
+        ? meetData.meetLink
+        : null;
+
+      // Client → booking_confirmation_v1
       if (client.phone_number) {
-        if (meetData?.meetLink && !meetData.meetLink.includes('meet.google.com/new')) {
-          const childName = client.child_name && 
-            client.child_name.trim() !== '' && 
-            client.child_name.toLowerCase() !== 'pending'
-            ? client.child_name 
-            : null;
-          
-            await sendBookingConfirmation(client.phone_number, {
-            childName: childName,
-            date: scheduled_date,
-            time: scheduledTimeNormalized,
-            meetLink: meetData.meetLink,
-            psychologistName: psychologistName,
-            clientName: clientName,
-            packageInfo: packageInfoForNotification,
-            durationMinutes: manualNotifyMeetMinutes
-            });
+        const res = await interaktService.sendBookingConfirmation(client.phone_number, {
+          clientName,
+          psychologistName,
+          date: scheduled_date,
+          time: scheduledTimeNormalized,
+          meetLink: meetLinkOrPending,
+        });
+        if (res?.success) {
+          console.log('✅ [MANUAL BOOKING] booking_confirmation_v1 sent to client');
         } else {
-            const sessionDateTime = new Date(`${scheduled_date}T${scheduledTimeNormalized}`).toLocaleString('en-IN', {
-              timeZone: 'Asia/Kolkata',
-              dateStyle: 'long',
-              timeStyle: 'short'
-            });
-            const typeLine = sessionTypeLabel ? `\n📦 ${sessionTypeLabel}\n\n` : '\n';
-            const message = `🎉 Your session with Dr. ${psychologistName} is confirmed!${typeLine}` +
-              `📅 Date: ${sessionDateTime}\n\n` +
-            `We look forward to seeing you!`;
-            await sendWhatsAppTextWithRetry(client.phone_number, message);
+          console.warn('⚠️ [MANUAL BOOKING] booking_confirmation_v1 to client failed:', res?.error || res?.reason);
         }
-          console.log('✅ [MANUAL BOOKING] WhatsApp sent to client');
+      } else {
+        console.log('ℹ️ [MANUAL BOOKING] No client phone — skipping client WhatsApp');
       }
 
-        // Send to psychologist
+      // Psychologist → therapistconfirmation
       if (psychologist.phone) {
-        const { formatFriendlyTime } = require('../utils/whatsappService');
-        const formatBookingDateShort = (dateStr) => {
-          if (!dateStr) return '';
-          try {
-            const d = new Date(`${dateStr}T00:00:00+05:30`);
-            return d.toLocaleDateString('en-IN', {
-              weekday: 'short',
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric',
-              timeZone: 'Asia/Kolkata'
-            });
-          } catch {
-            return dateStr;
-          }
-        };
-        
-        const bullet = '•⁠  ⁠';
-        const formattedDate = formatBookingDateShort(scheduled_date);
-        const formattedTime = formatFriendlyTime(scheduledTimeNormalized);
-        const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-        
-        const meetLinkLine = meetData?.meetLink && !meetData.meetLink.includes('meet.google.com/new')
-          ? `Join link:\n${meetData.meetLink}\n\n`
-            : `Join link: Will be shared shortly\n\n`;
-        
-        const sessionTypeLine = `${bullet}Session: ${sessionTypeLabel}\n`;
-        
-          const message =
-          `Hey 👋\n\n` +
-          `New session booked with Koott.\n\n` +
-          `${bullet}Client: ${clientName}\n` +
-          sessionTypeLine +
-          `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n\n` +
-          meetLinkLine +
-          `Please be ready 5 mins early.\n\n` +
-          `For help: ${supportPhone}\n\n` +
-          `— Koott 💜`;
-        
-          await sendWhatsAppTextWithRetry(psychologist.phone, message);
-          console.log('✅ [MANUAL BOOKING] WhatsApp sent to psychologist');
+        const res = await interaktService.sendSessionNotificationPsychologist(psychologist.phone, {
+          therapistName: psychologistName,
+          clientName,
+          date: scheduled_date,
+          time: scheduledTimeNormalized,
+          meetLink: meetLinkOrPending,
+        });
+        if (res?.success) {
+          console.log('✅ [MANUAL BOOKING] session_notification_psychologist sent to therapist');
+        } else {
+          console.warn('⚠️ [MANUAL BOOKING] session_notification_psychologist to therapist failed:', res?.error || res?.reason);
+        }
+      } else {
+        console.log('ℹ️ [MANUAL BOOKING] No therapist phone — skipping therapist WhatsApp');
       }
     } catch (whatsappError) {
-        console.error('❌ [MANUAL BOOKING] WhatsApp notification failed:', whatsappError);
-      }
+      console.error('❌ [MANUAL BOOKING] WhatsApp notification failed:', whatsappError);
+    }
 
       // Check for immediate reminder
       try {
@@ -1254,6 +1197,7 @@ const createRecordOnlyBooking = async (req, res) => {
       status: sessionStatus,
       payment_id: payment.id,
       price: amount,
+      source: 'admin_manual',
       therapist_commission: therapist_commission ? parseFloat(therapist_commission) : 0,
       session_notes: notes || null,
       created_at: new Date().toISOString(),
@@ -2065,22 +2009,10 @@ const createPsychologist = async (req, res) => {
     const hashedPassword = await hashPassword(password);
 
     const isPsychiatrist = (designation || '').toLowerCase().includes('psychiatrist');
-    const useChildSpecialist =
-      !isPsychiatrist && specialist_category === 'child_specialist';
 
     let individualSessionPrice = price ? parseInt(price, 10) : null;
-    let normalizedChildPricing = null;
 
-    if (useChildSpecialist) {
-      normalizedChildPricing = normalizeChildSpecialistPricing(child_specialist_pricing);
-      const pricingErrors = validateChildSpecialistPricing(normalizedChildPricing);
-      if (pricingErrors.length > 0) {
-        return res.status(400).json(
-          errorResponse('Invalid child specialist pricing', pricingErrors)
-        );
-      }
-      individualSessionPrice = minInitialPrice(normalizedChildPricing);
-    } else if (!individualSessionPrice || individualSessionPrice <= 0) {
+    if (!individualSessionPrice || individualSessionPrice <= 0) {
       console.error('❌ Error: Individual session price is required and must be positive');
       return res.status(400).json(
         errorResponse('Individual session price is required. Please provide a valid price.')
@@ -2122,7 +2054,6 @@ const createPsychologist = async (req, res) => {
         faq_question_3: faq_question_3 || null,
         faq_answer_3: faq_answer_3 || null,
         specialist_category: specialistCategoryValue,
-        child_specialist_pricing: useChildSpecialist ? normalizedChildPricing : null,
         better_parent_pricing: better_parent_pricing != null ? better_parent_pricing : null,
         active: true // New psychologists are active by default
       }])
@@ -2142,53 +2073,41 @@ const createPsychologist = async (req, res) => {
       );
     }
 
-    if (useChildSpecialist) {
-      const { error: csPkgErr } = await upsertChildSpecialistPackages(psychologist.id, normalizedChildPricing);
-      if (csPkgErr) {
-        console.error('❌ Error creating child specialist packages:', csPkgErr);
-        await supabaseAdmin.from('psychologists').delete().eq('id', psychologist.id);
-        return res.status(500).json(
-          errorResponse('Failed to create child specialist session packages')
-        );
+    const individualSession = {
+      psychologist_id: psychologist.id,
+      package_type: 'individual',
+      name: 'Single Session',
+      description: 'One therapy session',
+      session_count: 1,
+      price: individualSessionPrice,
+      discount_percentage: 0
+    };
+
+    const { error: individualSessionError } = await supabaseAdmin
+      .from('packages')
+      .insert([individualSession]);
+
+    if (individualSessionError) {
+      console.error('❌ Error creating individual session package:', individualSessionError);
+      const { error: deleteError } = await supabaseAdmin
+        .from('psychologists')
+        .delete()
+        .eq('id', psychologist.id);
+
+      if (deleteError) {
+        console.error('❌ Error rolling back psychologist creation:', deleteError);
+      } else {
+        console.log('✅ Rolled back psychologist creation due to package creation failure');
       }
-      console.log('✅ Child specialist packages created');
-    } else {
-      const individualSession = {
-        psychologist_id: psychologist.id,
-        package_type: 'individual',
-        name: 'Single Session',
-        description: 'One therapy session',
-        session_count: 1,
-        price: individualSessionPrice,
-        discount_percentage: 0
-      };
 
-      const { error: individualSessionError } = await supabaseAdmin
-        .from('packages')
-        .insert([individualSession]);
-
-      if (individualSessionError) {
-        console.error('❌ Error creating individual session package:', individualSessionError);
-        const { error: deleteError } = await supabaseAdmin
-          .from('psychologists')
-          .delete()
-          .eq('id', psychologist.id);
-
-        if (deleteError) {
-          console.error('❌ Error rolling back psychologist creation:', deleteError);
-        } else {
-          console.log('✅ Rolled back psychologist creation due to package creation failure');
-        }
-
-        return res.status(500).json(
-          errorResponse('Failed to create individual session package')
-        );
-      }
-      console.log('✅ Individual session package created');
+      return res.status(500).json(
+        errorResponse('Failed to create individual session package')
+      );
     }
+    console.log('✅ Individual session package created');
 
     // Create dynamic packages for the psychologist based on admin selection
-    if (!useChildSpecialist && packages && Array.isArray(packages) && packages.length > 0) {
+    if (packages && Array.isArray(packages) && packages.length > 0) {
       try {
         console.log('📦 Creating custom packages:', packages);
         
@@ -2635,45 +2554,6 @@ const updatePsychologist = async (req, res) => {
       } catch (availabilityError) {
         console.error('❌ [ADMIN] Error handling availability:', availabilityError);
         // Continue - availability errors shouldn't block psychologist update
-      }
-    }
-
-    const shouldSyncChildPackages =
-      updateData.specialist_category !== undefined ||
-      updateData.child_specialist_pricing !== undefined;
-
-    if (shouldSyncChildPackages) {
-      const { data: latestRow } = await supabaseAdmin
-        .from('psychologists')
-        .select('specialist_category, child_specialist_pricing, individual_session_price')
-        .eq('id', psychologistId)
-        .single();
-
-      if (latestRow && isChildSpecialistEffective(latestRow) && latestRow.child_specialist_pricing) {
-        const norm = normalizeChildSpecialistPricing(latestRow.child_specialist_pricing);
-        const pricingErrors = validateChildSpecialistPricing(norm);
-        if (pricingErrors.length > 0) {
-          console.warn('⚠️ [ADMIN] Child specialist pricing validation:', pricingErrors);
-        }
-        await supabaseAdmin
-          .from('packages')
-          .delete()
-          .eq('psychologist_id', psychologistId)
-          .eq('package_type', 'individual');
-        const { error: csSyncErr } = await upsertChildSpecialistPackages(psychologistId, norm);
-        if (csSyncErr) {
-          console.error('❌ [ADMIN] Child specialist package sync failed:', csSyncErr);
-        }
-        const minP = minInitialPrice(norm);
-        if (minP != null && minP !== latestRow.individual_session_price) {
-          await supabaseAdmin
-            .from('psychologists')
-            .update({ individual_session_price: minP, updated_at: new Date().toISOString() })
-            .eq('id', psychologistId);
-          updatedPsychologist.individual_session_price = minP;
-        }
-      } else {
-        await deleteChildSpecialistPackagesForPsychologist(psychologistId);
       }
     }
 
@@ -3501,7 +3381,9 @@ const updateSession = async (req, res) => {
       }
     }
 
-    // When only date/time changed (same psychologist): refresh calendar event + Meet link
+    // When only date/time changed (same psychologist): UPDATE existing calendar event in place
+    // → keeps the SAME Meet link, just moves the event to the new date/time slot.
+    // The old slot disappears from the doctor's calendar because we're patching the same event.
     if (!doctorChanged && scheduleChanged && isSessionWithMeet && effectiveDate && effectiveTime) {
       const meetLinkService = require('../utils/meetLinkService');
 
@@ -3526,39 +3408,7 @@ const updateSession = async (req, res) => {
         .eq('id', clientIdForMeet)
         .single();
 
-      // Delete old event first (best effort), then create a new event for the new slot
       const oldEventId = currentSession.google_calendar_event_id;
-      let oldEventDeleteFailed = false;
-      if (oldEventId && psychForMeet?.google_calendar_credentials) {
-        try {
-          const creds = psychForMeet.google_calendar_credentials;
-          const oldAuth = {
-            access_token: creds.access_token,
-            refresh_token: creds.refresh_token,
-            expiry_date: creds.expiry_date
-          };
-          const eventIds = String(oldEventId).split(',').map((id) => id.trim()).filter(Boolean);
-          for (const eid of eventIds) {
-            const delResult = await meetLinkService.deleteCalendarEvent(eid, oldAuth);
-            if (delResult.success) {
-              console.log('✅ [Admin] Removed old calendar event for reschedule:', eid);
-            } else {
-              oldEventDeleteFailed = true;
-              console.warn('⚠️ [Admin] Could not delete old calendar event for reschedule:', eid, delResult.error);
-            }
-          }
-        } catch (err) {
-          oldEventDeleteFailed = true;
-          console.warn('⚠️ [Admin] Error removing old calendar event during reschedule:', err.message);
-        }
-      }
-
-      // Prevent duplicate events: if we couldn't delete old event, do not create another new one.
-      if (oldEventDeleteFailed) {
-        return res.status(500).json(
-          errorResponse('Could not remove previous calendar event. Reschedule aborted to avoid duplicate calendar events.')
-        );
-      }
 
       if (psychForMeet && clientForMeet) {
         const clientEmail = Array.isArray(clientForMeet.user)
@@ -3593,15 +3443,38 @@ const updateSession = async (req, res) => {
           };
         }
 
-        const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
-        if (meetResult.success && meetResult.meetLink) {
+        // Strategy: try to UPDATE the existing event (keeps the same Meet link).
+        // Fall back to creating a fresh event only if the old event is gone or update fails.
+        let meetResult = null;
+        const primaryEventId = oldEventId
+          ? String(oldEventId).split(',').map((id) => id.trim()).filter(Boolean)[0]
+          : null;
+
+        if (primaryEventId) {
+          const updateResult = await meetLinkService.updateCalendarEvent(primaryEventId, meetSessionData, userAuth);
+          if (updateResult.success && updateResult.meetLink) {
+            meetResult = { success: true, meetLink: updateResult.meetLink, eventId: updateResult.eventId };
+            console.log('✅ [Admin] Calendar event moved to new time; Meet link preserved:', updateResult.meetLink);
+          } else {
+            console.warn('⚠️ [Admin] updateCalendarEvent failed, falling back to create-new:', updateResult.error);
+          }
+        }
+
+        // Fallback: no old event ID OR update failed → create a fresh event (new Meet link)
+        if (!meetResult || !meetResult.success) {
+          meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
+          if (meetResult.success && meetResult.meetLink) {
+            console.log('✅ [Admin] Created new Meet link for rescheduled session (no old event to update):', sessionId);
+          }
+        }
+
+        if (meetResult?.success && meetResult.meetLink) {
           updateData.google_meet_link = meetResult.meetLink;
           updateData.google_meet_join_url = meetResult.meetLink;
           updateData.google_meet_start_url = meetResult.meetLink;
           updateData.google_calendar_event_id = meetResult.eventId || null;
-          console.log('✅ [Admin] Refreshed Meet link for rescheduled session:', sessionId);
         } else {
-          console.warn('⚠️ [Admin] Meet regeneration failed during reschedule, keeping previous links:', meetResult?.error);
+          console.warn('⚠️ [Admin] Meet preserve/regenerate both failed during reschedule, keeping previous links:', meetResult?.error);
         }
       }
     }
@@ -3770,16 +3643,14 @@ const updateSession = async (req, res) => {
       (async () => {
         try {
           const emailService = require('../utils/emailService');
-          const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
+          const interaktService = require('../utils/interaktService');
 
           const meetLink = updatedSession.google_meet_link ||
             updatedSession.google_meet_join_url ||
             updatedSession.google_calendar_link ||
             null;
 
-          const clientName = updatedSession.client?.child_name ||
-            `${updatedSession.client?.first_name || ''} ${updatedSession.client?.last_name || ''}`.trim() ||
-            'Client';
+          const clientName = getClientDisplayName(updatedSession.client, 'Client');
           const psychologistName = `${updatedSession.psychologist?.first_name || ''} ${updatedSession.psychologist?.last_name || ''}`.trim() || 'Psychologist';
 
           // Client email for confirmation email
@@ -3843,83 +3714,31 @@ const updateSession = async (req, res) => {
           });
           console.log('✅ [Admin] Session confirmation emails sent (reassigned session)');
 
-          // 2) WhatsApp to client (booking confirmation)
+          // 2) WhatsApp to client → booking_confirmation_v1
           const clientPhone = updatedSession.client?.phone_number || null;
           if (clientPhone && meetLink) {
-            const childName = updatedSession.client?.child_name &&
-              updatedSession.client.child_name.trim() !== '' &&
-              String(updatedSession.client.child_name).toLowerCase() !== 'pending'
-              ? updatedSession.client.child_name
-              : null;
-            const receiptClientName = `${updatedSession.client?.first_name || ''} ${updatedSession.client?.last_name || ''}`.trim() || null;
-            await sendBookingConfirmation(clientPhone, {
-              childName,
+            const res = await interaktService.sendBookingConfirmation(clientPhone, {
+              clientName, psychologistName,
               date: updatedSession.scheduled_date,
               time: updatedSession.scheduled_time,
               meetLink,
-              psychologistName,
-              packageInfo,
-              durationMinutes: adminRescheduleMeetMinutes,
-              receiptPdfBuffer: null,
-              receiptNumber: null,
-              clientName: receiptClientName
             });
-            console.log('✅ [Admin] WhatsApp booking confirmation sent to client');
+            if (res?.success) console.log('✅ [Admin] booking_confirmation_v1 sent to client (reassigned)');
+            else console.warn('⚠️ [Admin] booking_confirmation_v1 to client failed:', res?.error || res?.reason);
           }
 
-          // 3) WhatsApp to new psychologist (same as regular booking)
+          // 3) WhatsApp to new psychologist → therapistconfirmation
           const psychologistPhone = updatedSession.psychologist?.phone || null;
           if (psychologistPhone && meetLink) {
-            const formatBookingDateShort = (dateStr) => {
-              if (!dateStr) return '';
-              try {
-                const d = new Date(`${dateStr}T00:00:00+05:30`);
-                return d.toLocaleDateString('en-IN', {
-                  day: '2-digit',
-                  month: 'short',
-                  timeZone: 'Asia/Kolkata'
-                });
-              } catch {
-                return dateStr;
-              }
-            };
-            const formatFriendlyTime = (timeStr) => {
-              if (!timeStr) return '';
-              try {
-                const [h, m] = (timeStr || '').split(':');
-                const hours = parseInt(h, 10);
-                const minutes = parseInt(m || '0', 10);
-                const period = hours >= 12 ? 'PM' : 'AM';
-                const displayHours = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
-                return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`;
-              } catch {
-                return timeStr;
-              }
-            };
-            const bullet = '•⁠  ⁠';
-            const formattedDate = formatBookingDateShort(updatedSession.scheduled_date);
-            const formattedTime = formatFriendlyTime(updatedSession.scheduled_time);
-            let packageLine = '';
-            if (packageInfo && packageInfo.totalSessions) {
-              const total = packageInfo.totalSessions || 0;
-              const completed = packageInfo.completedSessions || 0;
-              const remaining = packageInfo.remainingSessions || 0;
-              packageLine = `${bullet}Package: ${completed}/${total} sessions completed, ${remaining} remaining\n`;
-            }
-            const psychologistMessage =
-              `Hey 👋\n\n` +
-              `New session booked with Koott.\n\n` +
-              `${bullet}Client: ${clientName}\n` +
-              packageLine +
-              `${bullet}Date: ${formattedDate}\n` +
-              `${bullet}Time: ${formattedTime} (IST)\n` +
-              `${bullet}Duration: ${adminRescheduleMeetMinutes} min\n\n` +
-              `Join link:\n${meetLink}\n\n` +
-              `Please be ready 5 mins early.\n\n` +
-              `For help: +91 95390 07766\n\n` +
-              `— Koott 💜`;
-            await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
-            console.log('✅ [Admin] WhatsApp notification sent to new psychologist');
+            const res = await interaktService.sendSessionNotificationPsychologist(psychologistPhone, {
+              therapistName: psychologistName,
+              clientName,
+              date: updatedSession.scheduled_date,
+              time: updatedSession.scheduled_time,
+              meetLink,
+            });
+            if (res?.success) console.log('✅ [Admin] therapistconfirmation sent to new therapist');
+            else console.warn('⚠️ [Admin] session_notification_psychologist failed:', res?.error || res?.reason);
           }
         } catch (notifError) {
           console.error('❌ [Admin] Error sending reassignment notifications:', notifError);
@@ -3934,7 +3753,6 @@ const updateSession = async (req, res) => {
         try {
           const emailService = require('../utils/emailService');
           const interaktService = require('../utils/interaktService');
-          const { sendWhatsAppTextWithRetry, formatFriendlyTime } = require('../utils/whatsappService');
           const oldDate = currentSession.scheduled_date;
           const oldTime = currentSession.scheduled_time;
           const newDate = updatedSession.scheduled_date;
@@ -3953,9 +3771,7 @@ const updateSession = async (req, res) => {
               : clientWithUser.user?.email
           );
 
-          const clientName = clientWithUser?.child_name ||
-            `${clientWithUser?.first_name || ''} ${clientWithUser?.last_name || ''}`.trim() ||
-            'Client';
+          const clientName = getClientDisplayName(clientWithUser, 'Client');
 
           // Resolve psychologist directly to ensure email/phone are always available
           const { data: psychologistRow } = await supabaseAdmin
@@ -3984,62 +3800,36 @@ const updateSession = async (req, res) => {
           }, oldDate, oldTime);
           console.log('✅ [Admin] Reschedule notification emails sent');
 
+          // Send rescheduled_link_sharing template to both CLIENT and THERAPIST
           const clientPhone = clientWithUser?.phone_number || updatedSession.client?.phone_number || null;
           if (clientPhone) {
-            const waResult = await interaktService.sendBookingConfirmation(clientPhone, {
-              clientName,
-              psychologistName,
+            const waResult = await interaktService.sendRescheduleNotification(clientPhone, {
+              recipientName: clientName,
+              otherPartyName: psychologistName,
               date: newDate,
               time: newTime,
               meetLink,
             });
             if (waResult?.success) {
-              console.log('✅ [Admin] Reschedule WhatsApp sent to client via Interakt booking template');
+              console.log('✅ [Admin] Reschedule WhatsApp sent to client (rescheduled_link_sharing)');
             } else {
-              console.warn('⚠️ [Admin] Failed to send reschedule WhatsApp to client via Interakt');
+              console.warn('⚠️ [Admin] Failed to send reschedule WhatsApp to client:', waResult?.error || waResult?.reason);
             }
           }
 
-          // Also notify psychologist on WhatsApp (similar to booking flow)
           const psychologistPhone = psychologistRow?.phone || null;
           if (psychologistPhone) {
-            const formatBookingDateShort = (dateStr) => {
-              if (!dateStr) return '';
-              try {
-                const d = new Date(`${dateStr}T00:00:00+05:30`);
-                return d.toLocaleDateString('en-IN', {
-                  weekday: 'short',
-                  day: '2-digit',
-                  month: 'short',
-                  year: 'numeric',
-                  timeZone: 'Asia/Kolkata'
-                });
-              } catch {
-                return dateStr;
-              }
-            };
-            const bullet = '•⁠  ⁠';
-            const psychDurationLine =
-              updatedSession.session_type !== 'free_assessment'
-                ? `${bullet}Duration: ${adminRescheduleMeetMinutes} min\n`
-                : '';
-            const psychologistMessage =
-              `Hey 👋\n\n` +
-              `A session has been rescheduled with Koott.\n\n` +
-              `${bullet}Client: ${clientName}\n` +
-              `${bullet}Old: ${formatBookingDateShort(oldDate)} at ${formatFriendlyTime(oldTime)} (IST)\n` +
-              `${bullet}New: ${formatBookingDateShort(newDate)} at ${formatFriendlyTime(newTime)} (IST)\n` +
-              psychDurationLine +
-              `\n` +
-              `${meetLink ? `Join link:\n${meetLink}\n\n` : ''}` +
-              `Please be ready 5 mins early.\n\n` +
-              `— Koott 💜`;
-
-            const psychWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
-            if (psychWaResult?.success) {
-              console.log('✅ [Admin] Reschedule WhatsApp sent to psychologist');
+            const waResultPsych = await interaktService.sendRescheduleNotification(psychologistPhone, {
+              recipientName: psychologistName,
+              otherPartyName: clientName,
+              date: newDate,
+              time: newTime,
+              meetLink,
+            });
+            if (waResultPsych?.success) {
+              console.log('✅ [Admin] Reschedule WhatsApp sent to psychologist (rescheduled_link_sharing)');
             } else {
-              console.warn('⚠️ [Admin] Failed to send reschedule WhatsApp to psychologist');
+              console.warn('⚠️ [Admin] Failed to send reschedule WhatsApp to psychologist:', waResultPsych?.error || waResultPsych?.reason);
             }
           }
         } catch (notifError) {

@@ -2033,7 +2033,7 @@ const handlePaymentSuccess = async (req, res) => {
           amount: paymentRecord.amount,
           packageId: actualPackageId,
           sessionType: paymentRecord.session_type,
-          clientName: clientDetails?.child_name || `${clientDetails?.first_name} ${clientDetails?.last_name}`.trim(),
+          clientName: getClientDisplayName(clientDetails, 'Client'),
           clientEmail: clientDetails?.user?.email || clientDetails?.email,
           clientPhone: clientDetails?.phone_number
         },
@@ -2436,38 +2436,22 @@ const handlePaymentSuccess = async (req, res) => {
           console.log('📱 Psychologist phone:', psychologistDetails.phone);
           console.log('📱 Meet link available:', !!meetData?.meetLink);
           console.log('📱 Receipt URL available:', !!receiptResult?.fileUrl);
-      const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-      
-      const clientName = clientDetails.child_name || `${clientDetails.first_name} ${clientDetails.last_name}`.trim();
+      // WhatsApp via Interakt templates (same as Wix flow)
+      const interaktService = require('../utils/interaktService');
+
+      const clientName = getClientDisplayName(clientDetails, 'Client');
       const psychologistName = `${psychologistDetails.first_name} ${psychologistDetails.last_name}`.trim();
 
-      // Send WhatsApp to client
+      // Send WhatsApp to client → booking_confirmation_v1
       const clientPhone = clientDetails.phone_number || null;
       if (clientPhone && meetData?.meetLink) {
-        // Only include childName if child_name exists and is not empty/null/'Pending'
-        const childName = clientDetails.child_name && 
-          clientDetails.child_name.trim() !== '' && 
-          clientDetails.child_name.toLowerCase() !== 'pending'
-          ? clientDetails.child_name 
-          : null;
-        
-        // Get client name from receiptDetails (first_name + last_name) for receipt filename
-        const receiptClientName = receiptResult?.receiptDetails?.client_name || 
-                                  `${clientDetails.first_name || ''} ${clientDetails.last_name || ''}`.trim() || null;
-        
-        const clientDetails_wa = {
-          childName: childName,
+        const clientWaResult = await interaktService.sendBookingConfirmation(clientPhone, {
+          clientName,
+          psychologistName,
           date: actualScheduledDate,
           time: actualScheduledTime,
           meetLink: meetData.meetLink,
-          psychologistName: psychologistName, // Add psychologist name to WhatsApp message
-          durationMinutes: meetDurationMinutes,
-          // Pass receipt PDF buffer so we can send the PDF via WhatsApp
-          receiptPdfBuffer: receiptResult?.pdfBuffer || null,
-          receiptNumber: receiptResult?.receiptNumber || null,
-          clientName: receiptClientName // Client name (first_name + last_name) for receipt filename
-        };
-        const clientWaResult = await sendBookingConfirmation(clientPhone, clientDetails_wa);
+        });
         if (clientWaResult?.success) {
               console.log('✅ WhatsApp confirmation sent to client (receipt sent via email with PDF attachment)');
               whatsappLogs.clientSent = true;
@@ -2549,59 +2533,16 @@ const handlePaymentSuccess = async (req, res) => {
         });
       }
 
-      // Send WhatsApp to psychologist (single detailed message)
+      // Send WhatsApp to therapist → therapistconfirmation template
       const psychologistPhone = psychologistDetails.phone || null;
       if (psychologistPhone && meetData?.meetLink) {
-        // Format date and time using the same functions as client messages
-        const formatBookingDateShort = (dateStr) => {
-          if (!dateStr) return '';
-          try {
-            const d = new Date(`${dateStr}T00:00:00+05:30`);
-            return d.toLocaleDateString('en-IN', {
-              weekday: 'short',
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric',
-              timeZone: 'Asia/Kolkata'
-            });
-          } catch {
-            return dateStr;
-          }
-        };
-        
-        const formatFriendlyTime = (timeStr) => {
-          if (!timeStr) return '';
-          try {
-            const [h, m] = timeStr.split(':');
-            const hours = parseInt(h, 10);
-            const minutes = parseInt(m || '0', 10);
-            const period = hours >= 12 ? 'PM' : 'AM';
-            const displayHours = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
-            const displayMinutes = minutes.toString().padStart(2, '0');
-            return `${displayHours}:${displayMinutes} ${period}`;
-          } catch {
-            return timeStr;
-          }
-        };
-        
-        const bullet = '•⁠  ⁠';
-        const formattedDate = formatBookingDateShort(actualScheduledDate);
-        const formattedTime = formatFriendlyTime(actualScheduledTime);
-        const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-        
-        const psychologistMessage =
-          `Hey 👋\n\n` +
-          `New session booked with Koott.\n\n` +
-          `${bullet}Client: ${clientName}\n` +
-          `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n` +
-          `${bullet}Duration: ${meetDurationMinutes} min\n\n` +
-          `Join link:\n${meetData.meetLink}\n\n` +
-          `Please be ready 5 mins early.\n\n` +
-          `For help: ${supportPhone}\n\n` +
-          `— Koott 💜`;
-        
-        const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
+        const psychologistWaResult = await interaktService.sendSessionNotificationPsychologist(psychologistPhone, {
+          therapistName: psychologistName,
+          clientName,
+          date: actualScheduledDate,
+          time: actualScheduledTime,
+          meetLink: meetData.meetLink,
+        });
         if (psychologistWaResult?.success) {
               console.log('✅ WhatsApp notification sent to psychologist via WhatsApp API (async)');
               whatsappLogs.psychologistSent = true;

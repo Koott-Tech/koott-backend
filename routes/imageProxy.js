@@ -13,6 +13,7 @@ const ALLOWED_BUCKETS = new Set([
   'blog-images',
   'counselling-images',
   'profile-pictures',
+  'manual-bookings',
   'static-files',
 ]);
 

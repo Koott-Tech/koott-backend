@@ -852,6 +852,110 @@ class MeetLinkService {
    * Delete a calendar event by ID (e.g. on rollback).
    * Uses userAuth if provided (event on user's primary calendar), else service account (primary).
    */
+  /**
+   * Update an existing Google Calendar event's date/time, KEEPING the same Meet link.
+   * Use this for reschedules so the same join URL stays valid for participants.
+   *
+   * @param {string} eventId - Google Calendar event ID
+   * @param {object} sessionData - { startDate: 'YYYY-MM-DD', startTime: 'HH:MM', endTime: 'HH:MM', summary?, description? }
+   * @param {object|null} userAuth - { access_token, refresh_token, expiry_date }
+   * @returns {Promise<{ success, meetLink?, eventId?, error? }>}
+   */
+  async updateCalendarEvent(eventId, sessionData, userAuth = null) {
+    if (!eventId) return { success: false, error: 'No eventId provided' };
+    try {
+      let calendar;
+      if (userAuth?.access_token) {
+        const oauth2Client = new google.auth.OAuth2(
+          process.env.GOOGLE_CLIENT_ID,
+          process.env.GOOGLE_CLIENT_SECRET,
+          GOOGLE_OAUTH_REDIRECT_URI
+        );
+        const now = Date.now();
+        const expiryDate = userAuth.expiry_date ? new Date(userAuth.expiry_date).getTime() : null;
+        const bufferTime = 5 * 60 * 1000;
+        if (expiryDate && expiryDate <= (now + bufferTime)) {
+          try {
+            oauth2Client.setCredentials({
+              access_token: userAuth.access_token,
+              refresh_token: userAuth.refresh_token,
+              expiry_date: userAuth.expiry_date,
+            });
+            const { token } = await oauth2Client.getAccessToken();
+            const updated = oauth2Client.credentials;
+            if (updated && updated.access_token) {
+              userAuth.access_token = updated.access_token || token;
+              userAuth.expiry_date = updated.expiry_date;
+              userAuth.refresh_token = updated.refresh_token || userAuth.refresh_token;
+            } else if (token) {
+              userAuth.access_token = token;
+            }
+          } catch (refreshError) {
+            logError('❌ Token refresh failed before update:', refreshError.message);
+          }
+        }
+        oauth2Client.setCredentials({
+          access_token: userAuth.access_token,
+          refresh_token: userAuth.refresh_token,
+          expiry_date: userAuth.expiry_date,
+        });
+        calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+      } else if (this.serviceAccount) {
+        const auth = new google.auth.JWT({
+          email: this.serviceAccount.client_email,
+          key: this.serviceAccount.private_key,
+          scopes: ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/calendar.events'],
+        });
+        await auth.authorize();
+        calendar = google.calendar({ version: 'v3', auth });
+      } else {
+        return { success: false, error: 'No auth available to update event' };
+      }
+
+      // Fetch the existing event so we preserve attendees, conference data, etc.
+      const { data: existing } = await calendar.events.get({ calendarId: 'primary', eventId });
+      if (!existing) return { success: false, error: 'Event not found' };
+
+      // Build new start/end in IST
+      const startISO = `${sessionData.startDate}T${sessionData.startTime}:00+05:30`;
+      const endISO = `${sessionData.startDate}T${sessionData.endTime}:00+05:30`;
+
+      const patchBody = {
+        start: { dateTime: startISO, timeZone: 'Asia/Kolkata' },
+        end: { dateTime: endISO, timeZone: 'Asia/Kolkata' },
+      };
+      if (sessionData.summary) patchBody.summary = sessionData.summary;
+      if (sessionData.description) patchBody.description = sessionData.description;
+
+      const { data: patched } = await calendar.events.patch({
+        calendarId: 'primary',
+        eventId,
+        sendUpdates: 'all',
+        // conferenceDataVersion=1 keeps the Hangouts/Meet conference attached on patch
+        conferenceDataVersion: 1,
+        requestBody: patchBody,
+      });
+
+      // Extract the (unchanged) Meet link
+      let meetLink = patched?.hangoutLink || null;
+      if (!meetLink && Array.isArray(patched?.conferenceData?.entryPoints)) {
+        const entry = patched.conferenceData.entryPoints.find((e) => e.entryPointType === 'video');
+        meetLink = entry?.uri || null;
+      }
+
+      log('✅ Calendar event updated (Meet link preserved):', eventId, meetLink);
+      return { success: true, eventId: patched.id, meetLink };
+    } catch (error) {
+      const httpStatus = typeof error.code === 'number' ? error.code : Number(error.code) || error.response?.status;
+      const msg = String(error.message || error.response?.data?.error?.message || '');
+      if (httpStatus === 404 || httpStatus === 410 || /resource has been deleted/i.test(msg)) {
+        return { success: false, error: 'Event no longer exists', notFound: true };
+      }
+      logError('❌ updateCalendarEvent failed:', msg);
+      return { success: false, error: msg };
+    }
+  }
+
   async deleteCalendarEvent(eventId, userAuth = null) {
     if (!eventId) return { success: false, error: 'No eventId provided' };
     try {

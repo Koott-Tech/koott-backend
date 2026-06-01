@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const { supabaseAdmin } = require('../config/supabase');
-const whatsappService = require('../utils/whatsappService');
+const interaktService = require('../utils/interaktService');
+const { getClientDisplayName } = require('../utils/sessionTitleFormatter');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
@@ -43,9 +44,9 @@ class SessionReminderService {
     console.log('🔍 Checking for sessions and free assessments requiring reminders...');
 
     try {
-      // Get current time and calculate 1 hour from now
+      // Get current time and calculate 2 hours from now (per spec)
       const now = dayjs().tz('Asia/Kolkata');
-      const endTime = now.add(1, 'hour');
+      const endTime = now.add(2, 'hour');
       
       console.log(`📅 Current time: ${now.format('YYYY-MM-DD HH:mm:ss')}`);
       console.log(`📅 Checking for sessions between: ${now.format('YYYY-MM-DD HH:mm:ss')} and ${endTime.format('YYYY-MM-DD HH:mm:ss')}`);
@@ -145,8 +146,8 @@ class SessionReminderService {
         const sessionTime = dayjs.tz(`${session.scheduled_date} ${session.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
         const timeDiffMinutes = sessionTime.diff(now, 'minute'); // Difference in minutes
         
-        // Check if session is between 0 and 60 minutes from now (next 1 hour)
-        return timeDiffMinutes >= 0 && timeDiffMinutes <= 60;
+        // Check if session is between 0 and 120 minutes from now (next 2 hours)
+        return timeDiffMinutes >= 0 && timeDiffMinutes <= 120;
       });
 
       console.log(`🔔 Found ${reminderSessions.length} sessions in the next 1 hour requiring reminders`);
@@ -158,7 +159,7 @@ class SessionReminderService {
           // Parse directly in IST timezone to avoid UTC conversion issues
           const sessionTime = dayjs.tz(`${session.scheduled_date} ${session.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
           const timeDiffMinutes = sessionTime.diff(now, 'minute');
-          const clientName = session.client?.child_name || `${session.client?.first_name || ''} ${session.client?.last_name || ''}`.trim() || 'Unknown';
+          const clientName = getClientDisplayName(session.client, 'Unknown');
           console.log(`   ${index + 1}. Session ${session.id} for ${clientName}: ${session.scheduled_date} ${session.scheduled_time} (${timeDiffMinutes} minutes from now)`);
         });
       }
@@ -213,8 +214,8 @@ class SessionReminderService {
         const assessmentTime = dayjs.tz(`${assessment.scheduled_date} ${assessment.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
         const timeDiffMinutes = assessmentTime.diff(now, 'minute');
         
-        // Check if assessment is between 0 and 60 minutes from now (next 1 hour)
-        return timeDiffMinutes >= 0 && timeDiffMinutes <= 60;
+        // Check if assessment is between 0 and 120 minutes from now (next 2 hours)
+        return timeDiffMinutes >= 0 && timeDiffMinutes <= 120;
       });
 
       console.log(`🔔 Found ${reminderFreeAssessments.length} free assessments in the next 1 hour requiring reminders`);
@@ -305,75 +306,46 @@ class SessionReminderService {
       const formattedDate = sessionDateTime.format('DD MMM YYYY');
       const formattedTime = sessionDateTime.format('h:mm A');
 
-      const clientName = client.child_name || `${client.first_name} ${client.last_name}`.trim();
+      const clientName = getClientDisplayName(client, 'Client');
       const psychologistName = `${psychologist.first_name} ${psychologist.last_name}`.trim();
 
-      // Send reminders to both client and psychologist
-      // Using Promise.all to send both messages concurrently (faster) but still sequentially per session
-      const reminderPromises = [];
+      // Send reminder to CLIENT ONLY via Interakt `sessionreminderautomatic` template.
+      // Therapists do not receive automatic reminders (per product spec).
+      const meetLink = session.google_meet_link || null;
 
-      // Send reminder to client
+      // Compute time-to-start label based on actual time until session
+      const minsUntil = sessionDateTime.diff(dayjs().tz('Asia/Kolkata'), 'minute');
+      let timeToStart;
+      if (minsUntil <= 0) timeToStart = 'a few minutes';
+      else if (minsUntil <= 35) timeToStart = '30 minutes';
+      else if (minsUntil <= 75) timeToStart = '1 hour';
+      else if (minsUntil <= 105) timeToStart = '1.5 hours';
+      else timeToStart = '2 hours';
+
       if (client.phone_number) {
-        const bullet = '•⁠  ⁠';
-        const clientMessage = `See You Soon for Your Session,\nYour session with ${psychologistName} is scheduled in a little while.\n\n${bullet}${formattedDate}\n${bullet}${formattedTime} (IST)\n\nPlease join from a quiet space with good internet.\nWe're here for you.\n\n— Koott 💜`;
-
-        reminderPromises.push(
-          whatsappService.sendWhatsAppTextWithRetry(client.phone_number, clientMessage)
-            .then(result => {
-              if (result?.success) {
-                console.log(`✅ Reminder sent to client for session ${session.id}`);
-              } else {
-                console.warn(`⚠️  Failed to send reminder to client for session ${session.id}:`, result?.error || result?.reason);
-              }
-            })
-            .catch(err => {
-              console.error(`❌ Error sending reminder to client for session ${session.id}:`, err);
-            })
-        );
+        try {
+          const result = await interaktService.sendSessionReminder(client.phone_number, {
+            recipientName: clientName,
+            otherPartyName: psychologistName,
+            meetLink,
+            timeToStart,
+          });
+          if (result?.success) {
+            console.log(`✅ sessionreminderautomatic sent to client for session ${session.id}`);
+          } else {
+            console.warn(`⚠️  Failed to send reminder to client for session ${session.id}:`, result?.error || result?.reason);
+          }
+        } catch (err) {
+          console.error(`❌ Error sending reminder to client for session ${session.id}:`, err);
+        }
       } else {
         console.log(`ℹ️  No phone number for client in session ${session.id}`);
       }
 
-      // Send reminder to psychologist
-      if (psychologist.phone) {
-        const bullet = '•⁠  ⁠';
-        const meetLinkLine = session.google_meet_link ? `Join link:\n${session.google_meet_link}\n\n` : '';
-        
-        const psychologistMessage =
-          `Hey 👋\n\n` +
-          `Reminder: You have a session with Koott.\n\n` +
-          `${bullet}Client: ${clientName}\n` +
-          `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n\n` +
-          meetLinkLine +
-          `Please be ready 5 mins early.\n\n` +
-          `For help: +91 95390 07766\n\n` +
-          `— Koott 💜`;
-
-        reminderPromises.push(
-          whatsappService.sendWhatsAppTextWithRetry(psychologist.phone, psychologistMessage)
-            .then(result => {
-              if (result?.success) {
-                console.log(`✅ Reminder sent to psychologist for session ${session.id}`);
-              } else {
-                console.warn(`⚠️  Failed to send reminder to psychologist for session ${session.id}:`, result?.error || result?.reason);
-              }
-            })
-            .catch(err => {
-              console.error(`❌ Error sending reminder to psychologist for session ${session.id}:`, err);
-            })
-        );
-      } else {
-        console.log(`ℹ️  No phone number for psychologist in session ${session.id}`);
-      }
-
-      // Wait for both messages to complete (or fail) before moving to next session
-      await Promise.all(reminderPromises);
-
       // Note: reminder_sent was already set to true at the start of this function (atomic lock)
       // This ensures no duplicate reminders are sent even if multiple cron jobs run concurrently
 
-      // Create notification record to track that reminder was sent
+      // Create in-app notification for the client only
       await supabaseAdmin
         .from('notifications')
         .insert([
@@ -385,19 +357,10 @@ class SessionReminderService {
             message: `Your session with ${psychologistName} is scheduled`,
             related_id: session.id,
             is_read: false
-          },
-          {
-            user_id: psychologist.id,
-            user_role: 'psychologist',
-            type: 'session_reminder_2h',
-            title: 'Session Reminder',
-            message: `Your session with ${clientName} is scheduled`,
-            related_id: session.id,
-            is_read: false
           }
         ]);
 
-      console.log(`✅ Reminder notifications created for session ${session.id}`);
+      console.log(`✅ Reminder notification created for session ${session.id}`);
     } catch (error) {
       console.error(`❌ Error sending reminder for session ${session.id}:`, error);
     }
@@ -477,64 +440,32 @@ class SessionReminderService {
       const formattedDate = assessmentDateTime.format('DD MMM YYYY');
       const formattedTime = assessmentDateTime.format('h:mm A');
 
-      const clientName = client.child_name || `${client.first_name} ${client.last_name}`.trim();
+      const clientName = getClientDisplayName(client, 'Client');
       const psychologistName = psychologist ? `${psychologist.first_name} ${psychologist.last_name}`.trim() : 'our specialist';
 
-      // Send reminders to both client and psychologist (if psychologist exists)
-      const reminderPromises = [];
-
-      // Send reminder to client
+      // Client reminder via Interakt template (free assessment uses the same reminder template)
       if (client.phone_number) {
-        const bullet = '•⁠  ⁠';
-        const clientMessage = `See You Soon for Your Session,\nYour free assessment session is scheduled in a little while.\n\n${bullet}${formattedDate}\n${bullet}${formattedTime} (IST)\n\nPlease join from a quiet space with good internet.\nWe're here for you.\n\n— Koott 💜`;
-
-        reminderPromises.push(
-          whatsappService.sendWhatsAppTextWithRetry(client.phone_number, clientMessage)
-            .then(result => {
-              if (result?.success) {
-                console.log(`✅ Reminder sent to client for free assessment ${assessment.id}`);
-              } else {
-                console.warn(`⚠️  Failed to send reminder to client for free assessment ${assessment.id}:`, result?.error || result?.reason);
-              }
-            })
-            .catch(err => {
-              console.error(`❌ Error sending reminder to client for free assessment ${assessment.id}:`, err);
-            })
-        );
+        try {
+          const meetLink = assessment.google_meet_link || null;
+          const result = await interaktService.sendSessionReminder(client.phone_number, {
+            recipientName: clientName,
+            otherPartyName: psychologistName,
+            meetLink,
+            timeToStart: '30 minutes',
+          });
+          if (result?.success) {
+            console.log(`✅ sessionreminderautomatic sent to client for free assessment ${assessment.id}`);
+          } else {
+            console.warn(`⚠️  Failed to send reminder to client for free assessment ${assessment.id}:`, result?.error || result?.reason);
+          }
+        } catch (err) {
+          console.error(`❌ Error sending reminder to client for free assessment ${assessment.id}:`, err);
+        }
       } else {
         console.log(`ℹ️  No phone number for client in free assessment ${assessment.id}`);
       }
 
-      // Send reminder to psychologist if exists
-      if (psychologist && psychologist.phone) {
-        const bullet = '•⁠  ⁠';
-        const psychologistMessage =
-          `Hey 👋\n\n` +
-          `Reminder: You have a free assessment session with Koott.\n\n` +
-          `${bullet}Client: ${clientName}\n` +
-          `${bullet}Date: ${formattedDate}\n` +
-          `${bullet}Time: ${formattedTime} (IST)\n\n` +
-          `Please be ready 5 mins early.\n\n` +
-          `For help: +91 95390 07766\n\n` +
-          `— Koott 💜`;
-
-        reminderPromises.push(
-          whatsappService.sendWhatsAppTextWithRetry(psychologist.phone, psychologistMessage)
-            .then(result => {
-              if (result?.success) {
-                console.log(`✅ Reminder sent to psychologist for free assessment ${assessment.id}`);
-              } else {
-                console.warn(`⚠️  Failed to send reminder to psychologist for free assessment ${assessment.id}:`, result?.error || result?.reason);
-              }
-            })
-            .catch(err => {
-              console.error(`❌ Error sending reminder to psychologist for free assessment ${assessment.id}:`, err);
-            })
-        );
-      }
-
-      // Wait for all messages to complete
-      await Promise.all(reminderPromises);
+      // Therapist reminder intentionally removed — per product spec, only the client gets the reminder.
 
       // Update the lock notification with proper messages, or create new ones if lock wasn't created
       const notificationsToInsert = [
@@ -549,17 +480,7 @@ class SessionReminderService {
         }
       ];
 
-      if (psychologist) {
-        notificationsToInsert.push({
-          user_id: psychologist.id,
-          user_role: 'psychologist',
-          type: 'free_assessment_reminder_2h',
-          title: 'Free Assessment Reminder',
-          message: `Your free assessment session with ${clientName} is scheduled`,
-          related_id: assessment.id,
-          is_read: false
-        });
-      }
+      // Psychologist in-app notification intentionally removed — per spec, reminders are client-only.
 
       // Update the lock notification or insert new ones
       if (insertedLock) {
@@ -569,12 +490,7 @@ class SessionReminderService {
           .update({ message: notificationsToInsert[0].message })
           .eq('id', insertedLock.id);
 
-        // Insert psychologist notification if needed
-        if (psychologist && notificationsToInsert.length > 1) {
-          await supabaseAdmin
-            .from('notifications')
-            .insert([notificationsToInsert[1]]);
-        }
+        // No psychologist notification — reminders are client-only.
       } else {
         // If lock wasn't created, try to insert all notifications (may fail if duplicates exist)
         const { error: insertError } = await supabaseAdmin
@@ -681,7 +597,7 @@ class SessionReminderService {
         const sessionTime = dayjs.tz(`${session.scheduled_date} ${session.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
         const timeDiffMinutes = sessionTime.diff(now, 'minute');
         
-        return timeDiffMinutes >= 0 && timeDiffMinutes <= 60;
+        return timeDiffMinutes >= 0 && timeDiffMinutes <= 120;
       });
 
       if (newReminderSessions.length > 0) {
@@ -775,7 +691,7 @@ class SessionReminderService {
       const timeDiffMinutes = sessionTime.diff(now, 'minute');
 
       // Check if session is between 0 and 60 minutes from now (next 1 hour)
-      if (timeDiffMinutes >= 0 && timeDiffMinutes <= 60) {
+      if (timeDiffMinutes >= 0 && timeDiffMinutes <= 120) {
         console.log(`✅ [PRIORITY] Session ${sessionId} is in next 1 hour, sending reminder immediately...`);
         await this.sendReminderForSession(session);
         console.log(`✅ [PRIORITY] Reminder sent immediately for session ${sessionId}`);

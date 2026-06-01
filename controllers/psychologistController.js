@@ -1,5 +1,6 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { computeSessionDoctorWallet } = require('../utils/sessionCommission');
+const { getClientDisplayName } = require('../utils/sessionTitleFormatter');
 const { 
   successResponse, 
   errorResponse,
@@ -1759,90 +1760,28 @@ const completeSession = async (req, res) => {
           console.log(`✅ In-app notification created successfully`);
         }
 
-        // Send WhatsApp notification to client
+        // Send session_follow_up_v2 to client via Interakt
         try {
-          const { sendSessionCompletionNotification } = require('../utils/whatsappService');
+          const interaktService = require('../utils/interaktService');
           const clientPhone = client?.phone_number || null;
-          
-          console.log(`📱 WhatsApp sending attempt for session ${sessionId} (package: ${regularSession.package_id || 'none'})`);
-          console.log(`📱 Client data:`, {
-            hasClient: !!client,
-            clientId: client?.id,
-            phoneNumber: clientPhone ? `${String(clientPhone).substring(0, 3)}***` : 'NOT FOUND',
-            sessionType: regularSession.session_type,
-            isPackage: !!regularSession.package_id
-          });
-          
           if (clientPhone) {
-            const psychologistName = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim() || 'our specialist';
-            const isFreeAssessment = regularSession.session_type === 'free_assessment';
-            // Always use production URL in WhatsApp/email links (never localhost)
-            const PRODUCTION_SITE_URL =
-              process.env.SITE_URL || process.env.PUBLIC_APP_URL || 'https://www.koott.in';
-            const bookingLink = `${PRODUCTION_SITE_URL}/psychologists`;
-            const feedbackLink = isFreeAssessment 
-              ? `${PRODUCTION_SITE_URL}/profile/sessions?tab=completed`
-              : `${PRODUCTION_SITE_URL}/profile/reports`;
+            const psychologistName = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim() || 'your therapist';
+            const clientName = getClientDisplayName(client, 'there');
+            const therapistNote = (updatedSession?.summary && String(updatedSession.summary).trim())
+              || (updatedSession?.summary_notes && String(updatedSession.summary_notes).trim())
+              || '';
+            const completedAt = updatedSession?.completion_date || updatedSession?.updated_at || new Date().toISOString();
 
-            const sessionTypeLabel = regularSession.package_id ? 'package session' : (isFreeAssessment ? 'free assessment' : 'therapy session');
-            console.log(`📱 Attempting to send WhatsApp completion for ${sessionTypeLabel} (Session ID: ${sessionId}) to client: ${clientPhone.substring(0, 3)}***`);
-            
-            // Fetch package information if this is a package session
-            let packageInfo = null;
-            if (regularSession.package_id) {
-              try {
-                // Get package data
-                const { data: packageData, error: packageError } = await supabaseAdmin
-                  .from('packages')
-                  .select('session_count')
-                  .eq('id', regularSession.package_id)
-                  .single();
-                
-                if (!packageError && packageData) {
-                  // Get all sessions for this package and count completed ones
-                  const { data: packageSessions, error: sessionsError } = await supabaseAdmin
-                    .from('sessions')
-                    .select('id, status')
-                    .eq('package_id', regularSession.package_id);
-                  
-                  if (!sessionsError && packageSessions) {
-                    const totalSessions = packageData.session_count || 0;
-                    // Count completed sessions (including the one just completed)
-                    const completedSessions = packageSessions.filter(s => s.status === 'completed').length;
-                    
-                    packageInfo = {
-                      totalSessions: totalSessions,
-                      completedSessions: completedSessions
-                    };
-                    
-                    console.log(`📦 Package info for session ${sessionId}: ${completedSessions}/${totalSessions} completed`);
-                  }
-                }
-              } catch (packageInfoError) {
-                console.warn(`⚠️ Error fetching package info for session ${sessionId}:`, packageInfoError);
-                // Continue without package info - will use regular template
-              }
-            }
-            
-            const clientResult = await sendSessionCompletionNotification(clientPhone, {
-              psychologistName: psychologistName,
-              bookingLink: bookingLink,
-              feedbackLink: feedbackLink,
-              packageInfo: packageInfo
+            const result = await interaktService.sendSessionFollowUp(clientPhone, {
+              clientName, psychologistName, completedAt, therapistNote,
             });
-            if (clientResult?.success) {
-              console.log(`✅ Session completion WhatsApp sent to client for ${sessionTypeLabel} (Session ID: ${sessionId})`);
-            } else {
-              console.warn(`⚠️ Failed to send session completion WhatsApp to client for ${sessionTypeLabel} (Session ID: ${sessionId}). Error: ${clientResult?.error || 'Unknown error'}`);
-            }
+            if (result?.success) console.log(`✅ session_follow_up_v2 sent to client for session ${sessionId}`);
+            else console.warn(`⚠️ session_follow_up_v2 to client failed for session ${sessionId}:`, result?.error || result?.reason);
           } else {
-            console.warn(`⚠️ Skipping WhatsApp completion for session ${sessionId} (${regularSession.package_id ? 'package session' : 'regular session'}): Client phone number not found.`);
-            console.warn(`⚠️ Session client data:`, client ? { id: client.id, hasPhone: !!client.phone_number } : 'No client data');
+            console.warn(`⚠️ Skipping session_follow_up_v2 for session ${sessionId}: client phone not found.`);
           }
         } catch (waError) {
-          console.error(`❌ Error sending session completion WhatsApp for session ${sessionId}:`, waError);
-          console.error(`❌ Error stack:`, waError.stack);
-          // Don't fail the request if WhatsApp fails
+          console.error(`❌ Error sending session_follow_up_v2 for session ${sessionId}:`, waError.message);
         }
       } catch (notificationError) {
         console.error('Error sending completion notification:', notificationError);

@@ -1,8 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
-const { sendWhatsAppTextWithRetry, normalizePhoneNumber } = require('../utils/whatsappService');
 const emailService = require('../utils/emailService');
+
+/** Normalize a phone number string. Accepts "+91 9876 543210", "9876543210" → "+919876543210". */
+function normalizePhoneNumber(input) {
+  if (!input) return null;
+  const cleaned = String(input).trim().replace(/[\s\-().]/g, '');
+  if (!cleaned) return null;
+  if (cleaned.startsWith('+')) return cleaned;
+  if (/^\d{10}$/.test(cleaned)) return `+91${cleaned}`;
+  return `+${cleaned}`;
+}
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const WORKSHOP_NOTIFY_ALSO_E164 = '+918590576385';
@@ -114,35 +123,10 @@ router.post('/workshop-register', async (req, res) => {
           .filter(Boolean)
           .join('\n');
 
-        for (const to of recipients) {
-          try {
-            // Background notifications: single attempt, no retry delay.
-            await sendWhatsAppTextWithRetry(to, internalMsg, 0, 0);
-          } catch (e) {
-            console.error('[events/workshop-register] internal WA failed:', to, e?.message || e);
-          }
-        }
-
-        if (registrantWhatsApp) {
-          const userMsg = [
-            `Hi ${fullName},`,
-            '',
-            `Thanks for registering for ${eventTitle}.`,
-            'Your spot is reserved.',
-            '',
-            'Join link:',
-            sessionJoinUrl,
-            '',
-            'Use this link for the session — same link as in your email.',
-            '',
-            '— Koott',
-          ].join('\n');
-          try {
-            await sendWhatsAppTextWithRetry(registrantWhatsApp, userMsg, 0, 0);
-          } catch (e) {
-            console.error('[events/workshop-register] registrant WA failed:', e?.message || e);
-          }
-        }
+        // Workshop registration WhatsApp notifications disabled — confirmation email below
+        // covers the registrant. Internal team notification needs a dedicated Interakt template
+        // (or use email/Slack instead).
+        void recipients; void internalMsg; void registrantWhatsApp;
 
         try {
           await emailService.sendEventRegistrationConfirmation({

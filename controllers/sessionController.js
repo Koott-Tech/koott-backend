@@ -1336,8 +1336,8 @@ const rescheduleSession = async (req, res) => {
 
         if (clientDetails && psychologistDetails) {
           await googleCalendarService.updateSessionEvent(session.google_calendar_event_id, {
-            clientName: clientDetails.child_name || `${clientDetails.first_name} ${clientDetails.last_name}`,
-            psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
+            clientName: getClientDisplayName(clientDetails, 'Client'),
+            psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`.trim(),
             scheduledDate: new_date,
             scheduledTime: new_time,
             duration: 50
@@ -1379,8 +1379,8 @@ const rescheduleSession = async (req, res) => {
         // Send reschedule notification emails
         try {
           await emailService.sendRescheduleNotification({
-            clientName: clientDetails.child_name || `${clientDetails.first_name} ${clientDetails.last_name}`,
-            psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
+            clientName: getClientDisplayName(clientDetails, 'Client'),
+            psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`.trim(),
             clientEmail: clientDetails.user?.email,
             psychologistEmail: psychologistDetails.email,
             scheduledDate: new_date,
@@ -1402,8 +1402,8 @@ const rescheduleSession = async (req, res) => {
           if (clientPhone) {
             const meetLink = session.google_meet_link || session.google_meet_join_url || null;
             const clientResult = await interaktService.sendBookingConfirmation(clientPhone, {
-              clientName: clientDetails.child_name || `${clientDetails.first_name} ${clientDetails.last_name}`,
-              psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`,
+              clientName: getClientDisplayName(clientDetails, 'Client'),
+              psychologistName: `${psychologistDetails.first_name} ${psychologistDetails.last_name}`.trim(),
               date: new_date,
               time: new_time,
               meetLink,
@@ -2250,92 +2250,56 @@ const completeSession = async (req, res) => {
         console.log(`✅ In-app notification created successfully`);
       }
 
-      // Send WhatsApp notification to client (NO EMAIL for session completion)
-      // This applies to ALL sessions including package sessions
+      // Send WhatsApp follow-up to client via Interakt template `session_follow_up_v2`
       try {
-        const { sendSessionCompletionNotification } = require('../utils/whatsappService');
+        const interaktService = require('../utils/interaktService');
         const clientPhone = client?.phone_number || null;
-        
-        console.log(`📱 WhatsApp sending attempt for session ${sessionId} (package: ${session.package_id || 'none'})`);
-        console.log(`📱 Client data:`, {
-          hasClient: !!client,
-          clientId: client?.id,
-          phoneNumber: clientPhone ? `${String(clientPhone).substring(0, 3)}***` : 'NOT FOUND',
-          sessionType: session.session_type,
-          isPackage: !!session.package_id
-        });
-        
-        if (clientPhone) {
-          // For free assessments, use "our specialist", otherwise use psychologist name
-          const psychologistName = isFreeAssessment 
-            ? 'our specialist'
-            : `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim() || 'our specialist';
-          // Always use production URL in WhatsApp/email links (never localhost)
-          const PRODUCTION_SITE_URL =
-            process.env.SITE_URL || process.env.PUBLIC_APP_URL || 'https://www.koott.in';
-          const bookingLink = `${PRODUCTION_SITE_URL}/psychologists`;
-          const feedbackLink = isFreeAssessment 
-            ? `${PRODUCTION_SITE_URL}/profile/sessions?tab=completed`
-            : `${PRODUCTION_SITE_URL}/profile/reports`;
 
-          const sessionTypeLabel = session.package_id ? 'package session' : (isFreeAssessment ? 'free assessment' : 'therapy session');
-          console.log(`📱 Attempting to send WhatsApp completion for ${sessionTypeLabel} (Session ID: ${sessionId}) to client: ${clientPhone.substring(0, 3)}***`);
-          
-          // Fetch package information if this is a package session
-          let packageInfo = null;
-          if (session.package_id) {
-            try {
-              // Get package data
-              const { data: packageData, error: packageError } = await supabaseAdmin
-                .from('packages')
-                .select('session_count')
-                .eq('id', session.package_id)
-                .single();
-              
-              if (!packageError && packageData) {
-                // Get all sessions for this package and count completed ones
-                const { data: packageSessions, error: sessionsError } = await supabaseAdmin
-                  .from('sessions')
-                  .select('id, status')
-                  .eq('package_id', session.package_id);
-                
-                if (!sessionsError && packageSessions) {
-                  const totalSessions = packageData.session_count || 0;
-                  // Count completed sessions (including the one just completed)
-                  const completedSessions = packageSessions.filter(s => s.status === 'completed').length;
-                  
-                  packageInfo = {
-                    totalSessions: totalSessions,
-                    completedSessions: completedSessions
-                  };
-                  
-                  console.log(`📦 Package info for session ${sessionId}: ${completedSessions}/${totalSessions} completed`);
-                }
-              }
-            } catch (packageInfoError) {
-              console.warn(`⚠️ Error fetching package info for session ${sessionId}:`, packageInfoError);
-              // Continue without package info - will use regular template
-            }
+        if (clientPhone) {
+          // Resolve therapist name: use whoever completed (admin or therapist),
+          // but fall back to the session's actual psychologist if completed by admin.
+          let psychologistName = '';
+          if (!isAdmin) {
+            psychologistName = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim();
           }
-          
-          const clientResult = await sendSessionCompletionNotification(clientPhone, {
-            psychologistName: psychologistName,
-            bookingLink: bookingLink,
-            feedbackLink: feedbackLink,
-            packageInfo: packageInfo
+          if (!psychologistName) {
+            // Look up the session's psychologist
+            const { data: psych } = await supabaseAdmin
+              .from('psychologists')
+              .select('first_name, last_name')
+              .eq('id', session.psychologist_id)
+              .single();
+            psychologistName = `${psych?.first_name || ''} ${psych?.last_name || ''}`.trim();
+          }
+          if (!psychologistName) psychologistName = isFreeAssessment ? 'our specialist' : 'your therapist';
+
+          const clientName = getClientDisplayName(client, 'there');
+
+          // Therapist note: prefer the summary submitted on completion, fall back to summary_notes
+          const therapistNote =
+            (updatedSession.summary && String(updatedSession.summary).trim()) ||
+            (updatedSession.summary_notes && String(updatedSession.summary_notes).trim()) ||
+            '';
+
+          const completedAt = updatedSession.completion_date || updatedSession.updated_at || new Date().toISOString();
+
+          console.log(`📱 Sending session_follow_up_v2 to client (${clientPhone.substring(0,3)}***) for session ${sessionId}`);
+          const result = await interaktService.sendSessionFollowUp(clientPhone, {
+            clientName,
+            psychologistName,
+            completedAt,
+            therapistNote,
           });
-          if (clientResult?.success) {
-            console.log(`✅ Session completion WhatsApp sent to client for ${sessionTypeLabel} (Session ID: ${sessionId})`);
+          if (result?.success) {
+            console.log(`✅ session_follow_up_v2 sent to client for session ${sessionId}`);
           } else {
-            console.warn(`⚠️ Failed to send session completion WhatsApp to client for ${sessionTypeLabel} (Session ID: ${sessionId}). Error: ${clientResult?.error || 'Unknown error'}`);
+            console.warn(`⚠️ Failed to send session_follow_up_v2 to client for session ${sessionId}:`, result?.error || result?.reason);
           }
         } else {
-          console.warn(`⚠️ Skipping WhatsApp completion for session ${sessionId} (${session.package_id ? 'package session' : 'regular session'}): Client phone number not found.`);
-          console.warn(`⚠️ Session client data:`, client ? { id: client.id, hasPhone: !!client.phone_number } : 'No client data');
+          console.warn(`⚠️ Skipping session_follow_up_v2 for session ${sessionId}: client phone not found.`);
         }
       } catch (waError) {
-        console.error(`❌ Error sending session completion WhatsApp for session ${sessionId}${session.package_id ? ' (package session)' : ''}:`, waError);
-        console.error(`❌ Error stack:`, waError.stack);
+        console.error(`❌ Error sending session_follow_up_v2 for session ${sessionId}:`, waError.message);
         // Don't fail the request if WhatsApp fails
       }
     } catch (notificationError) {
@@ -2577,7 +2541,66 @@ module.exports = {
   markSessionAsNoShow,
   getRescheduleRequests,
   cancelRefundSession,
+  verifyPayment,
 };
+
+/**
+ * PATCH /admin/sessions/:sessionId/verify-payment
+ * Finance team marks a manual/admin-created session's payment as verified.
+ * Requires: sessions table has payment_verified (boolean) + payment_verified_at (timestamptz) columns.
+ * SQL migration: ALTER TABLE sessions ADD COLUMN IF NOT EXISTS payment_verified boolean DEFAULT false;
+ *               ALTER TABLE sessions ADD COLUMN IF NOT EXISTS payment_verified_at timestamptz;
+ */
+async function verifyPayment(req, res) {
+  try {
+    const { sessionId } = req.params;
+    const verifiedBy = req.user?.email || req.user?.id || 'admin';
+
+    const { data, error } = await supabaseAdmin
+      .from('sessions')
+      .update({
+        payment_verified: true,
+        payment_verified_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', sessionId)
+      .select('id, payment_verified, payment_verified_at, wix_booking_id')
+      .single();
+
+    if (error) {
+      // Column may not exist yet — guide admin to run migration
+      if (error.message?.includes('payment_verified')) {
+        return res.status(500).json(errorResponse(
+          'Column payment_verified missing. Run: ALTER TABLE sessions ADD COLUMN IF NOT EXISTS payment_verified boolean DEFAULT false; ALTER TABLE sessions ADD COLUMN IF NOT EXISTS payment_verified_at timestamptz;'
+        ));
+      }
+      return res.status(500).json(errorResponse(error.message));
+    }
+
+    // Mirror to wix_bookings if linked (store in payload for display)
+    if (data?.wix_booking_id) {
+      try {
+        const { data: wb } = await supabaseAdmin
+          .from('wix_bookings')
+          .select('payload')
+          .eq('wix_booking_id', data.wix_booking_id)
+          .single();
+        if (wb) {
+          await supabaseAdmin
+            .from('wix_bookings')
+            .update({ payload: { ...(wb.payload || {}), payment_verified: true, payment_verified_at: data.payment_verified_at } })
+            .eq('wix_booking_id', data.wix_booking_id);
+        }
+      } catch (_) { /* non-critical */ }
+    }
+
+    console.log(`✅ [verifyPayment] Session ${sessionId} payment verified by ${verifiedBy}`);
+    return res.json({ success: true, message: 'Payment verified', data });
+  } catch (e) {
+    console.error('[verifyPayment]', e);
+    return res.status(500).json(errorResponse(e.message || String(e)));
+  }
+}
 
 /**
  * PATCH /admin/sessions/:sessionId/cancel-refund
@@ -2587,9 +2610,15 @@ async function cancelRefundSession(req, res) {
   try {
     const { sessionId } = req.params;
 
+    // Pull session WITH client + psychologist details for emails
     const { data: session, error: fetchErr } = await supabaseAdmin
       .from('sessions')
-      .select('id, status, psychologist_id, wix_booking_id, google_calendar_event_id')
+      .select(`
+        id, status, psychologist_id, client_id, wix_booking_id,
+        scheduled_date, scheduled_time, google_calendar_event_id,
+        client:clients(id, first_name, last_name, child_name, user:users(email)),
+        psychologist:psychologists(id, first_name, last_name, email, google_calendar_credentials)
+      `)
       .eq('id', sessionId)
       .single();
 
@@ -2603,7 +2632,7 @@ async function cancelRefundSession(req, res) {
       .eq('id', sessionId);
     if (updateErr) return res.status(500).json(errorResponse(updateErr.message));
 
-    // Mirror to wix_bookings if linked (no locally_modified — terminal status protects from sync)
+    // Mirror to wix_bookings if linked
     if (session.wix_booking_id) {
       await supabaseAdmin
         .from('wix_bookings')
@@ -2611,31 +2640,80 @@ async function cancelRefundSession(req, res) {
         .eq('wix_booking_id', session.wix_booking_id);
     }
 
-    // Remove Google Calendar event
+    // Remove Google Calendar event from therapist's calendar
     let calendarEventRemoved = false;
     if (session.google_calendar_event_id) {
       try {
         let userAuth = null;
-        if (session.psychologist_id) {
-          const { data: psych } = await supabaseAdmin
-            .from('psychologists')
-            .select('google_calendar_credentials')
-            .eq('id', session.psychologist_id)
-            .single();
-          const creds = psych?.google_calendar_credentials;
-          if (creds?.access_token) userAuth = { access_token: creds.access_token, refresh_token: creds.refresh_token, expiry_date: creds.expiry_date };
+        const creds = (Array.isArray(session.psychologist) ? session.psychologist[0] : session.psychologist)?.google_calendar_credentials;
+        if (creds?.access_token) {
+          userAuth = { access_token: creds.access_token, refresh_token: creds.refresh_token, expiry_date: creds.expiry_date };
         }
-        const delResult = await meetLinkService.deleteCalendarEvent(session.google_calendar_event_id, userAuth);
-        calendarEventRemoved = !!delResult?.success;
-        if (!calendarEventRemoved) console.warn('[cancelRefundSession] calendar delete non-fatal:', delResult?.error);
+        const eventIds = String(session.google_calendar_event_id).split(',').map((id) => id.trim()).filter(Boolean);
+        for (const eid of eventIds) {
+          const delResult = await meetLinkService.deleteCalendarEvent(eid, userAuth);
+          if (delResult?.success) {
+            calendarEventRemoved = true;
+            console.log('✅ [cancelRefundSession] Removed calendar event from therapist:', eid);
+          } else {
+            console.warn('[cancelRefundSession] calendar delete non-fatal:', delResult?.error);
+          }
+        }
+        // Clear the FK so future code doesn't try to delete a dead event
+        if (calendarEventRemoved) {
+          await supabaseAdmin.from('sessions').update({ google_calendar_event_id: null }).eq('id', sessionId);
+        }
       } catch (calErr) {
         console.warn('[cancelRefundSession] calendar delete failed (non-fatal):', calErr.message || calErr);
       }
     }
 
+    // Send cancellation emails to BOTH client and therapist
+    (async () => {
+      try {
+        const emailService = require('../utils/emailService');
+        const client = Array.isArray(session.client) ? session.client[0] : session.client;
+        const psych = Array.isArray(session.psychologist) ? session.psychologist[0] : session.psychologist;
+        const clientEmail = Array.isArray(client?.user) ? client.user[0]?.email : client?.user?.email;
+        const psychEmail = psych?.email || null;
+        const clientName = getClientDisplayName(client, 'Client');
+        const psychologistName = `${psych?.first_name || ''} ${psych?.last_name || ''}`.trim() || 'Therapist';
+
+        if (clientEmail) {
+          await emailService.sendCancellationNotification({
+            to: clientEmail,
+            clientName, psychologistName,
+            sessionDate: session.scheduled_date,
+            sessionTime: session.scheduled_time,
+            sessionId,
+            isPsychologist: false,
+          });
+          console.log(`✅ [cancelRefundSession] Cancellation email sent to client ${clientEmail}`);
+        } else {
+          console.warn(`⚠️ [cancelRefundSession] No client email for session ${sessionId}`);
+        }
+
+        if (psychEmail) {
+          await emailService.sendCancellationNotification({
+            to: psychEmail,
+            clientName, psychologistName,
+            sessionDate: session.scheduled_date,
+            sessionTime: session.scheduled_time,
+            sessionId,
+            isPsychologist: true,
+          });
+          console.log(`✅ [cancelRefundSession] Cancellation email sent to therapist ${psychEmail}`);
+        } else {
+          console.warn(`⚠️ [cancelRefundSession] No therapist email for session ${sessionId}`);
+        }
+      } catch (mailErr) {
+        console.error('[cancelRefundSession] email send failed (non-fatal):', mailErr.message || mailErr);
+      }
+    })();
+
     return res.json({
       success: true,
-      message: 'Session cancelled and marked as refunded. Calendar event removed.',
+      message: 'Session cancelled and marked as refunded. Calendar event removed. Emails sent.',
       data: { sessionId, calendarEventRemoved },
     });
   } catch (e) {

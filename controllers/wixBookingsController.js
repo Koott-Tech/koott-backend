@@ -389,6 +389,9 @@ async function enrichBookingsFromOrders(wixBookingIds) {
       };
       if (info.orderId) wbUpdate.wix_order_id = info.orderId;
       if (info.orderNumber) wbUpdate.wix_order_number = info.orderNumber;
+      if (info.price && info.price > 0) {
+        wbUpdate.price = info.price;
+      }
 
       const { error: wbErr } = await supabaseAdmin
         .from('wix_bookings')
@@ -401,12 +404,18 @@ async function enrichBookingsFromOrders(wixBookingIds) {
       }
 
       // Update sessions table too
+      const sessionUpdate = {
+        session_type: info.sessionType,
+        session_count: info.sessionCount,
+      };
+      if (info.price && info.price > 0) {
+        sessionUpdate.price = info.price;
+        sessionUpdate.amount = info.price;
+      }
+
       const { error: sessErr } = await supabaseAdmin
         .from('sessions')
-        .update({
-          session_type: info.sessionType,
-          session_count: info.sessionCount,
-        })
+        .update(sessionUpdate)
         .eq('wix_booking_id', bookingId);
 
       if (sessErr && !sessErr.message?.includes('0 rows')) {
@@ -1699,6 +1708,53 @@ async function completeWixBooking(req, res) {
         .eq('wix_booking_id', data.wix_booking_id);
     }
 
+    // Send session_follow_up_v2 WhatsApp to client (Interakt template)
+    try {
+      const interaktService = require('../utils/interaktService');
+      const clientPhone = data.client_phone || null;
+      if (clientPhone) {
+        // Use the Wix-supplied full name, skipping common placeholder strings
+        const { isPlaceholderName } = require('../utils/sessionTitleFormatter');
+        const pickName = (...candidates) => candidates.find((v) => v && !isPlaceholderName(v));
+        const clientName = pickName(
+          data.client_full_name,
+          [data.client_first_name, data.client_last_name].filter(Boolean).join(' ').trim(),
+          data.client_first_name,
+        ) || 'there';
+        const therapistName = data.therapist_name || 'your therapist';
+
+        // Pull therapist note + completion timestamp from the linked sessions row
+        // (in case it was completed via the regular flow with a summary)
+        let therapistNote = '';
+        let completedAt = data.updated_at || new Date().toISOString();
+        if (data.wix_booking_id) {
+          const { data: linkedSess } = await supabaseAdmin
+            .from('sessions')
+            .select('summary, summary_notes, completion_date, updated_at')
+            .eq('wix_booking_id', data.wix_booking_id)
+            .maybeSingle();
+          if (linkedSess) {
+            therapistNote = (linkedSess.summary && String(linkedSess.summary).trim())
+              || (linkedSess.summary_notes && String(linkedSess.summary_notes).trim())
+              || '';
+            completedAt = linkedSess.completion_date || linkedSess.updated_at || completedAt;
+          }
+        }
+
+        const result = await interaktService.sendSessionFollowUp(clientPhone, {
+          clientName, psychologistName: therapistName, completedAt, therapistNote,
+        });
+        if (result?.success) {
+          console.log(`✅ [completeWixBooking] session_follow_up_v2 sent to client ${clientName}`);
+        } else {
+          console.warn(`⚠️ [completeWixBooking] session_follow_up_v2 failed:`, result?.error || result?.reason);
+        }
+      }
+    } catch (waErr) {
+      console.error('[completeWixBooking] session_follow_up_v2 error:', waErr.message);
+      // Don't fail the request if WhatsApp fails
+    }
+
     return res.json({ success: true, message: 'Wix booking marked as completed', data: { booking: data } });
   } catch (e) {
     console.error('[completeWixBooking]', e);
@@ -1751,10 +1807,10 @@ async function cancelRefundWixBooking(req, res) {
   try {
     const { id } = req.params;
 
-    // 1. Fetch the wix_booking row (need wix_booking_id + calendar info)
+    // 1. Fetch the wix_booking row (need wix_booking_id + calendar info + client/therapist details for emails)
     const { data: booking, error: fetchErr } = await supabaseAdmin
       .from('wix_bookings')
-      .select('id, wix_booking_id, psychologist_id, google_calendar_event_id, status')
+      .select('id, wix_booking_id, psychologist_id, google_calendar_event_id, status, client_full_name, client_first_name, client_email, therapist_name, start_time')
       .eq('id', id)
       .single();
 
@@ -1818,9 +1874,60 @@ async function cancelRefundWixBooking(req, res) {
       }
     }
 
+    // 5. Send cancellation emails to BOTH client and therapist
+    (async () => {
+      try {
+        const emailService = require('../utils/emailService');
+        const clientEmail = booking.client_email || null;
+        const clientName = booking.client_full_name || booking.client_first_name || 'Client';
+        const psychologistName = booking.therapist_name || 'Therapist';
+        // Pull therapist email by id
+        let psychEmail = null;
+        if (booking.psychologist_id) {
+          const { data: psych } = await supabaseAdmin
+            .from('psychologists')
+            .select('email')
+            .eq('id', booking.psychologist_id)
+            .single();
+          psychEmail = psych?.email || null;
+        }
+        // Date/time from start_time ISO (IST)
+        let sessionDate = null, sessionTime = null;
+        if (booking.start_time) {
+          const d = new Date(booking.start_time);
+          const ist = new Date(d.getTime() + 5.5 * 3600 * 1000);
+          sessionDate = ist.toISOString().slice(0, 10);
+          sessionTime = ist.toISOString().slice(11, 19);
+        }
+
+        if (clientEmail) {
+          await emailService.sendCancellationNotification({
+            to: clientEmail,
+            clientName, psychologistName,
+            sessionDate, sessionTime,
+            sessionId: booking.wix_booking_id,
+            isPsychologist: false,
+          });
+          console.log(`✅ [cancelRefundWixBooking] cancellation email sent to client ${clientEmail}`);
+        }
+        if (psychEmail) {
+          await emailService.sendCancellationNotification({
+            to: psychEmail,
+            clientName, psychologistName,
+            sessionDate, sessionTime,
+            sessionId: booking.wix_booking_id,
+            isPsychologist: true,
+          });
+          console.log(`✅ [cancelRefundWixBooking] cancellation email sent to therapist ${psychEmail}`);
+        }
+      } catch (mailErr) {
+        console.error('[cancelRefundWixBooking] email send failed (non-fatal):', mailErr.message || mailErr);
+      }
+    })();
+
     return res.json({
       success: true,
-      message: 'Booking cancelled and marked as refunded. Calendar event removed.',
+      message: 'Booking cancelled and marked as refunded. Calendar event removed. Emails sent.',
       data: { wix_booking_id: booking.wix_booking_id, calendarEventRemoved: !!calEventId },
     });
   } catch (e) {

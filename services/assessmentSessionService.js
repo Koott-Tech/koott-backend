@@ -1,10 +1,8 @@
 const { supabaseAdmin } = require('../config/supabase');
 const meetLinkService = require('../utils/meetLinkService');
 const emailService = require('../utils/emailService');
-const {
-  sendBookingConfirmation,
-  sendWhatsAppTextWithRetry
-} = require('../utils/whatsappService');
+const interaktService = require('../utils/interaktService');
+const { getClientDisplayName } = require('../utils/sessionTitleFormatter');
 const {
   formatDate,
   formatTime,
@@ -119,21 +117,20 @@ async function sendAssessmentWhatsapps({ session, clientName, meetLink }) {
   const scheduledDate = session.scheduled_date;
   const scheduledTime = session.scheduled_time;
 
+  const psychologistName = session.psychologist?.first_name && session.psychologist?.last_name
+    ? `${session.psychologist.first_name} ${session.psychologist.last_name}`.trim()
+    : 'our specialist';
+
+  // Client → booking_confirmation_v1
   if (clientPhone) {
     try {
-      // Extract psychologist name if available
-      const psychologistName = session.psychologist?.first_name && session.psychologist?.last_name
-        ? `${session.psychologist.first_name} ${session.psychologist.last_name}`.trim()
-        : null;
-      
-      await sendBookingConfirmation(clientPhone, {
-        childName: session.client?.child_name || clientName,
-        date: scheduledDate,
-        time: scheduledTime,
-        meetLink,
-        psychologistName: psychologistName // Add psychologist name if available
+      const r = await interaktService.sendBookingConfirmation(clientPhone, {
+        clientName: getClientDisplayName(session.client, clientName || 'Client'),
+        psychologistName,
+        date: scheduledDate, time: scheduledTime, meetLink,
       });
-      console.log('✅ Assessment WhatsApp sent to client');
+      if (r?.success) console.log('✅ booking_confirmation_v1 sent to client (assessment)');
+      else console.warn('⚠️ booking_confirmation_v1 (assessment) failed:', r?.error || r?.reason);
     } catch (error) {
       console.error('❌ Failed to send client WhatsApp for assessment session:', error?.message || error);
     }
@@ -141,62 +138,16 @@ async function sendAssessmentWhatsapps({ session, clientName, meetLink }) {
     console.log('ℹ️ No client phone found; skipping client WhatsApp');
   }
 
+  // Therapist → therapistconfirmation
   if (psychologistPhone) {
-    // Format date and time using the same functions as client messages
-    const formatBookingDateShort = (dateStr) => {
-      if (!dateStr) return '';
-      try {
-        const d = new Date(`${dateStr}T00:00:00+05:30`);
-        return d.toLocaleDateString('en-IN', {
-          weekday: 'short',
-          day: '2-digit',
-          month: 'short',
-          year: 'numeric',
-          timeZone: 'Asia/Kolkata'
-        });
-      } catch {
-        return dateStr;
-      }
-    };
-    
-    const formatFriendlyTime = (timeStr) => {
-      if (!timeStr) return '';
-      try {
-        const [h, m] = timeStr.split(':');
-        const hours = parseInt(h, 10);
-        const minutes = parseInt(m || '0', 10);
-        const period = hours >= 12 ? 'PM' : 'AM';
-        const displayHours = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
-        const displayMinutes = minutes.toString().padStart(2, '0');
-        return `${displayHours}:${displayMinutes} ${period}`;
-      } catch {
-        return timeStr;
-      }
-    };
-    
-    const assessmentName = session.assessment?.hero_title ||
-      session.assessment?.seo_title ||
-      'Assessment session';
-    const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-    const bullet = '•  '; // Clean bullet with normal spaces
-    const formattedDate = formatBookingDateShort(scheduledDate);
-    const formattedTime = formatFriendlyTime(scheduledTime);
-    
-    const message =
-      `Hey 👋\n\n` +
-      `New free assessment session booked with Koott.\n\n` +
-      `${bullet}Client: ${clientName}\n` +
-      `${bullet}Assessment: ${assessmentName}\n` +
-      `${bullet}Date: ${formattedDate}\n` +
-      `${bullet}Time: ${formattedTime} (IST)\n\n` +
-      `Join link:\n${meetLink}\n\n` +
-      `Please be ready 5 mins early.\n\n` +
-      `For help: ${supportPhone}\n\n` +
-      `— Koott 💜`;
-
     try {
-      await sendWhatsAppTextWithRetry(psychologistPhone, message);
-      console.log('✅ Assessment WhatsApp sent to psychologist');
+      const r = await interaktService.sendSessionNotificationPsychologist(psychologistPhone, {
+        therapistName: psychologistName,
+        clientName, date: scheduledDate, time: scheduledTime,
+        meetLink,
+      });
+      if (r?.success) console.log('✅ therapistconfirmation sent to therapist (assessment)');
+      else console.warn('⚠️ therapistconfirmation (assessment) failed:', r?.error || r?.reason);
     } catch (error) {
       console.error('❌ Failed to send psychologist WhatsApp for assessment session:', error?.message || error);
     }
@@ -235,9 +186,7 @@ async function finalizeAssessmentSessionBooking(sessionId, options = {}) {
     typeof options.durationMinutes === 'number' ? options.durationMinutes : 50
   );
 
-  const clientName = session.client?.child_name ||
-    buildDisplayName(session.client?.first_name, session.client?.last_name) ||
-    'Client';
+  const clientName = getClientDisplayName(session.client, 'Client');
   const psychologistName = buildDisplayName(
     session.psychologist?.first_name,
     session.psychologist?.last_name

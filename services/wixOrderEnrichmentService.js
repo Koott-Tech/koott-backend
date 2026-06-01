@@ -116,11 +116,14 @@ async function fetchSessionInfoFromOrder(wixBookingId) {
       const text = dl.plainText?.original || dl.plainTextValue?.original || '';
       const parsed = parseSessionDescription(text);
       if (parsed) {
+        const priceRaw = order.priceSummary?.subtotal?.amount || lineItem.price?.amount;
+        const priceNum = priceRaw ? parseFloat(priceRaw) : null;
         return {
           ...parsed,
           descriptionLine: text,
           orderId: order.id,
           orderNumber: order.number,
+          price: priceNum,
         };
       }
     }

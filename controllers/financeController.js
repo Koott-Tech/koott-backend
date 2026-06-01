@@ -261,7 +261,7 @@ const getDashboard = async (req, res) => {
       let sessionsQuery = supabaseAdmin
         .from('sessions')
         .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-        .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+        .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
         .neq('session_type', 'free_assessment');
 
       // Optimization: If not all-time, filter from start of year to ensure we get enough data for MTD/QTD/YTD cards
@@ -280,7 +280,7 @@ const getDashboard = async (req, res) => {
         let fbQuery1 = supabaseAdmin
           .from('sessions')
           .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
           .neq('session_type', 'free_assessment');
         if (!allTimeMode) {
           fbQuery1 = fbQuery1.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -292,7 +292,7 @@ const getDashboard = async (req, res) => {
         let fbQuery2 = supabaseAdmin
           .from('sessions')
           .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
           .neq('session_type', 'free_assessment');
         if (!allTimeMode) {
           fbQuery2 = fbQuery2.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -305,7 +305,7 @@ const getDashboard = async (req, res) => {
           let fbQuery3 = supabaseAdmin
             .from('sessions')
             .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-            .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+            .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
             .neq('session_type', 'free_assessment');
           if (!allTimeMode) {
             fbQuery3 = fbQuery3.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -851,9 +851,9 @@ const getDashboard = async (req, res) => {
     let totalDoctorWallet = 0; // Total doctor wallet for sessions ORIGINALLY BOOKED in date range (uses original_scheduled_date, for revenue calculation)
     let totalRevenueFromSessions = 0; // Calculate total revenue from sessions ORIGINALLY BOOKED in date range (uses original_scheduled_date)
     let totalRefundAmount = 0; // Total refunded amount in selected range
-    let pendingPayout = 0; // Doctor wallet pending payment (completed-unpaid)
-    let payout = 0; // Doctor wallet already paid (from payouts table in range)
-    let completedDoctorWalletInRange = 0; // Total doctor wallet from completed sessions in range
+    let pendingPayout = 0; // Doctor wallet for BOOKED (not yet completed) sessions — work pending
+    let payout = 0; // Doctor wallet for COMPLETED sessions — earned/ready to pay out
+    let completedDoctorWalletInRange = 0; // Total doctor wallet from completed sessions in range (= payout)
     let pendingSessionsCount = 0; // Distinct finance bookings still non-completed in range (matches total_sessions dedupe)
     const pendingSessionsByFinanceBookingKey = new Set();
     let completedSessionsCount = 0; // Count of completed sessions scheduled in date range
@@ -876,7 +876,7 @@ const getDashboard = async (req, res) => {
           .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
           .not('psychologist_id', 'is', null)
           .neq('session_type', 'free_assessment')
-          .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+          .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
           .in('psychologist_id', allPsychIds);
 
         if (!allTimeMode) {
@@ -897,7 +897,7 @@ const getDashboard = async (req, res) => {
             .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
             .not('psychologist_id', 'is', null)
             .neq('session_type', 'free_assessment')
-            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
             .in('psychologist_id', allPsychIds);
           if (!allTimeMode) {
             allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -910,7 +910,7 @@ const getDashboard = async (req, res) => {
             .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, wix_payload, source')
             .not('psychologist_id', 'is', null)
             .neq('session_type', 'free_assessment')
-            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
             .in('psychologist_id', allPsychIds);
           if (!allTimeMode) {
             allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -922,7 +922,7 @@ const getDashboard = async (req, res) => {
               .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count, wix_payload, source')
               .not('psychologist_id', 'is', null)
               .neq('session_type', 'free_assessment')
-              .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+              .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
               .in('psychologist_id', allPsychIds);
             if (!allTimeMode) {
               allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -1058,7 +1058,10 @@ const getDashboard = async (req, res) => {
           const sessionPrice = getSessionFinanceRevenueAmount(s);
           const historyRecord = commissionHistoryMap[s.id];
           const isCompleted = s.status === 'completed';
-          const isRefunded = s.status === 'refunded';
+          // A "refund" in finance terms = any session where money was returned to client.
+          // This includes both status='refunded' AND status='cancelled' (when price > 0)
+          // because both represent revenue that was refunded.
+          const isRefunded = s.status === 'refunded' || (s.status === 'cancelled' && parseFloat(s.price || 0) > 0);
           const isFirstSession = clientFirstSessions.has(s.id);
           const isInitialPackageSession = !!s.package_id && (parseInt(s.package_session_number, 10) || 0) === 1;
           const origDate = s.original_scheduled_date || s.scheduled_date;
@@ -1199,13 +1202,54 @@ const getDashboard = async (req, res) => {
           // Add to commission totals based on different criteria:
           // 1. Revenue/Commission for sessions scheduled/completed in date range
           // Uses scheduled_date for non-completed, completion_date for completed sessions
+          // Carry-over model:
+          //  • Revenue / Doctor Wallet / Refund → based on booking_created_at in range ("money in" this month)
+          //  • Payout → based on completion_date in range ("doctor earned" in this month, regardless of booking month)
+          //  • Pending Payout → doctor wallet for sessions that were STILL pending at month end
+          //                     (booked by end of view-month AND not completed by end of view-month).
+          //                     A May-booked session not completed by May 31 → in May's pending.
+          //                     If it then completes in June → leaves the live pending balance and
+          //                     enters June's payout (May's snapshot stays frozen).
+
+          // 1. REVENUE / DOCTOR WALLET / REFUND — booking_created_at in range
           if (shouldIncludeForRevenue) {
             if (isRefunded) {
               totalRefundAmount += sessionPrice;
+              // Refunded sessions: NO commission, NO doctor wallet — money was returned
+            } else {
+              totalCompanyCommission += commissionToCompany;
+              totalDoctorWallet += toDoctorWallet;
             }
-            totalCompanyCommission += commissionToCompany;
-            totalDoctorWallet += toDoctorWallet;
-            totalRevenueFromSessions += sessionPrice; // Sum all session prices for total revenue
+            totalRevenueFromSessions += sessionPrice;
+          }
+
+          // 2. PAYOUT — completion_date in range, regardless of when session was booked
+          if (isCompleted && !isRefunded) {
+            const completionYmd = s.completion_date
+              ? String(s.completion_date).split('T')[0]
+              : (s.updated_at ? String(s.updated_at).split('T')[0] : null);
+            const completedInMonth = mtdFrom && mtdTo
+              ? !!(completionYmd && completionYmd >= mtdFrom && completionYmd <= mtdTo)
+              : true;
+            if (completedInMonth) {
+              payout += toDoctorWallet;
+            }
+          }
+
+          // 3. PENDING PAYOUT — sessions still pending at end of view-month
+          //    Includes carry-over: a session booked before the view-month that
+          //    hasn't been completed by view-month-end still appears here.
+          if (!isRefunded) {
+            const bookedYmd = getSessionBookingCreatedIstDateString(s);
+            const bookedByMonthEnd = !mtdTo || (bookedYmd && bookedYmd <= mtdTo);
+            const completionYmd = s.completion_date
+              ? String(s.completion_date).split('T')[0]
+              : (s.updated_at ? String(s.updated_at).split('T')[0] : null);
+            const stillPendingAtMonthEnd = !isCompleted ||
+              (completionYmd && mtdTo && completionYmd > mtdTo);
+            if (bookedByMonthEnd && stillPendingAtMonthEnd) {
+              pendingPayout += toDoctorWallet;
+            }
           }
 
           /* Pending sessions card:
@@ -1243,10 +1287,11 @@ const getDashboard = async (req, res) => {
         pendingSessionsCount = pendingSessionsByFinanceBookingKey.size;
         upcomingSessionsCount = upcomingSessionsByFinanceBookingKey.size;
 
-        // Paid payout amount in selected range.
-        // Source of truth: commission_history payment_status for completed sessions in range.
-        // (Fallback to payouts table only if history read fails.)
-        try {
+        // NEW SEMANTICS: payout = doctor wallet from COMPLETED sessions; pendingPayout = doctor wallet
+        // from BOOKED sessions (waiting). Both are already accumulated in the loop above. Skip the
+        // legacy commission_history override (which conflated "paid by finance" with "earned").
+        // To re-enable history-based payout tracking, set FINANCE_USE_HISTORY_PAYOUTS=true in env.
+        if (process.env.FINANCE_USE_HISTORY_PAYOUTS === 'true') try {
           let completedInRange = null;
           let completedInRangeErr = null;
           ({ data: completedInRange, error: completedInRangeErr } = await supabaseAdmin
@@ -1346,7 +1391,9 @@ const getDashboard = async (req, res) => {
 
         // Recompute pending payout directly from commission_history payment states
         // so paid actions move amounts immediately from pending -> payout.
-        try {
+        // GATED: Skipped by default because we now use the in-loop semantics
+        // (pending = booked, payout = completed). Re-enable with FINANCE_USE_HISTORY_PAYOUTS=true.
+        if (process.env.FINANCE_USE_HISTORY_PAYOUTS === 'true') try {
           let completedInRange = null;
           let completedInRangeErr = null;
           ({ data: completedInRange, error: completedInRangeErr } = await supabaseAdmin
@@ -1563,11 +1610,11 @@ const getDashboard = async (req, res) => {
     } else {
       // Use calculated values (live data)
       finalSummary = {
-        total_revenue: totalRevenueFromSessions,
-        net_profit: netProfitForSelectedRange,
-        total_expenses: expensesForSelectedRange,
-        pending_payouts: pendingPayout || 0,
-        payout: payout || 0,
+        total_revenue: Math.round(totalRevenueFromSessions || 0),
+        net_profit: Math.round(netProfitForSelectedRange || 0),
+        total_expenses: Math.round(expensesForSelectedRange || 0),
+        pending_payouts: Math.round(pendingPayout || 0),
+        payout: Math.round(payout || 0),
         total_sessions: totalSessions,
         pending_sessions: pendingSessionsCount || 0,
         completed_sessions: completedSessionsCount || 0,
@@ -1576,10 +1623,10 @@ const getDashboard = async (req, res) => {
         no_show_sessions: noShowSessionsCount || 0,
         upcoming_sessions: upcomingSessionsCount || 0,
         active_doctors: activeDoctors,
-        total_company_commission: totalCompanyCommission,
-        total_company_commission_completed: totalCompanyCommissionCompleted,
-        total_doctor_wallet: totalDoctorWallet,
-        refund_total: totalRefundAmount,
+        total_company_commission: Math.round(totalCompanyCommission || 0),
+        total_company_commission_completed: Math.round(totalCompanyCommissionCompleted || 0),
+        total_doctor_wallet: Math.round(totalDoctorWallet || 0),
+        refund_total: Math.round(totalRefundAmount || 0),
         revenue_change: revenueGrowthMoM ? `${revenueGrowthMoM > 0 ? '+' : ''}${revenueGrowthMoM}%` : null,
         revenue_change_type: parseFloat(revenueGrowthMoM) >= 0 ? 'increase' : 'decrease',
         profit_change: revenueGrowthMoM ? `${revenueGrowthMoM > 0 ? '+' : ''}${revenueGrowthMoM}%` : null,
@@ -2015,6 +2062,7 @@ const getSessions = async (req, res) => {
         created_at,
         ${sessBcf}
         wix_payload,
+        wix_booking_id,
         scheduled_date,
         scheduled_time,
         price,
@@ -2027,12 +2075,16 @@ const getSessions = async (req, res) => {
         wix_order_number,
         package_session_number,
         session_count,
-        package_id
+        package_id,
+        payment_verified,
+        payment_verified_at
       `, { count: 'exact' })
       .neq('session_type', 'free_assessment'); // Exclude free assessments
 
     if (!shouldIncludeUnpaid) {
-      query = query.not('payment_id', 'is', null); // Only sessions with payment_id
+      // Include paid sessions OR manual/plan-credit sessions (price > 0, no payment_id)
+      // Plan-credit Wix sessions (inPerson vendor) have no payment_id but are real paid sessions
+      query = query.or('payment_id.not.is.null,source.eq.admin_manual,price.gt.0');
     }
 
     // Apply filters

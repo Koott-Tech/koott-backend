@@ -35,13 +35,13 @@ function computeSessionDoctorWallet(session, dc, ch) {
     const sessionAmt = parseFloat(ch.session_amount || s.price || 0);
     const companyAmt = parseFloat(ch.commission_amount || 0);
     const totalDoc = Math.max(0, sessionAmt - companyAmt);
-    return isPackage ? totalDoc / totalSessions : totalDoc;
+    return isPackage ? Math.round(totalDoc / totalSessions) : Math.round(totalDoc);
   }
 
   // ── 2. therapist_commission (manually set by admin) ──────────────────────
   const tc = parseFloat(s.therapist_commission);
   if (!isNaN(tc) && tc > 0) {
-    return isPackage ? tc / totalSessions : tc;
+    return isPackage ? Math.round(tc / totalSessions) : Math.round(tc);
   }
 
   // ── 3. doctor_commissions rates ──────────────────────────────────────────
@@ -64,8 +64,8 @@ function computeSessionDoctorWallet(session, dc, ch) {
       totalPackageCommission = Math.max(0, parseFloat(s.price) - companyCommission);
     }
 
-    // Per-session share = total ÷ session_count
-    return Math.max(0, totalPackageCommission / totalSessions);
+    // Per-session share = total ÷ session_count (rounded to whole rupees)
+    return Math.max(0, Math.round(totalPackageCommission / totalSessions));
   }
 
   // Non-package: couple session

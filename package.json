@@ -1,7 +1,7 @@
 {
   "name": "koott-backend",
   "version": "1.0.0",
-  "description": "Backend for Koott Child Therapy Platform",
+  "description": "Backend for Koott Therapy Platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,7 +12,7 @@
   },
   "keywords": [
     "therapy",
-    "child-psychology",
+    "psychology",
     "express",
     "supabase"
   ],

@@ -13,7 +13,12 @@ const { supabaseAdmin } = require('../config/supabase');
 const googleCalendarService = require('../utils/googleCalendarService');
 const calendarSyncService = require('./calendarSyncService');
 const emailService = require('../utils/emailService');
-const whatsappService = require('../utils/whatsappService');
+// Internal admin alert: WhatsApp send removed (no Interakt template for free-text alerts).
+// Email + logs cover the operations team. To re-enable WhatsApp, create an Interakt template
+// for ops alerts and replace the no-op stub below.
+const whatsappService = {
+  sendWhatsAppTextWithRetry: async () => ({ success: false, skipped: true, reason: 'wasender_disabled' }),
+};
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');

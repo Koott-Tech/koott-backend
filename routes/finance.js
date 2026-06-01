@@ -33,6 +33,9 @@ router.get('/sessions/all', sessionController.getAllSessions); // Use same metho
 router.get('/sessions/:sessionId', financeController.getSessionDetails);
 router.put('/sessions/:sessionId', adminController.updateSession);
 router.put('/sessions/:sessionId/commission', financeController.updateSessionCommission);
+router.patch('/sessions/:sessionId/verify-payment', sessionController.verifyPayment);
+router.patch('/sessions/:sessionId/cancel-refund', sessionController.cancelRefundSession);
+router.delete('/sessions/:sessionId', sessionController.deleteSession);
 router.get('/psychologists', financeController.getPsychologistOptions);
 router.get('/clients', financeController.getClientOptions);
 

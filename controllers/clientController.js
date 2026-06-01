@@ -200,7 +200,9 @@ const updateProfile = async (req, res) => {
     const userRole = req.user.role;
     
     // HIGH-RISK FIX: Mass assignment protection - explicit allowlist
-    const allowedFields = ['first_name', 'last_name', 'phone_number', 'child_name', 'child_age'];
+    // child_name / child_age intentionally NOT in this list — Koott is not a child-focused
+    // platform; any such fields in the request body are silently dropped.
+    const allowedFields = ['first_name', 'last_name', 'phone_number'];
     const updateData = {};
     allowedFields.forEach(field => {
       if (req.body[field] !== undefined) {
@@ -220,37 +222,8 @@ const updateProfile = async (req, res) => {
     }
     // If last_name is not in updateData, preserve existing value (don't update it)
 
-    // Handle optional child fields - allow clearing them
-    // If child_name is explicitly set to empty string, try to use empty string (database may allow it)
-    // If database has NOT NULL constraint and doesn't allow empty string, it will error and we can handle it
-    if (updateData.child_name !== undefined) {
-      if (updateData.child_name === null || updateData.child_name === '' || updateData.child_name.trim() === '') {
-        // User wants to clear it - try empty string first, database will reject if NOT NULL doesn't allow it
-        // In that case, we'll get an error and can handle it
-        updateData.child_name = '';
-      } else {
-        // Trim whitespace if provided
-        updateData.child_name = updateData.child_name.trim();
-      }
-    }
-    // If child_name is not in updateData, preserve existing value (don't update it)
-    
-    // Handle optional child_age - allow clearing by setting to null or default; guard against non-numeric/NaN
-    if (updateData.child_age !== undefined) {
-      if (updateData.child_age === null || updateData.child_age === '' || updateData.child_age === 0) {
-        // User wants to clear it - try null first, if database rejects it, use default value 1
-        updateData.child_age = null;
-      } else {
-        const num = Number(updateData.child_age);
-        if (!Number.isFinite(num) || num < 0) {
-          return res.status(400).json(
-            errorResponse('child_age must be a valid non-negative number')
-          );
-        }
-        updateData.child_age = num;
-      }
-    }
-    // If child_age is not in updateData, preserve existing value (don't update it)
+    // Child fields removed — Koott does not collect child info.
+    // Any child_name/child_age in req.body was already dropped by the allowedFields filter above.
 
     // Use supabaseAdmin to bypass RLS
     const { supabaseAdmin } = require('../config/supabase');
@@ -295,95 +268,28 @@ const updateProfile = async (req, res) => {
             continue;
           }
 
-          // Prepare update payload - child_name is already handled above if null/empty
           const updatePayload = {
-              ...updateData,
-              updated_at: new Date().toISOString()
+            ...updateData,
+            updated_at: new Date().toISOString()
           };
 
-          // Now attempt the update
-          let updatePayloadToUse = { ...updatePayload };
-          
-          // Handle special cases for child_age and child_name that might need fallback values
-          let needsRetry = false;
-          let retryPayload = null;
-          
-          // Check if we need to handle child_age null -> default fallback
-          if (updatePayloadToUse.child_age === null && updatePayloadToUse.child_age !== undefined) {
-            needsRetry = true;
-            retryPayload = { ...updatePayloadToUse, child_age: 1 }; // Default fallback
-          }
-          
-          // Check if we need to handle child_name empty -> default fallback
-          if (updatePayloadToUse.child_name === '' && updatePayloadToUse.child_name !== undefined) {
-            needsRetry = true;
-            retryPayload = retryPayload || { ...updatePayloadToUse };
-            retryPayload.child_name = 'Pending'; // Default fallback
-          }
-          
-          if (needsRetry) {
-            // Try with original values first
-            let { data: updatedClient, error: updateError } = await supabaseAdmin
-              .from('clients')
-              .update(updatePayloadToUse)
+          const { data: updatedClient, error: updateError } = await supabaseAdmin
+            .from('clients')
+            .update(updatePayload)
             .eq(attempt.column, attempt.value)
             .select('*')
             .single();
 
-            // If update fails due to NOT NULL constraint, try with default values
-            if (updateError && updateError.code === '23502') {
-              if (updateError.message?.includes('child_age')) {
-                console.log('Null child_age rejected, using default value 1');
-              }
-              if (updateError.message?.includes('child_name')) {
-                console.log('Empty child_name rejected, using default "Pending"');
-              }
-              
-              const retryResult = await supabaseAdmin
-                .from('clients')
-                .update(retryPayload)
-                .eq(attempt.column, attempt.value)
-                .select('*')
-                .single();
-              updatedClient = retryResult.data;
-              updateError = retryResult.error;
-            }
-
           if (!updateError && updatedClient) {
             client = updatedClient;
             error = null;
-              lastErrorDetails = null;
+            lastErrorDetails = null;
             break;
           }
-
-          // Record the last error but continue trying other identifiers
           if (updateError) {
             error = updateError;
-              lastErrorDetails = { attempt, error: updateError };
-              console.error(`Update error (${attempt.column}=${attempt.value}):`, updateError);
-            }
-          } else {
-            // Normal update path (no special handling needed for child fields)
-            const { data: updatedClient, error: updateError } = await supabaseAdmin
-              .from('clients')
-              .update(updatePayloadToUse)
-              .eq(attempt.column, attempt.value)
-              .select('*')
-              .single();
-
-            if (!updateError && updatedClient) {
-              client = updatedClient;
-              error = null;
-              lastErrorDetails = null;
-              break;
-            }
-
-            // Record the last error but continue trying other identifiers
-            if (updateError) {
-              error = updateError;
-              lastErrorDetails = { attempt, error: updateError };
-              console.error(`Update error (${attempt.column}=${attempt.value}):`, updateError);
-            }
+            lastErrorDetails = { attempt, error: updateError };
+            console.error(`Update error (${attempt.column}=${attempt.value}):`, updateError);
           }
         } catch (attemptError) {
           error = attemptError;
@@ -1252,8 +1158,7 @@ const bookSession = async (req, res) => {
     try {
       const emailService = require('../utils/emailService');
       
-      const clientName = clientDetails.child_name || 
-                        `${clientDetails.first_name} ${clientDetails.last_name}`.trim();
+      const clientName = getClientDisplayName(clientDetails, 'Client');
       const psychologistName = `${psychologistDetails.first_name} ${psychologistDetails.last_name}`.trim();
 
       await emailService.sendSessionConfirmation({
@@ -1272,30 +1177,21 @@ const bookSession = async (req, res) => {
 
       console.log('✅ Email notifications sent successfully');
 
-      // WhatsApp notifications via Business API (best-effort, non-blocking)
+      // WhatsApp notifications via Interakt (best-effort, non-blocking)
       try {
-        console.log('📱 Sending WhatsApp notifications via UltraMsg API...');
-        const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-        
-        // Send WhatsApp to client
+        console.log('📱 Sending WhatsApp notifications via Interakt...');
+        const interaktService = require('../utils/interaktService');
+
+        // Send WhatsApp to client → booking_confirmation_v1
         const clientPhone = clientDetails.phone_number || null;
         if (clientPhone && meetData?.meetLink) {
-          // Only include childName if child_name exists and is not empty/null/'Pending'
-          const childName = clientDetails.child_name && 
-            clientDetails.child_name.trim() !== '' && 
-            clientDetails.child_name.toLowerCase() !== 'pending'
-            ? clientDetails.child_name 
-            : null;
-          
-          const clientDetails_wa = {
-            childName: childName,
+          const clientWaResult = await interaktService.sendBookingConfirmation(clientPhone, {
+            clientName: getClientDisplayName(clientDetails, 'Client'),
+            psychologistName,
             date: scheduled_date,
             time: scheduled_time,
             meetLink: meetData.meetLink,
-            psychologistName: psychologistName, // Add psychologist name to WhatsApp message
-            durationMinutes: meetMinutes,
-          };
-          const clientWaResult = await sendBookingConfirmation(clientPhone, clientDetails_wa);
+          });
           if (clientWaResult?.success) {
             console.log('✅ WhatsApp confirmation sent to client via UltraMsg');
             
@@ -1372,45 +1268,16 @@ const bookSession = async (req, res) => {
           });
         }
 
-        // Send WhatsApp to psychologist (single detailed message)
+        // Send WhatsApp to therapist → therapistconfirmation
         const psychologistPhone = psychologistDetails.phone || null;
         if (psychologistPhone && meetData?.meetLink) {
-          // Format date and time using the same functions as client messages
-          const { formatFriendlyTime } = require('../utils/whatsappService');
-          const formatBookingDateShort = (dateStr) => {
-            if (!dateStr) return '';
-            try {
-              const d = new Date(`${dateStr}T00:00:00+05:30`);
-              return d.toLocaleDateString('en-IN', {
-                weekday: 'short',
-                day: '2-digit',
-                month: 'short',
-                year: 'numeric',
-                timeZone: 'Asia/Kolkata'
-              });
-            } catch {
-              return dateStr;
-            }
-          };
-          
-          const bullet = '•⁠  ⁠';
-          const formattedDate = formatBookingDateShort(scheduled_date);
-          const formattedTime = formatFriendlyTime(scheduled_time);
-          const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-          
-          const psychologistMessage =
-            `Hey 👋\n\n` +
-            `New session booked with Koott.\n\n` +
-            `${bullet}Client: ${clientName}\n` +
-            `${bullet}Date: ${formattedDate}\n` +
-            `${bullet}Time: ${formattedTime} (IST)\n` +
-            `${bullet}Duration: ${meetMinutes} min\n\n` +
-            `Join link:\n${meetData.meetLink}\n\n` +
-            `Please be ready 5 mins early.\n\n` +
-            `For help: ${supportPhone}\n\n` +
-            `— Koott 💜`;
-          
-          const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
+          const psychologistWaResult = await interaktService.sendSessionNotificationPsychologist(psychologistPhone, {
+            therapistName: psychologistName,
+            clientName,
+            date: scheduled_date,
+            time: scheduled_time,
+            meetLink: meetData.meetLink,
+          });
           if (psychologistWaResult?.success) {
             console.log('✅ WhatsApp notification sent to psychologist via WhatsApp API');
             
@@ -1699,7 +1566,7 @@ const cancelSession = async (req, res) => {
       console.log('📧 Sending cancellation email notifications...');
       const emailService = require('../utils/emailService');
       
-      const clientName = clientDetails?.child_name || `${clientDetails?.first_name || ''} ${clientDetails?.last_name || ''}`.trim();
+      const clientName = getClientDisplayName(clientDetails, 'Client');
       const psychologistName = `${psychologistDetails?.first_name || ''} ${psychologistDetails?.last_name || ''}`.trim();
       const sessionDateTime = new Date(`${session.scheduled_date}T${session.scheduled_time}`).toLocaleString('en-IN', { 
         timeZone: 'Asia/Kolkata',
@@ -1738,57 +1605,9 @@ const cancelSession = async (req, res) => {
       // Continue even if email fails
     }
 
-    // Send WhatsApp notifications for cancellation
-    try {
-      console.log('📱 Sending WhatsApp notifications for cancellation...');
-      const { sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-      
-      const clientName = clientDetails?.child_name || `${clientDetails?.first_name || ''} ${clientDetails?.last_name || ''}`.trim();
-      const psychologistName = `${psychologistDetails?.first_name || ''} ${psychologistDetails?.last_name || ''}`.trim();
-      const sessionDateTime = new Date(`${session.scheduled_date}T${session.scheduled_time}`).toLocaleString('en-IN', { 
-        timeZone: 'Asia/Kolkata',
-        dateStyle: 'long',
-        timeStyle: 'short'
-      });
-
-      // Send WhatsApp to client
-      if (clientDetails?.phone_number) {
-        const clientMessage = `❌ Your therapy session has been cancelled.\n\n` +
-          `📅 Date: ${sessionDateTime}\n` +
-          `👤 Psychologist: Dr. ${psychologistName}\n\n` +
-          `If you need to reschedule, please book a new session. Thank you!`;
-
-        const clientResult = await sendWhatsAppTextWithRetry(clientDetails.phone_number, clientMessage);
-        if (clientResult?.success) {
-          console.log('✅ Cancellation WhatsApp sent to client');
-        } else {
-          console.warn('⚠️ Failed to send cancellation WhatsApp to client');
-        }
-      }
-
-      // Send WhatsApp to psychologist
-      if (psychologistDetails?.phone) {
-        const bullet = '•⁠  ⁠';
-        const psychologistMessage =
-          `Hey 👋\n\n` +
-          `Session cancelled with Koott.\n\n` +
-          `${bullet}Client: ${clientName}\n` +
-          `${bullet}Date: ${sessionDateTime}\n\n` +
-          `— Koott 💜`;
-
-        const psychologistResult = await sendWhatsAppTextWithRetry(psychologistDetails.phone, psychologistMessage);
-        if (psychologistResult?.success) {
-          console.log('✅ Cancellation WhatsApp sent to psychologist');
-        } else {
-          console.warn('⚠️ Failed to send cancellation WhatsApp to psychologist');
-        }
-      }
-      
-      console.log('✅ WhatsApp notifications sent for cancellation');
-    } catch (waError) {
-      console.error('❌ Error sending cancellation WhatsApp:', waError);
-      // Continue even if WhatsApp fails
-    }
+    // Cancellation notification is sent via email to both client + therapist
+    // (no approved Interakt template for cancellation; relying on email is sufficient).
+    // To re-enable WhatsApp for cancellations, create an Interakt template and call interaktService here.
 
     res.json(
       successResponse(updatedSession, 'Session cancelled successfully')
@@ -2117,7 +1936,7 @@ const rescheduleSession = async (req, res) => {
           .eq('id', session.psychologist_id)
           .single();
 
-        const clientName = clientDetails?.child_name || `${clientDetails?.first_name || ''} ${clientDetails?.last_name || ''}`.trim();
+        const clientName = getClientDisplayName(clientDetails, 'Client');
         const psychologistName = `${psychologistDetails?.first_name || ''} ${psychologistDetails?.last_name || ''}`.trim();
 
         // Get all admin users to send notifications to
@@ -2176,7 +1995,7 @@ const rescheduleSession = async (req, res) => {
           }
         }
 
-        // Send email to admin and meet.koott@gmail.com (same template and style as other admin emails)
+        // Send email to admin (same template and style as other admin emails)
         const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
         const meetKoottEmail = 'meet.koott@gmail.com';
         const adminRecipients = [adminEmail, meetKoottEmail].filter(Boolean).join(', ');
@@ -2196,7 +2015,7 @@ const rescheduleSession = async (req, res) => {
               psychologistId: session.psychologist_id,
               reasonText: req.body.reason || null
             });
-            console.log('📧 Reschedule request email sent to admin and meet.koott@gmail.com');
+            console.log('📧 Reschedule request email sent to admin');
           } catch (emailError) {
             console.error('Error sending reschedule request email:', emailError);
             console.warn('⚠️ Reschedule request created but email notification failed');
@@ -2452,8 +2271,8 @@ const rescheduleSession = async (req, res) => {
       }
       
       const sessionDataForMeet = {
-        summary: isFreeAssessment 
-          ? `Free Assessment - ${clientDetails?.child_name || clientDetails?.first_name}`
+        summary: isFreeAssessment
+          ? `Free Assessment - ${getClientDisplayName(clientDetails, 'Client')}`
           : buildKoottSessionTitle({
               clientName: getClientDisplayName(clientDetails, 'Client'),
               psychologistName: getPsychologistDisplayName(psychologistDetails),
@@ -2747,7 +2566,7 @@ const rescheduleSession = async (req, res) => {
       } else {
         await emailService.sendRescheduleNotification(
           {
-            clientName: clientDetails?.child_name || `${clientDetails?.first_name || ''} ${clientDetails?.last_name || ''}`.trim(),
+            clientName: getClientDisplayName(clientDetails, 'Client'),
             psychologistName: `${psychologistDetails?.first_name || ''} ${psychologistDetails?.last_name || ''}`.trim(),
             clientEmail: clientEmail,
             psychologistEmail: psychologistEmail,
@@ -2771,128 +2590,30 @@ const rescheduleSession = async (req, res) => {
       // Send WhatsApp notifications for reschedule
       try {
         console.log('📱 Sending WhatsApp notifications for reschedule...');
-        const { sendRescheduleConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
-        
-        const clientName = clientDetails?.child_name || `${clientDetails?.first_name || ''} ${clientDetails?.last_name || ''}`.trim();
+        const interaktService = require('../utils/interaktService');
+        const clientName = getClientDisplayName(clientDetails, 'Client');
         const psychologistName = `${psychologistDetails?.first_name || ''} ${psychologistDetails?.last_name || ''}`.trim();
-        
-        // Check if this is a free assessment session
-        const isFreeAssessment = session.session_type === 'free_assessment';
-        const sessionType = isFreeAssessment ? 'free assessment' : 'therapy session';
+        const meetLink = meetData?.meetLink || updatedSession.google_meet_link || null;
 
-        // Helper function to format time to IST 12-hour format (same as whatsappService)
-        const formatFriendlyTime = (timeStr) => {
-          if (!timeStr) return '';
-          try {
-            const [h, m] = timeStr.split(':');
-            const hours = parseInt(h, 10);
-            const minutes = parseInt(m || '0', 10);
-            const period = hours >= 12 ? 'PM' : 'AM';
-            const displayHours = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
-            const displayMinutes = minutes.toString().padStart(2, '0');
-            return `${displayHours}:${displayMinutes} ${period}`;
-          } catch {
-            return timeStr;
-          }
-        };
-
-        // Helper function to format date to friendly format in IST
-        const formatFriendlyDate = (dateStr) => {
-          if (!dateStr) return '';
-          try {
-            const d = new Date(`${dateStr}T00:00:00+05:30`);
-            return d.toLocaleDateString('en-IN', {
-              weekday: 'long',
-              month: 'long',
-              day: 'numeric',
-              year: 'numeric',
-              timeZone: 'Asia/Kolkata'
-            });
-          } catch {
-            return dateStr;
-          }
-        };
-
-        // Format date and time for WhatsApp messages in IST 12-hour format
-        const originalDateFormatted = formatFriendlyDate(session.scheduled_date);
-        const originalTimeFormatted = formatFriendlyTime(session.scheduled_time);
-        const newDateFormatted = formatFriendlyDate(updatedSession.scheduled_date);
-        const newTimeFormatted = formatFriendlyTime(updatedSession.scheduled_time);
-        
-        const originalDateTime = `${originalDateFormatted} at ${originalTimeFormatted} IST`;
-        const newDateTime = `${newDateFormatted} at ${newTimeFormatted} IST`;
-
-      // Send WhatsApp to client using the standardized format
-      if (clientDetails?.phone_number) {
-        const clientResult = await sendRescheduleConfirmation(clientDetails.phone_number, {
-          oldDate: session.scheduled_date,
-          oldTime: session.scheduled_time,
-          newDate: updatedSession.scheduled_date,
-          newTime: updatedSession.scheduled_time,
-          newMeetLink: meetData?.meetLink || null,
-          isFreeAssessment: session.session_type === 'free_assessment',
-          durationMinutes: rescheduleNotifyDurationMinutes
-        });
-        
-        if (clientResult?.success) {
-          console.log(`✅ Reschedule WhatsApp sent to client (${sessionType})`);
-        } else {
-          console.warn('⚠️ Failed to send reschedule WhatsApp to client');
+        // Client → rescheduled_link_sharing
+        if (clientDetails?.phone_number) {
+          const r = await interaktService.sendRescheduleNotification(clientDetails.phone_number, {
+            recipientName: clientName, otherPartyName: psychologistName,
+            date: updatedSession.scheduled_date, time: updatedSession.scheduled_time, meetLink,
+          });
+          if (r?.success) console.log('✅ rescheduled_link_sharing sent to client');
+          else console.warn('⚠️ rescheduled_link_sharing to client failed:', r?.error || r?.reason);
         }
-      }
 
-      // Send WhatsApp to psychologist
-      if (psychologistDetails?.phone) {
-        // Format date in short format for consistency
-        const formatBookingDateShort = (dateStr) => {
-          if (!dateStr) return '';
-          try {
-            const d = new Date(`${dateStr}T00:00:00+05:30`);
-            return d.toLocaleDateString('en-IN', {
-              weekday: 'short',
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric',
-              timeZone: 'Asia/Kolkata'
-            });
-          } catch {
-            return dateStr;
-          }
-        };
-        
-        const oldDateFormatted = formatBookingDateShort(session.scheduled_date);
-        const newDateFormatted = formatBookingDateShort(updatedSession.scheduled_date);
-        const oldDateTime = `${oldDateFormatted} at ${originalTimeFormatted} (IST)`;
-        const newDateTime = `${newDateFormatted} at ${newTimeFormatted} (IST)`;
-        
-        const bullet = '•⁠  ⁠';
-        const meetLinkLine = meetData?.meetLink ? `Join link:\n${meetData.meetLink}\n\n` : '';
-        
-        const psychRescheduleDurationLine = !isFreeAssessment
-          ? `${bullet}Duration: ${rescheduleNotifyDurationMinutes} min\n`
-          : '';
-        const psychologistMessage =
-          `Hey 👋\n\n` +
-          `${isFreeAssessment ? 'Free assessment' : 'Session'} rescheduled with Koott.\n\n` +
-          `${bullet}Client: ${clientName}\n` +
-          `${bullet}Old: ${oldDateTime}\n` +
-          `${bullet}New: ${newDateTime}\n` +
-          psychRescheduleDurationLine +
-          `\n` +
-          meetLinkLine +
-          `Please be ready 5 mins early.\n\n` +
-          `For help: +91 95390 07766\n\n` +
-          `— Koott 💜`;
-
-        const psychologistResult = await sendWhatsAppTextWithRetry(psychologistDetails.phone, psychologistMessage);
-        if (psychologistResult?.success) {
-          console.log(`✅ Reschedule WhatsApp sent to psychologist (${sessionType})`);
-        } else {
-          console.warn('⚠️ Failed to send reschedule WhatsApp to psychologist');
+        // Therapist → rescheduled_link_sharing
+        if (psychologistDetails?.phone) {
+          const r = await interaktService.sendRescheduleNotification(psychologistDetails.phone, {
+            recipientName: psychologistName, otherPartyName: clientName,
+            date: updatedSession.scheduled_date, time: updatedSession.scheduled_time, meetLink,
+          });
+          if (r?.success) console.log('✅ rescheduled_link_sharing sent to therapist');
+          else console.warn('⚠️ rescheduled_link_sharing to therapist failed:', r?.error || r?.reason);
         }
-      }
-      
-      console.log('✅ WhatsApp notifications sent for reschedule');
     } catch (waError) {
       console.error('❌ Error sending reschedule WhatsApp:', waError);
       // Continue even if WhatsApp fails
@@ -2965,8 +2686,7 @@ const createRescheduleRequest = async (session, newDate, newTime, clientId, reas
       .eq('id', clientId)
       .single();
 
-    const clientName = clientDetails?.child_name || 
-                      `${clientDetails?.first_name || 'Client'} ${clientDetails?.last_name || ''}`.trim();
+    const clientName = getClientDisplayName(clientDetails, 'Client');
 
     // Create reschedule request notification
     const notificationData = {
@@ -3023,8 +2743,7 @@ const createRescheduleNotification = async (originalSession, updatedSession, cli
       .eq('id', clientId)
       .single();
 
-    const clientName = clientDetails?.child_name || 
-                      `${clientDetails?.first_name || 'Client'} ${clientDetails?.last_name || ''}`.trim();
+    const clientName = getClientDisplayName(clientDetails, 'Client');
 
     // Get psychologist user_id (required for notifications table)
     // Psychologists can exist standalone or with a linked user_id
@@ -3133,8 +2852,7 @@ const sendRescheduleEmails = async (originalSession, updatedSession, psychologis
     if (clientDetails && psychologistDetails) {
       const emailService = require('../utils/emailService');
       
-      const clientName = clientDetails.child_name || 
-                        `${clientDetails.first_name} ${clientDetails.last_name}`.trim();
+      const clientName = getClientDisplayName(clientDetails, 'Client');
       const psychologistName = `${psychologistDetails.first_name} ${psychologistDetails.last_name}`.trim();
 
       await emailService.sendRescheduleNotification({
@@ -3931,8 +3649,7 @@ const bookRemainingSession = async (req, res) => {
     }
 
     // Prepare names for notifications
-    const clientName = clientDetails.child_name || 
-                      `${clientDetails.first_name} ${clientDetails.last_name}`.trim();
+    const clientName = getClientDisplayName(clientDetails, 'Client');
     const psychologistName = `${psychologistDetails.first_name} ${psychologistDetails.last_name}`.trim();
 
     // Package information for notifications
@@ -4088,106 +3805,37 @@ const bookRemainingSession = async (req, res) => {
           // Continue even if email fails
         }
 
-        // Send WhatsApp messages to client and psychologist via UltraMsg
+        // WhatsApp notifications via Interakt templates
         try {
-          console.log('📱 Sending WhatsApp notifications via UltraMsg API...');
-          const { sendBookingConfirmation, sendWhatsAppTextWithRetry } = require('../utils/whatsappService');
+          const interaktService = require('../utils/interaktService');
 
-          // Send WhatsApp to client
+          // Client → booking_confirmation_v1
           const clientPhone = clientDetails.phone_number || null;
           if (clientPhone && emailMeetLink) {
-            // Only include childName if child_name exists and is not empty/null/'Pending'
-            const childName = clientDetails.child_name && 
-              clientDetails.child_name.trim() !== '' && 
-              clientDetails.child_name.toLowerCase() !== 'pending'
-              ? clientDetails.child_name 
-              : null;
-            
-            const clientDetails_wa = {
-              childName: childName,
-              date: scheduled_date,
-              time: scheduled_time,
-              meetLink: emailMeetLink,
-              psychologistName: psychologistName,
-              packageInfo: packageInfo,
-              durationMinutes: meetMinutes
-            };
-            const clientWaResult = await sendBookingConfirmation(clientPhone, clientDetails_wa);
-            if (clientWaResult?.success) {
-              console.log('✅ WhatsApp confirmation sent to client via UltraMsg');
-            } else if (clientWaResult?.skipped) {
-              console.log('ℹ️ Client WhatsApp skipped:', clientWaResult.reason);
-            } else {
-              console.warn('⚠️ Client WhatsApp send failed');
-            }
-          } else {
-            console.log('ℹ️ No client phone or meet link; skipping client WhatsApp');
+            const r = await interaktService.sendBookingConfirmation(clientPhone, {
+              clientName: clientDetails.child_name && clientDetails.child_name.trim() !== '' && clientDetails.child_name.toLowerCase() !== 'pending'
+                ? clientDetails.child_name
+                : `${clientDetails.first_name || ''} ${clientDetails.last_name || ''}`.trim(),
+              psychologistName,
+              date: scheduled_date, time: scheduled_time, meetLink: emailMeetLink,
+            });
+            if (r?.success) console.log('✅ booking_confirmation_v1 sent to client');
+            else console.warn('⚠️ booking_confirmation_v1 to client failed:', r?.error || r?.reason);
           }
 
-          // Send WhatsApp to psychologist
+          // Therapist → therapistconfirmation
           const psychologistPhone = psychologistDetails.phone || null;
           if (psychologistPhone && emailMeetLink) {
-            // Format date and time using the same functions as client messages
-            const { formatFriendlyTime } = require('../utils/whatsappService');
-            const formatBookingDateShort = (dateStr) => {
-              if (!dateStr) return '';
-              try {
-                const d = new Date(`${dateStr}T00:00:00+05:30`);
-                return d.toLocaleDateString('en-IN', {
-                  weekday: 'short',
-                  day: '2-digit',
-                  month: 'short',
-                  year: 'numeric',
-                  timeZone: 'Asia/Kolkata'
-                });
-              } catch {
-                return dateStr;
-              }
-            };
-            
-            const bullet = '•⁠  ⁠';
-            const formattedDate = formatBookingDateShort(scheduled_date);
-            const formattedTime = formatFriendlyTime(scheduled_time);
-            const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-            
-            // Package line (only for package sessions)
-            let packageLine = '';
-            if (packageInfo && packageInfo.totalSessions) {
-              const total = packageInfo.totalSessions || 0;
-              const completed = packageInfo.completedSessions || 0;
-              const remaining = packageInfo.remainingSessions || 0;
-              packageLine = `${bullet}Package: ${completed}/${total} sessions completed, ${remaining} remaining\n`;
-            }
-            
-            const psychologistMessage =
-              `Hey 👋\n\n` +
-              `New session booked with Koott.\n\n` +
-              `${bullet}Client: ${clientName}\n` +
-              packageLine +
-              `${bullet}Date: ${formattedDate}\n` +
-              `${bullet}Time: ${formattedTime} (IST)\n` +
-              `${bullet}Duration: ${meetMinutes} min\n\n` +
-              `Join link:\n${emailMeetLink}\n\n` +
-              `Please be ready 5 mins early.\n\n` +
-              `For help: ${supportPhone}\n\n` +
-              `— Koott 💜`;
-            
-            const psychologistWaResult = await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
-            if (psychologistWaResult?.success) {
-              console.log('✅ WhatsApp notification sent to psychologist via UltraMsg');
-            } else if (psychologistWaResult?.skipped) {
-              console.log('ℹ️ Psychologist WhatsApp skipped:', psychologistWaResult.reason);
-            } else {
-              console.warn('⚠️ Psychologist WhatsApp send failed');
-            }
-          } else {
-            console.log('ℹ️ No psychologist phone or meet link; skipping psychologist WhatsApp');
+            const r = await interaktService.sendSessionNotificationPsychologist(psychologistPhone, {
+              therapistName: psychologistName,
+              clientName, date: scheduled_date, time: scheduled_time,
+              meetLink: emailMeetLink,
+            });
+            if (r?.success) console.log('✅ therapistconfirmation sent to therapist');
+            else console.warn('⚠️ therapistconfirmation failed:', r?.error || r?.reason);
           }
-          
-          console.log('✅ WhatsApp messages sent successfully via UltraMsg');
         } catch (waError) {
-          console.error('❌ Error sending WhatsApp messages:', waError);
-          // Continue even if WhatsApp sending fails
+          console.error('❌ Error sending WhatsApp via Interakt:', waError.message || waError);
         }
 
         console.log('✅ Remaining session booked successfully');
@@ -4898,8 +4546,7 @@ const bookSessionWithCredit = async (req, res) => {
     // Send email + WhatsApp notifications (mirror bookSession)
     try {
       const emailService = require('../utils/emailService');
-      const clientName = clientDetails.child_name ||
-        `${clientDetails.first_name || ''} ${clientDetails.last_name || ''}`.trim() || 'Client';
+      const clientName = getClientDisplayName(clientDetails, 'Client');
       const psychologistName = `${psychologistDetails.first_name || ''} ${psychologistDetails.last_name || ''}`.trim() || 'Psychologist';
 
       await emailService.sendSessionConfirmation({
@@ -4918,62 +4565,33 @@ const bookSessionWithCredit = async (req, res) => {
       console.log('✅ Email notifications sent for credit booking');
 
       try {
-        const { sendBookingConfirmation, sendWhatsAppTextWithRetry, formatFriendlyTime } = require('../utils/whatsappService');
+        const interaktService = require('../utils/interaktService');
+
+        // Client → booking_confirmation_v1
         const clientPhone = clientDetails.phone_number || null;
         if (clientPhone && meetData?.meetLink) {
-          const childName = clientDetails.child_name &&
-            clientDetails.child_name.trim() !== '' &&
-            clientDetails.child_name.toLowerCase() !== 'pending'
-            ? clientDetails.child_name
-            : null;
-          await sendBookingConfirmation(clientPhone, {
-            childName,
-            date: formattedDate,
-            time: formattedTime,
-            meetLink: meetData.meetLink,
+          const r = await interaktService.sendBookingConfirmation(clientPhone, {
+            clientName: getClientDisplayName(clientDetails, 'Client'),
             psychologistName,
-            durationMinutes: creditMeetMinutes
+            date: formattedDate, time: formattedTime, meetLink: meetData.meetLink,
           });
-          console.log('✅ WhatsApp confirmation sent to client (credit booking)');
+          if (r?.success) console.log('✅ booking_confirmation_v1 sent to client (credit booking)');
+          else console.warn('⚠️ booking_confirmation_v1 (credit) failed:', r?.error || r?.reason);
         }
-        // Send WhatsApp to psychologist (same as other booking flows)
+
+        // Therapist → therapistconfirmation
         const psychologistPhone = psychologistDetails.phone || null;
         if (psychologistPhone && meetData?.meetLink) {
-          const formatBookingDateShort = (dateStr) => {
-            if (!dateStr) return '';
-            try {
-              const d = new Date(`${dateStr}T00:00:00+05:30`);
-              return d.toLocaleDateString('en-IN', {
-                weekday: 'short',
-                day: '2-digit',
-                month: 'short',
-                year: 'numeric',
-                timeZone: 'Asia/Kolkata'
-              });
-            } catch {
-              return dateStr;
-            }
-          };
-          const bullet = '•⁠  ⁠';
-          const formattedDateShort = formatBookingDateShort(formattedDate);
-          const formattedTimeFriendly = formatFriendlyTime(formattedTime);
-          const supportPhone = process.env.SUPPORT_PHONE || process.env.COMPANY_PHONE || '+91 95390 07766';
-          const psychologistMessage =
-            `Hey 👋\n\n` +
-            `New session booked with Koott.\n\n` +
-            `${bullet}Client: ${clientName}\n` +
-            `${bullet}Date: ${formattedDateShort}\n` +
-            `${bullet}Time: ${formattedTimeFriendly} (IST)\n` +
-            `${bullet}Duration: ${creditMeetMinutes} min\n\n` +
-            `Join link:\n${meetData.meetLink}\n\n` +
-            `Please be ready 5 mins early.\n\n` +
-            `For help: ${supportPhone}\n\n` +
-            `— Koott 💜`;
-          await sendWhatsAppTextWithRetry(psychologistPhone, psychologistMessage);
-          console.log('✅ WhatsApp notification sent to psychologist (credit booking)');
+          const r = await interaktService.sendSessionNotificationPsychologist(psychologistPhone, {
+            therapistName: psychologistName,
+            clientName, date: formattedDate, time: formattedTime,
+            meetLink: meetData.meetLink,
+          });
+          if (r?.success) console.log('✅ therapistconfirmation sent to therapist (credit booking)');
+          else console.warn('⚠️ therapistconfirmation (credit) failed:', r?.error || r?.reason);
         }
       } catch (waErr) {
-        console.warn('⚠️ WhatsApp notification skipped for credit booking:', waErr?.message);
+        console.warn('⚠️ Interakt WhatsApp skipped for credit booking:', waErr?.message);
       }
     } catch (notifyErr) {
       console.warn('⚠️ Notification error for credit booking:', notifyErr?.message);
