@@ -95,7 +95,7 @@ class SessionManager {
         try {
           const { data, error } = await supabaseAdmin
             .from('user_sessions')
-            .select('id, user_id, expires_at, last_activity, created_at, ip_address, user_agent')
+            .select('id, user_id, expires_at, last_activity, created_at,  user_agent')
             .eq('user_id', userId)
             .gt('expires_at', new Date().toISOString())
             .order('last_activity', { ascending: false });

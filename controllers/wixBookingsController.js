@@ -1734,9 +1734,7 @@ async function completeWixBooking(req, res) {
             .eq('wix_booking_id', data.wix_booking_id)
             .maybeSingle();
           if (linkedSess) {
-            therapistNote = (linkedSess.summary && String(linkedSess.summary).trim())
-              || (linkedSess.summary_notes && String(linkedSess.summary_notes).trim())
-              || '';
+            therapistNote = (linkedSess.summary && String(linkedSess.summary).trim()) || '';
             completedAt = linkedSess.completion_date || linkedSess.updated_at || completedAt;
           }
         }

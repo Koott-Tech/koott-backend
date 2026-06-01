@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const psychologistController = require('../controllers/psychologistController');
-const assessmentBookingController = require('../controllers/assessmentBookingController');
 const { authenticateToken, requirePsychologist } = require('../middleware/auth');
 const { 
   validatePsychologistProfile,
@@ -25,7 +24,6 @@ router.post('/sessions/:sessionId/complete', psychologistController.completeSess
 router.delete('/sessions/:sessionId', psychologistController.deleteSession);
 // Assessment session scheduling
 router.post('/assessment-sessions/:assessmentSessionId/schedule', psychologistController.scheduleAssessmentSession);
-router.put('/assessment-sessions/:assessmentSessionId/reschedule', assessmentBookingController.rescheduleAssessmentSession);
 router.delete('/assessment-sessions/:assessmentSessionId', psychologistController.deleteAssessmentSession);
 
 // Availability management

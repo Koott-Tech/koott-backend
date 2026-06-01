@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
-const assessmentBookingController = require('../controllers/assessmentBookingController');
 const sessionController = require('../controllers/sessionController');
 const wixDiscoverController = require('../controllers/wixDiscoverController');
 const wixBookingsController = require('../controllers/wixBookingsController');
@@ -121,8 +120,6 @@ router.get('/bookings/packages-with-remaining', adminController.getPackagesWithR
 router.get('/reschedule-requests', adminController.getRescheduleRequests);
 
 // Assessment session rescheduling (admin can reschedule directly)
-router.put('/assessment-sessions/:assessmentSessionId/reschedule', assessmentBookingController.rescheduleAssessmentSession);
-router.delete('/assessment-sessions/:assessmentSessionId', assessmentBookingController.deleteAssessmentSession);
 
 // Psychologist calendar events
 router.get('/psychologists/:psychologistId/calendar-events', adminController.getPsychologistCalendarEvents);

@@ -546,117 +546,6 @@ const getAllSessions = async (req, res) => {
 
     // Also fetch assessment sessions for admin dashboard
     let assessmentSessions = [];
-    let assessmentSessionsCount = 0;
-    try {
-      const { supabaseAdmin } = require('../config/supabase');
-      
-      // First get total count of assessment sessions
-      let assessCountQuery = supabaseAdmin
-        .from('assessment_sessions')
-        .select('*', { count: 'exact', head: true });
-
-      // Apply same filters for count
-      assessCountQuery = applySessionStatusFilter(assessCountQuery);
-      if (psychologist_id) {
-        assessCountQuery = assessCountQuery.eq('psychologist_id', psychologist_id);
-      }
-      if (client_id) {
-        assessCountQuery = assessCountQuery.eq('client_id', client_id);
-      }
-      if (date) {
-        assessCountQuery = assessCountQuery.eq('scheduled_date', date);
-      }
-      // Use created_at (booking creation date) for date-range filtering — consistent with
-      // therapy sessions which filter on booking_created_at. This ensures "today's sessions"
-      // counts bookings made today, not appointments scheduled today.
-      if (dateFrom) {
-        assessCountQuery = assessCountQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`);
-      }
-      if (dateTo) {
-        assessCountQuery = assessCountQuery.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
-      }
-
-      const { count: assessCount, error: assessCountError } = await assessCountQuery;
-      assessmentSessionsCount = assessCount || 0;
-      console.log('Total assessment sessions count:', assessmentSessionsCount);
-
-      // Now fetch all assessment sessions (we'll combine and paginate in memory)
-      // assessment_sessions has no FK relationships in the schema cache — use flat select + manual enrichment
-      let assessQuery = supabaseAdmin
-        .from('assessment_sessions')
-        .select('id, client_id, psychologist_id, scheduled_date, scheduled_time, status, amount, created_at, updated_at');
-
-      // Apply same filters as regular sessions
-      assessQuery = applySessionStatusFilter(assessQuery);
-      if (psychologist_id) {
-        assessQuery = assessQuery.eq('psychologist_id', psychologist_id);
-      }
-      if (client_id) {
-        assessQuery = assessQuery.eq('client_id', client_id);
-      }
-      if (date) {
-        assessQuery = assessQuery.eq('scheduled_date', date);
-      }
-      if (dateFrom) {
-        assessQuery = assessQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`);
-      }
-      if (dateTo) {
-        assessQuery = assessQuery.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
-      }
-
-      // Apply sorting (match therapy sessions: date + time)
-      if (sort && order) {
-        const asc = order === 'asc';
-        assessQuery = assessQuery.order(sort, { ascending: asc });
-        if (sort === 'scheduled_date') {
-          assessQuery = assessQuery.order('scheduled_time', { ascending: asc });
-        }
-      }
-
-      const { data: assessData, error: assessError } = await assessQuery;
-
-      if (assessError) {
-        console.error('Error fetching assessment sessions:', assessError);
-      } else {
-        // Manually enrich with client and psychologist data (no FK relationships in schema cache)
-        const clientIds = [...new Set((assessData || []).map(r => r.client_id).filter(Boolean))];
-        const psychIds  = [...new Set((assessData || []).map(r => r.psychologist_id).filter(Boolean))];
-
-        let enrichedClients = [];
-        let enrichedPsychs  = [];
-
-        if (clientIds.length) {
-          const { data } = await supabaseAdmin
-            .from('clients')
-            .select('id, user_id, first_name, last_name, child_name, child_age, phone_number')
-            .in('id', clientIds);
-          enrichedClients = data || [];
-        }
-        if (psychIds.length) {
-          const { data } = await supabaseAdmin
-            .from('psychologists')
-            .select('id, first_name, last_name, area_of_expertise, email')
-            .in('id', psychIds);
-          enrichedPsychs = data || [];
-        }
-
-        const clientMap = new Map(enrichedClients.map(c => [c.id, c]));
-        const psychMap  = new Map(enrichedPsychs.map(p => [p.id, p]));
-
-        assessmentSessions = (assessData || []).map(a => ({
-          ...a,
-          client:       clientMap.get(a.client_id) || null,
-          psychologist: psychMap.get(a.psychologist_id) || null,
-          session_type: 'assessment',
-          type:         'assessment',
-          assessment_title: 'Assessment',
-        }));
-
-        console.log(`✅ Found ${assessmentSessions.length} assessment sessions for admin dashboard`);
-      }
-    } catch (assessError) {
-      console.error('Error fetching assessment sessions (non-blocking):', assessError);
-    }
 
     // Reattach client email via a separate users lookup (avoids PostgREST
     // clients→users relationship embed which isn't resolvable on this schema).
@@ -2275,11 +2164,8 @@ const completeSession = async (req, res) => {
 
           const clientName = getClientDisplayName(client, 'there');
 
-          // Therapist note: prefer the summary submitted on completion, fall back to summary_notes
-          const therapistNote =
-            (updatedSession.summary && String(updatedSession.summary).trim()) ||
-            (updatedSession.summary_notes && String(updatedSession.summary_notes).trim()) ||
-            '';
+          // Therapist note: only use the public summary submitted on completion
+          const therapistNote = (updatedSession.summary && String(updatedSession.summary).trim()) || '';
 
           const completedAt = updatedSession.completion_date || updatedSession.updated_at || new Date().toISOString();
 
