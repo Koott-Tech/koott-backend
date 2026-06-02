@@ -16,7 +16,6 @@ const availabilityService = require('../utils/availabilityCalendarService');
 const meetLinkService = require('../utils/meetLinkService');
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const userInteractionLogger = require('../utils/userInteractionLogger');
-const { reserveAssessmentSlot, bookAssessment, getAssessmentSessions } = require('./assessmentBookingController');
 const {
   buildKoottSessionDescription,
   buildKoottSessionTitle,
@@ -4660,9 +4659,6 @@ module.exports = {
   bookRemainingSession,
   reserveTimeSlot,
   getFreeAssessmentAvailabilityForReschedule,
-  reserveAssessmentSlot,
-  bookAssessment,
-  getAssessmentSessions,
   getPaymentCredit,
   bookSessionWithCredit
 };

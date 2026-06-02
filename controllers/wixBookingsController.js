@@ -819,12 +819,14 @@ async function performWixSync(options = {}) {
  */
 async function syncWixBookings(req, res) {
   try {
+    // Manual sync (admin button): always pass null so ALL bookings are fetched, not just future ones.
+    // The old default of new Date().toISOString() caused 0 synced every time because every booking
+    // was created before "right now". The createdAfter filter is only appropriate for automated
+    // interval syncs; for manual sync we want a full re-fetch.
     const requestedCreatedAfter =
       req.body?.createdAfter ||
       req.query?.createdAfter ||
-      (req.body?.syncFromTrigger === false || req.query?.syncFromTrigger === 'false'
-        ? null
-        : new Date().toISOString());
+      null;
     const result = await performWixSync({ createdAfter: requestedCreatedAfter });
 
     return res.json({
@@ -925,12 +927,16 @@ async function listWixBookings(req, res) {
       q = q.eq('session_type', session_type);
     }
 
-    // Filter by created_at (when the booking was made), not start_time (when the session happens)
-    if (dateFrom) {
-      q = q.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
-    }
-    if (dateTo) {
-      q = q.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+    // Upcoming tab: OR filter by session start time or booking created date; other tabs: created date only.
+    const isUpcomingWixTab = String(status || '').toLowerCase() === 'booked';
+    if (isUpcomingWixTab && dateFrom && dateTo) {
+      q = q.or(
+        `and(start_time.gte.${dateFrom}T00:00:00.000+05:30,start_time.lte.${dateTo}T23:59:59.999+05:30),` +
+        `and(created_at.gte.${dateFrom}T00:00:00.000+05:30,created_at.lte.${dateTo}T23:59:59.999+05:30)`
+      );
+    } else {
+      if (dateFrom) q = q.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
+      if (dateTo) q = q.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
     }
 
     const term = typeof search === 'string' ? search.trim().replace(/,/g, '') : '';
@@ -990,7 +996,13 @@ async function listWixBookings(req, res) {
       session_id: sessionMap.get(row.wix_booking_id)?.id || null,
       __row: row,
     })))
-      .map((x) => x.__row || x)
+      .map((x) => {
+        const row = x.__row || x;
+        // Attach session_status from the linked sessions table so matchesStatusFilter
+        // uses the platform's ground truth (e.g. completed) not Wix's stale status.
+        const linkedSession = sessionMap.get(row.wix_booking_id);
+        return linkedSession?.status ? { ...row, session_status: linkedSession.status } : row;
+      })
       .filter((row) => {
         // Match finance sessions page logic: only exclude deleted rows and
         // UNDEFINED-state rows (no wix_session_id). Package children are real
@@ -1010,8 +1022,15 @@ async function listWixBookings(req, res) {
         .from('wix_bookings')
         .select('session_type, session_count, package_parent_booking_id, package_session_number, status, wix_session_id, wix_order_number, price');
       if (session_type && session_type !== 'all') aggQ = aggQ.eq('session_type', session_type);
-      if (dateFrom) aggQ = aggQ.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
-      if (dateTo) aggQ = aggQ.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+      if (isUpcomingWixTab && dateFrom && dateTo) {
+        aggQ = aggQ.or(
+          `and(start_time.gte.${dateFrom}T00:00:00.000+05:30,start_time.lte.${dateTo}T23:59:59.999+05:30),` +
+          `and(created_at.gte.${dateFrom}T00:00:00.000+05:30,created_at.lte.${dateTo}T23:59:59.999+05:30)`
+        );
+      } else {
+        if (dateFrom) aggQ = aggQ.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
+        if (dateTo) aggQ = aggQ.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+      }
       const { data: rowsForCount } = await aggQ;
       if (Array.isArray(rowsForCount)) {
         // Same logic as allVisibleRows filter: exclude deleted + no wix_session_id only

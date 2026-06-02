@@ -36,10 +36,7 @@ router.post('/book-remaining-session', clientController.bookRemainingSession);
 // Reserve time slot for payment
 router.post('/reserve-slot', clientController.reserveTimeSlot);
 
-// Assessment booking
-router.post('/assessments/reserve-slot', clientController.reserveAssessmentSlot);
-router.post('/assessments/book', clientController.bookAssessment);
-router.get('/assessments/sessions', clientController.getAssessmentSessions);
+
 
 // Get client packages
 router.get('/packages', clientController.getClientPackages);

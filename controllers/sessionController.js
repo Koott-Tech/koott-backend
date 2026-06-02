@@ -359,6 +359,9 @@ const getAllSessions = async (req, res) => {
       statusList = ['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed'];
     }
 
+    // Upcoming tab = booked + rescheduled only — date filter should match by session date OR booking date
+    const isUpcomingTab = statusList.length === 2 && statusList.includes('booked') && statusList.includes('rescheduled');
+
     const applySessionStatusFilter = (q) => {
       if (statusList.length === 0) return q;
       if (statusList.length === 1) return q.eq('status', statusList[0]);
@@ -384,12 +387,15 @@ const getAllSessions = async (req, res) => {
     if (date) {
       countQuery = countQuery.eq('scheduled_date', date);
     }
-    // Date range filter uses booking_created_at when the column exists, else created_at.
-    if (dateFrom) {
-      countQuery = countQuery.gte(adminBookingTimeCol, `${dateFrom}T00:00:00+05:30`);
-    }
-    if (dateTo) {
-      countQuery = countQuery.lte(adminBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
+    // Date range filter: upcoming tab matches session date OR booking date; other tabs use booking date only.
+    if (isUpcomingTab && dateFrom && dateTo) {
+      countQuery = countQuery.or(
+        `and(scheduled_date.gte.${dateFrom},scheduled_date.lte.${dateTo}),` +
+        `and(${adminBookingTimeCol}.gte.${dateFrom}T00:00:00+05:30,${adminBookingTimeCol}.lte.${dateTo}T23:59:59.999+05:30)`
+      );
+    } else {
+      if (dateFrom) countQuery = countQuery.gte(adminBookingTimeCol, `${dateFrom}T00:00:00+05:30`);
+      if (dateTo) countQuery = countQuery.lte(adminBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
     }
     // Note: free_assessment exclusion already applied above
 
@@ -440,12 +446,15 @@ const getAllSessions = async (req, res) => {
     if (date) {
       query = query.eq('scheduled_date', date);
     }
-    // Filter by client booking time column (see getBookingTimeColumnKey).
-    if (dateFrom) {
-      query = query.gte(adminBookingTimeCol, `${dateFrom}T00:00:00+05:30`);
-    }
-    if (dateTo) {
-      query = query.lte(adminBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
+    // Upcoming tab: OR filter by session date or booking date; other tabs: booking date only.
+    if (isUpcomingTab && dateFrom && dateTo) {
+      query = query.or(
+        `and(scheduled_date.gte.${dateFrom},scheduled_date.lte.${dateTo}),` +
+        `and(${adminBookingTimeCol}.gte.${dateFrom}T00:00:00+05:30,${adminBookingTimeCol}.lte.${dateTo}T23:59:59.999+05:30)`
+      );
+    } else {
+      if (dateFrom) query = query.gte(adminBookingTimeCol, `${dateFrom}T00:00:00+05:30`);
+      if (dateTo) query = query.lte(adminBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
     }
 
     // Apply sorting (scheduled_time as tiebreaker so "All" matches Booked-style ordering)
@@ -713,7 +722,6 @@ const getAllSessions = async (req, res) => {
 
     console.log('Pagination summary:', {
       sessionsCount: sessionsCount || 0,
-      assessmentSessionsCount: assessmentSessionsCount || 0,
       totalSessions,
       allSessionsLength: allSessions.length,
       visibleSessionsLength: visibleSessions.length,

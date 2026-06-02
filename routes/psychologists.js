@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const psychologistController = require('../controllers/psychologistController');
+const sessionController = require('../controllers/sessionController');
 const { authenticateToken, requirePsychologist } = require('../middleware/auth');
 const { 
   validatePsychologistProfile,
@@ -21,6 +22,7 @@ router.get('/clients/:clientId/session-history', psychologistController.getClien
 router.get('/stats/monthly', psychologistController.getMonthlyStats);
 router.put('/sessions/:sessionId', psychologistController.updateSession);
 router.post('/sessions/:sessionId/complete', psychologistController.completeSession);
+router.put('/sessions/:sessionId/no-show', sessionController.markSessionAsNoShow);
 router.delete('/sessions/:sessionId', psychologistController.deleteSession);
 // Assessment session scheduling
 router.post('/assessment-sessions/:assessmentSessionId/schedule', psychologistController.scheduleAssessmentSession);
