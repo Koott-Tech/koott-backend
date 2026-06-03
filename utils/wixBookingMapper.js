@@ -40,7 +40,15 @@ function sessionTypeFromBooking(b) {
   const bookingType = String(b.bookingType || '').toLowerCase().trim();
   if (bookingType === 'assessment') return 'assessment';
   if (bookingType === 'discovery') return 'discovery';
-  if (bookingType === 'package') return 'package';
+  if (bookingType === 'package') {
+    // Only commit to 'package' when there is evidence of a multi-session series.
+    // A single-session plan-credit booking has bookingType='package' from Velo but is
+    // effectively individual (session_count=1, no planSessionNumber, no creditsAvailable).
+    const count = sessionCountFromBooking(b);
+    const hasPsn = b.planSessionNumber != null;
+    if (count > 1 || hasPsn) return 'package';
+    // Fall through — will be caught by isPlanCredit → individual below
+  }
   if (bookingType === 'couple') return 'couple';
 
   // 2. Now apply couple/package tags (duration didn't fire, so session is ≤75 min)

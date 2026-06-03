@@ -2158,15 +2158,18 @@ const getSessions = async (req, res) => {
     const paymentIds = [...new Set(sessionsData.map(s => s.payment_id).filter(Boolean))];
     let successfulPaymentIds = [];
     
+    // Also build a receipt_url map for manual booking image previews in the approval popup
+    const paymentReceiptMap = {};
     if (paymentIds.length > 0) {
       const { data: payments, error: paymentError } = await supabaseAdmin
         .from('payments')
-        .select('id, status')
+        .select('id, status, receipt_url')
         .in('id', paymentIds)
         .in('status', ['paid', 'success', 'completed', 'cash']); // Only successful payments
-      
+
       if (!paymentError && payments) {
         successfulPaymentIds = payments.map(p => p.id);
+        payments.forEach(p => { if (p.receipt_url) paymentReceiptMap[p.id] = p.receipt_url; });
       }
     }
 
@@ -2245,7 +2248,9 @@ const getSessions = async (req, res) => {
         wix_order_number: session.wix_order_number,
         package_session_number: session.package_session_number,
         session_count: session.session_count,
-        package_id: session.package_id
+        package_id: session.package_id,
+        // Payment proof image for manual booking approval popup
+        receipt_url: session.payment_id ? (paymentReceiptMap[session.payment_id] || null) : null,
       };
     }).filter(Boolean);
     
@@ -2626,6 +2631,13 @@ const getSessionDetails = async (req, res) => {
         doctorAmount = parseFloat(dp.couple_session ?? dp.cpl_session ?? cs.doctor_commission_individual ?? 0) || 0;
       } else if (isPackage) {
         doctorAmount = parseFloat(dp.package_followup ?? cs.doctor_commission_followup_package ?? cs.doctor_commission_followup ?? 0) || 0;
+        // If the package doctor rate exceeds the session price (e.g. per-session Wix package priced
+        // individually), fall back to the per-session individual followup rate to avoid company = 0.
+        if (doctorAmount >= amount) {
+          const fallback = parseFloat(cs.doctor_commission_followup ?? cs.doctor_commission_individual ?? 0) || 0;
+          if (fallback < amount) doctorAmount = fallback;
+          else doctorAmount = 0; // last resort: company keeps all
+        }
       } else {
         // Individual: use first vs followup rate correctly
         if (firstSession && cs.doctor_commission_first_session != null) {

@@ -2147,20 +2147,19 @@ const completeSession = async (req, res) => {
         console.log(`✅ In-app notification created successfully`);
       }
 
-      // Send WhatsApp follow-up to client via Interakt template `session_follow_up_v2`
+      // TEMPORARILY DISABLED: WhatsApp follow-up to client via Interakt template `session_follow_up_v2`
+      // console.log(`📱 Skipping session_follow_up_v2 (disabled temporarily)`);
+      /* DISABLED START
       try {
         const interaktService = require('../utils/interaktService');
         const clientPhone = client?.phone_number || null;
 
         if (clientPhone) {
-          // Resolve therapist name: use whoever completed (admin or therapist),
-          // but fall back to the session's actual psychologist if completed by admin.
           let psychologistName = '';
           if (!isAdmin) {
             psychologistName = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim();
           }
           if (!psychologistName) {
-            // Look up the session's psychologist
             const { data: psych } = await supabaseAdmin
               .from('psychologists')
               .select('first_name, last_name')
@@ -2171,10 +2170,7 @@ const completeSession = async (req, res) => {
           if (!psychologistName) psychologistName = isFreeAssessment ? 'our specialist' : 'your therapist';
 
           const clientName = getClientDisplayName(client, 'there');
-
-          // Therapist note: only use the public summary submitted on completion
           const therapistNote = (updatedSession.summary && String(updatedSession.summary).trim()) || '';
-
           const completedAt = updatedSession.completion_date || updatedSession.updated_at || new Date().toISOString();
 
           console.log(`📱 Sending session_follow_up_v2 to client (${clientPhone.substring(0,3)}***) for session ${sessionId}`);
@@ -2194,8 +2190,8 @@ const completeSession = async (req, res) => {
         }
       } catch (waError) {
         console.error(`❌ Error sending session_follow_up_v2 for session ${sessionId}:`, waError.message);
-        // Don't fail the request if WhatsApp fails
       }
+      DISABLED END */
     } catch (notificationError) {
       console.error('Error sending completion notification:', notificationError);
       // Don't fail the request if notification fails
