@@ -2023,6 +2023,171 @@ const getClientSessionHistory = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Private Note Password — per-therapist password that gates access to
+// sessions.summary_notes (private clinical notes). Distinct from login password.
+// Backed by psychologists.private_note_password_hash (bcrypt).
+// ─────────────────────────────────────────────────────────────────────────────
+const bcrypt = require('bcryptjs');
+
+// Column may not exist yet — wrap reads so we return a clear message.
+async function fetchPsychologistPasswordRow(psychologistId) {
+  const { data, error } = await supabaseAdmin
+    .from('psychologists')
+    .select('id, private_note_password_hash')
+    .eq('id', psychologistId)
+    .single();
+  if (error) {
+    if (error.code === '42703' || /column .* does not exist/i.test(error.message || '')) {
+      const e = new Error('Private note password column missing. Apply migration 20260603_psychologist_private_note_password.sql in Supabase.');
+      e.code = 'MIGRATION_REQUIRED';
+      throw e;
+    }
+    throw error;
+  }
+  return data;
+}
+
+/** GET /psychologists/private-notes/status → { hasPassword } */
+const getPrivateNotePasswordStatus = async (req, res) => {
+  try {
+    const psychologistId = req.user.id;
+    const row = await fetchPsychologistPasswordRow(psychologistId);
+    res.json(successResponse({ hasPassword: !!row.private_note_password_hash }));
+  } catch (err) {
+    if (err.code === 'MIGRATION_REQUIRED') {
+      return res.status(503).json(errorResponse(err.message));
+    }
+    console.error('getPrivateNotePasswordStatus error:', err);
+    res.status(500).json(errorResponse('Failed to read private note password status'));
+  }
+};
+
+/** POST /psychologists/private-notes/setup  body:{ password } — first-time set */
+const setupPrivateNotePassword = async (req, res) => {
+  try {
+    const psychologistId = req.user.id;
+    const password = String(req.body?.password || '');
+    if (password.length < 6) {
+      return res.status(400).json(errorResponse('Password must be at least 6 characters'));
+    }
+    const row = await fetchPsychologistPasswordRow(psychologistId);
+    if (row.private_note_password_hash) {
+      return res.status(400).json(errorResponse('Password already set. Use change endpoint.'));
+    }
+    const hash = await bcrypt.hash(password, 12);
+    const { error: updErr } = await supabaseAdmin
+      .from('psychologists')
+      .update({ private_note_password_hash: hash, updated_at: new Date().toISOString() })
+      .eq('id', psychologistId);
+    if (updErr) throw updErr;
+    res.json(successResponse({ hasPassword: true }, 'Private note password set'));
+  } catch (err) {
+    if (err.code === 'MIGRATION_REQUIRED') {
+      return res.status(503).json(errorResponse(err.message));
+    }
+    console.error('setupPrivateNotePassword error:', err);
+    res.status(500).json(errorResponse('Failed to set private note password'));
+  }
+};
+
+/** POST /psychologists/private-notes/change  body:{ currentPassword, newPassword } */
+const changePrivateNotePassword = async (req, res) => {
+  try {
+    const psychologistId = req.user.id;
+    const currentPassword = String(req.body?.currentPassword || '');
+    const newPassword = String(req.body?.newPassword || '');
+    if (newPassword.length < 6) {
+      return res.status(400).json(errorResponse('New password must be at least 6 characters'));
+    }
+    const row = await fetchPsychologistPasswordRow(psychologistId);
+    if (!row.private_note_password_hash) {
+      return res.status(400).json(errorResponse('No password set. Use setup endpoint.'));
+    }
+    const ok = await bcrypt.compare(currentPassword, row.private_note_password_hash);
+    if (!ok) {
+      return res.status(400).json(errorResponse('Current password is incorrect'));
+    }
+    const hash = await bcrypt.hash(newPassword, 12);
+    const { error: updErr } = await supabaseAdmin
+      .from('psychologists')
+      .update({ private_note_password_hash: hash, updated_at: new Date().toISOString() })
+      .eq('id', psychologistId);
+    if (updErr) throw updErr;
+    res.json(successResponse({ hasPassword: true }, 'Private note password changed'));
+  } catch (err) {
+    if (err.code === 'MIGRATION_REQUIRED') {
+      return res.status(503).json(errorResponse(err.message));
+    }
+    console.error('changePrivateNotePassword error:', err);
+    res.status(500).json(errorResponse('Failed to change private note password'));
+  }
+};
+
+/** POST /psychologists/private-notes/verify  body:{ password } → { valid } */
+const verifyPrivateNotePassword = async (req, res) => {
+  try {
+    const psychologistId = req.user.id;
+    const password = String(req.body?.password || '');
+    const row = await fetchPsychologistPasswordRow(psychologistId);
+    if (!row.private_note_password_hash) {
+      return res.status(400).json(errorResponse('No password set'));
+    }
+    const ok = await bcrypt.compare(password, row.private_note_password_hash);
+    if (!ok) {
+      return res.status(400).json(errorResponse('Incorrect password'));
+    }
+    res.json(successResponse({ valid: true }));
+  } catch (err) {
+    if (err.code === 'MIGRATION_REQUIRED') {
+      return res.status(503).json(errorResponse(err.message));
+    }
+    console.error('verifyPrivateNotePassword error:', err);
+    res.status(500).json(errorResponse('Failed to verify password'));
+  }
+};
+
+/** POST /psychologists/private-notes/reset  body:{ loginPassword, newPassword }
+ *  Reset using the therapist's login password as proof of identity.
+ */
+const resetPrivateNotePassword = async (req, res) => {
+  try {
+    const psychologistId = req.user.id;
+    const loginPassword = String(req.body?.loginPassword || '');
+    const newPassword = String(req.body?.newPassword || '');
+    if (newPassword.length < 6) {
+      return res.status(400).json(errorResponse('New password must be at least 6 characters'));
+    }
+    const { data: row, error } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, password_hash')
+      .eq('id', psychologistId)
+      .single();
+    if (error || !row) {
+      return res.status(404).json(errorResponse('Therapist not found'));
+    }
+    const ok = await bcrypt.compare(loginPassword, row.password_hash || '');
+    if (!ok) {
+      return res.status(400).json(errorResponse('Login password is incorrect'));
+    }
+    const hash = await bcrypt.hash(newPassword, 12);
+    const { error: updErr } = await supabaseAdmin
+      .from('psychologists')
+      .update({ private_note_password_hash: hash, updated_at: new Date().toISOString() })
+      .eq('id', psychologistId);
+    if (updErr) {
+      if (updErr.code === '42703' || /column .* does not exist/i.test(updErr.message || '')) {
+        return res.status(503).json(errorResponse('Private note password column missing. Apply migration 20260603_psychologist_private_note_password.sql in Supabase.'));
+      }
+      throw updErr;
+    }
+    res.json(successResponse({ hasPassword: true }, 'Private note password reset'));
+  } catch (err) {
+    console.error('resetPrivateNotePassword error:', err);
+    res.status(500).json(errorResponse('Failed to reset private note password'));
+  }
+};
+
 module.exports = {
   getProfile,
   updateProfile,
@@ -2040,5 +2205,11 @@ module.exports = {
   deleteSession,
   deleteAssessmentSession,
   getMonthlyStats,
-  getClientSessionHistory
+  getClientSessionHistory,
+  // Private note password
+  getPrivateNotePasswordStatus,
+  setupPrivateNotePassword,
+  changePrivateNotePassword,
+  verifyPrivateNotePassword,
+  resetPrivateNotePassword,
 };

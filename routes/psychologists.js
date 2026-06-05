@@ -39,4 +39,11 @@ router.get('/recurring-blocks', psychologistController.getRecurringBlocks);
 router.post('/recurring-blocks', psychologistController.addRecurringBlock);
 router.delete('/recurring-blocks/:blockId', psychologistController.deleteRecurringBlock);
 
+// Private note password — per-therapist password that gates summary_notes access
+router.get('/private-notes/status', psychologistController.getPrivateNotePasswordStatus);
+router.post('/private-notes/setup', psychologistController.setupPrivateNotePassword);
+router.post('/private-notes/change', psychologistController.changePrivateNotePassword);
+router.post('/private-notes/verify', psychologistController.verifyPrivateNotePassword);
+router.post('/private-notes/reset', psychologistController.resetPrivateNotePassword);
+
 module.exports = router;

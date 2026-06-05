@@ -361,6 +361,15 @@ const getAllSessions = async (req, res) => {
 
     // Upcoming tab = booked + rescheduled only — date filter should match by session date OR booking date
     const isUpcomingTab = statusList.length === 2 && statusList.includes('booked') && statusList.includes('rescheduled');
+    // Cancelled tab — must NOT exclude cancelled rows
+    const isCancelledTab = statusList.length === 1 && statusList[0].toLowerCase() === 'cancelled';
+    // Tabs that filter by scheduled_date (what actually happens that month) instead of booking date.
+    // Completed / no_show / pending use the session's scheduled date.
+    // Cancelled & upcoming use booking_created_at (booking-level event).
+    const scheduledDateTabStatuses = new Set(['completed', 'no_show', 'noshow']);
+    const tabUsesScheduledDate = !isUpcomingTab && !isCancelledTab
+      && statusList.length > 0
+      && statusList.every((s) => scheduledDateTabStatuses.has(s.toLowerCase()));
 
     const applySessionStatusFilter = (q) => {
       if (statusList.length === 0) return q;
@@ -373,8 +382,11 @@ const getAllSessions = async (req, res) => {
     let countQuery = supabaseAdmin
       .from('sessions')
       .select('*', { count: 'exact', head: true })
-      .neq('session_type', 'free_assessment') // Exclude free assessments
-      .neq('status', 'cancelled'); // Exclude soft-deleted (admin-cancelled) sessions
+      .neq('session_type', 'free_assessment'); // Exclude free assessments
+    // Only exclude cancelled when not explicitly viewing the cancelled tab
+    if (!isCancelledTab) {
+      countQuery = countQuery.neq('status', 'cancelled');
+    }
 
     // Apply same filters for count
     countQuery = applySessionStatusFilter(countQuery);
@@ -387,12 +399,18 @@ const getAllSessions = async (req, res) => {
     if (date) {
       countQuery = countQuery.eq('scheduled_date', date);
     }
-    // Date range filter: upcoming tab matches session date OR booking date; other tabs use booking date only.
+    // Date range filter:
+    //   • Upcoming → match session date OR booking date (catch this-month-booked AND this-month-scheduled)
+    //   • Completed / no_show / pending → use scheduled_date (what happened that month)
+    //   • Cancelled → use booking_created_at (cancellation is a booking-level event)
     if (isUpcomingTab && dateFrom && dateTo) {
       countQuery = countQuery.or(
         `and(scheduled_date.gte.${dateFrom},scheduled_date.lte.${dateTo}),` +
         `and(${adminBookingTimeCol}.gte.${dateFrom}T00:00:00+05:30,${adminBookingTimeCol}.lte.${dateTo}T23:59:59.999+05:30)`
       );
+    } else if (tabUsesScheduledDate) {
+      if (dateFrom) countQuery = countQuery.gte('scheduled_date', dateFrom);
+      if (dateTo) countQuery = countQuery.lte('scheduled_date', dateTo);
     } else {
       if (dateFrom) countQuery = countQuery.gte(adminBookingTimeCol, `${dateFrom}T00:00:00+05:30`);
       if (dateTo) countQuery = countQuery.lte(adminBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);
@@ -430,8 +448,10 @@ const getAllSessions = async (req, res) => {
           email
         )
       `)
-      .neq('session_type', 'free_assessment') // Exclude free assessments
-      .neq('status', 'cancelled'); // Exclude soft-deleted (admin-cancelled) sessions
+      .neq('session_type', 'free_assessment'); // Exclude free assessments
+    if (!isCancelledTab) {
+      query = query.neq('status', 'cancelled'); // Hide cancelled rows for non-cancelled tabs
+    }
 
     console.log('Supabase query built, executing...');
 
@@ -446,12 +466,15 @@ const getAllSessions = async (req, res) => {
     if (date) {
       query = query.eq('scheduled_date', date);
     }
-    // Upcoming tab: OR filter by session date or booking date; other tabs: booking date only.
+    // Date filter — same rules as the count query above
     if (isUpcomingTab && dateFrom && dateTo) {
       query = query.or(
         `and(scheduled_date.gte.${dateFrom},scheduled_date.lte.${dateTo}),` +
         `and(${adminBookingTimeCol}.gte.${dateFrom}T00:00:00+05:30,${adminBookingTimeCol}.lte.${dateTo}T23:59:59.999+05:30)`
       );
+    } else if (tabUsesScheduledDate) {
+      if (dateFrom) query = query.gte('scheduled_date', dateFrom);
+      if (dateTo) query = query.lte('scheduled_date', dateTo);
     } else {
       if (dateFrom) query = query.gte(adminBookingTimeCol, `${dateFrom}T00:00:00+05:30`);
       if (dateTo) query = query.lte(adminBookingTimeCol, `${dateTo}T23:59:59.999+05:30`);

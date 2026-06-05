@@ -4523,10 +4523,13 @@ const bookPackageNextSession = async (req, res) => {
 // and can_book_next true only when at least one session is completed and there are remaining to book.
 const getPackagesWithRemainingSessions = async (req, res) => {
   try {
+    // Pull sessions that are either:
+    //  • Linked to a real packages-table entry (package_id IS NOT NULL), or
+    //  • Wix-synced packages (session_type='package' with session_count > 1)
     const { data: sessions } = await supabaseAdmin
       .from('sessions')
-      .select('id, client_id, psychologist_id, package_id, status, scheduled_date, scheduled_time')
-      .not('package_id', 'is', null)
+      .select('id, client_id, psychologist_id, package_id, package_group_id, session_type, session_count, status, scheduled_date, scheduled_time, wix_payload, price')
+      .or('package_id.not.is.null,session_type.eq.package')
       .neq('session_type', 'free_assessment');
 
     if (!sessions || sessions.length === 0) {
@@ -4535,18 +4538,48 @@ const getPackagesWithRemainingSessions = async (req, res) => {
 
     const byKey = {};
     sessions.forEach(s => {
-      if (!s.client_id || !s.package_id) return;
-      const key = `${s.client_id}_${s.package_id}`;
-      if (!byKey[key]) byKey[key] = { client_id: s.client_id, package_id: s.package_id, psychologist_id: s.psychologist_id, sessions: [] };
-      byKey[key].sessions.push(s);
+      if (!s.client_id) return;
+      // Real package: keyed by client_id + package_id
+      if (s.package_id) {
+        const key = `pkg_${s.client_id}_${s.package_id}`;
+        if (!byKey[key]) byKey[key] = { kind: 'real', client_id: s.client_id, package_id: s.package_id, psychologist_id: s.psychologist_id, sessions: [] };
+        byKey[key].sessions.push(s);
+        return;
+      }
+      // Wix package (no real package_id): only count if session_count > 1
+      if (s.session_type === 'package' && Number(s.session_count) > 1) {
+        // Group by client + psychologist + session_count + subscriptionId/group_id
+        const groupId = s.package_group_id
+          || s.wix_payload?.subscriptionId
+          || s.wix_payload?.pricingPlanInfo?.planName
+          || `wix_${s.session_count}`;
+        const key = `wix_${s.client_id}_${s.psychologist_id}_${groupId}`;
+        if (!byKey[key]) byKey[key] = {
+          kind: 'wix',
+          client_id: s.client_id,
+          psychologist_id: s.psychologist_id,
+          package_id: null,
+          session_count: s.session_count,
+          plan_name: s.wix_payload?.pricingPlanInfo?.planName || s.wix_payload?.planName || null,
+          group_id: groupId,
+          sessions: [],
+        };
+        byKey[key].sessions.push(s);
+      }
     });
 
-    const packageIds = [...new Set(Object.values(byKey).map(p => p.package_id))];
-    const { data: packages } = await supabaseAdmin
-      .from('packages')
-      .select('id, name, package_type, session_count, psychologist_id, price')
-      .in('id', packageIds);
-    const packagesMap = (packages || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
+    // Only look up real packages (skip Wix synthetic entries which have package_id = null)
+    const packageIds = [...new Set(Object.values(byKey).filter(p => p.kind === 'real').map(p => p.package_id))];
+    let packagesMap = {};
+    if (packageIds.length > 0) {
+      const { data: packages } = await supabaseAdmin
+        .from('packages')
+        .select('id, name, package_type, session_count, psychologist_id, price')
+        .in('id', packageIds);
+      packagesMap = (packages || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
+    }
+    // Reference for later — also used in psychIds collection below
+    const packages = Object.values(packagesMap);
 
     const clientIds = [...new Set(Object.values(byKey).map(p => p.client_id))];
     const { data: clients } = await supabaseAdmin
@@ -4566,9 +4599,14 @@ const getPackagesWithRemainingSessions = async (req, res) => {
 
     const result = [];
     Object.values(byKey).forEach(entry => {
-      const pkg = packagesMap[entry.package_id];
-      if (!pkg) return;
-      const total = pkg.session_count || 0;
+      // Resolve package metadata — real package looks it up; Wix synthesizes one
+      const pkg = entry.kind === 'real' ? packagesMap[entry.package_id] : null;
+      const total = entry.kind === 'real'
+        ? (pkg?.session_count || 0)
+        : (Number(entry.session_count) || 0);
+      // For real packages: require pkg metadata to exist
+      if (entry.kind === 'real' && !pkg) return;
+
       let completed = 0;
       let booked = 0;
       const upcomingSessions = [];
@@ -4592,29 +4630,56 @@ const getPackagesWithRemainingSessions = async (req, res) => {
       const canBookNext = completed > 0 && remaining > 0;
 
       // Skip fully completed packages - they belong in the Completed tab only
-      if (completed >= total) return;
+      if (total > 0 && completed >= total) return;
 
       const client = clientsMap[entry.client_id];
-      const psychologist = psychologistsMap[entry.psychologist_id] || psychologistsMap[pkg.psychologist_id];
-      result.push({
-        client_id: entry.client_id,
-        psychologist_id: psychologist?.id || pkg.psychologist_id,
-        package_id: entry.package_id,
-        client: client || { id: entry.client_id, first_name: '', last_name: '' },
-        psychologist: psychologist || { id: pkg.psychologist_id, first_name: '', last_name: '' },
-        package: {
-          id: pkg.id,
-          name: pkg.name || null,
-          package_type: pkg.package_type,
-          price: pkg.price ?? null,
-          session_count: total,
-          total_sessions: total,
-          completed_sessions: completed,
-          remaining_sessions: remaining,
-          can_book_next: canBookNext
-        },
-        upcoming_sessions: upcomingSessions
-      });
+      const psychologist = psychologistsMap[entry.psychologist_id] || (pkg && psychologistsMap[pkg.psychologist_id]);
+      const psychId = psychologist?.id || entry.psychologist_id || (pkg && pkg.psychologist_id) || null;
+
+      if (entry.kind === 'real') {
+        result.push({
+          client_id: entry.client_id,
+          psychologist_id: psychId,
+          package_id: entry.package_id,
+          client: client || { id: entry.client_id, first_name: '', last_name: '' },
+          psychologist: psychologist || { id: psychId, first_name: '', last_name: '' },
+          package: {
+            id: pkg.id,
+            name: pkg.name || null,
+            package_type: pkg.package_type,
+            price: pkg.price ?? null,
+            session_count: total,
+            total_sessions: total,
+            completed_sessions: completed,
+            remaining_sessions: remaining,
+            can_book_next: canBookNext
+          },
+          upcoming_sessions: upcomingSessions
+        });
+      } else {
+        // Wix-style package — synthesize metadata
+        result.push({
+          client_id: entry.client_id,
+          psychologist_id: psychId,
+          package_id: null,
+          wix_package_group_id: entry.group_id,
+          client: client || { id: entry.client_id, first_name: '', last_name: '' },
+          psychologist: psychologist || { id: psychId, first_name: '', last_name: '' },
+          package: {
+            id: null,
+            name: entry.plan_name || `Wix Package (${total} sessions)`,
+            package_type: 'wix_plan',
+            price: null,
+            session_count: total,
+            total_sessions: total,
+            completed_sessions: completed,
+            remaining_sessions: remaining,
+            can_book_next: canBookNext,
+            source: 'wix'
+          },
+          upcoming_sessions: upcomingSessions
+        });
+      }
     });
 
     return res.json(successResponse({ packages: result }));
