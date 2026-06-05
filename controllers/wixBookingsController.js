@@ -792,9 +792,25 @@ async function performWixSync(options = {}) {
     console.warn('[performWixSync] package linking non-blocking error:', err.message || err);
   }
 
+  const wixBookingIds = dedupedBookings.map((b) => b.id != null ? String(b.id) : null).filter(Boolean);
+
+  // Enrich bookings with exact session type/count from Wix eCommerce Order API
+  if (wixBookingIds.length) {
+    enrichBookingsFromOrders(wixBookingIds).catch((err) => {
+      console.warn('[performWixSync] order enrichment non-blocking error:', err.message || err);
+    });
+  }
+
+  // Link zero-price promo sessions to their parent paid package session
+  if (wixBookingIds.length) {
+    const { linkPackageSessions } = require('../services/wixPackageLinkerService');
+    linkPackageSessions(wixBookingIds).catch((err) => {
+      console.warn('[performWixSync] package linker non-blocking error:', err.message || err);
+    });
+  }
+
   // Fire-and-forget: create Google Meet links + send notifications for new Wix sessions.
   // Runs after both resolvers so client_id and psychologist_id are guaranteed set.
-  const wixBookingIds = dedupedBookings.map((b) => b.id != null ? String(b.id) : null).filter(Boolean);
   if (wixBookingIds.length) {
     processNewWixSessions(wixBookingIds, tempPasswordMapSync).catch((err) => {
       console.warn('[performWixSync] meet+notify non-blocking error:', err.message || err);
@@ -927,9 +943,9 @@ async function listWixBookings(req, res) {
       q = q.eq('session_type', session_type);
     }
 
-    // Upcoming tab: OR filter by session start time or booking created date; other tabs: created date only.
-    const isUpcomingWixTab = String(status || '').toLowerCase() === 'booked';
-    if (isUpcomingWixTab && dateFrom && dateTo) {
+    // For date filtering: ALWAYS check both start_time (when the session happens) and created_at (when it was booked).
+    // Previously this was only for the 'Upcoming' tab, causing packages/completed sessions to disappear if created in a past month.
+    if (dateFrom && dateTo) {
       q = q.or(
         `and(start_time.gte.${dateFrom}T00:00:00.000+05:30,start_time.lte.${dateTo}T23:59:59.999+05:30),` +
         `and(created_at.gte.${dateFrom}T00:00:00.000+05:30,created_at.lte.${dateTo}T23:59:59.999+05:30)`

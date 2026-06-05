@@ -338,7 +338,7 @@ const getAllSessions = async (req, res) => {
     const { supabaseAdmin } = require('../config/supabase');
     const adminBookingTimeCol = await getBookingTimeColumnKey(supabaseAdmin);
 
-    const { page = 1, limit = 10, status, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc', search = '' } = req.query;
+    const { page = 1, limit = 10, status, session_type, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc', search = '' } = req.query;
 
     // ?status=booked&status=rescheduled OR ?status=booked,rescheduled OR ?status=booked
     const normalizeStatusList = (raw) => {
@@ -390,6 +390,9 @@ const getAllSessions = async (req, res) => {
 
     // Apply same filters for count
     countQuery = applySessionStatusFilter(countQuery);
+    if (session_type) {
+      countQuery = countQuery.eq('session_type', String(session_type));
+    }
     if (psychologist_id) {
       countQuery = countQuery.eq('psychologist_id', psychologist_id);
     }
@@ -457,6 +460,9 @@ const getAllSessions = async (req, res) => {
 
     // Apply filters
     query = applySessionStatusFilter(query);
+    if (session_type) {
+      query = query.eq('session_type', String(session_type));
+    }
     if (psychologist_id) {
       query = query.eq('psychologist_id', psychologist_id);
     }

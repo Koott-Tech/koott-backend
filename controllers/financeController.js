@@ -3986,11 +3986,16 @@ const getCommissions = async (req, res) => {
         let doctorCommission = 0;
         let hasExplicitDoctorCommission = false;
         
-        if (isPackage && s.package_id) {
+        if (isPackage) {
           // Package session - commission is calculated per session:
           // first package session uses initial commission, remaining sessions use follow-up.
-          const pkg = packagePricesMap[s.psychologist_id]?.find(p => p.id === s.package_id);
-          const packageType = pkg?.type || packageTypeMap[s.package_id] || 'package';
+          const pkg = s.package_id ? packagePricesMap[s.psychologist_id]?.find(p => p.id === s.package_id) : null;
+          let packageType = pkg?.type || (s.package_id ? packageTypeMap[s.package_id] : null);
+          if (!packageType && s.session_count) {
+             packageType = \`package_\${s.session_count}\`;
+          } else if (!packageType) {
+             packageType = 'package';
+          }
 
           // Get package-specific doctor commissions from JSONB field
           const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
