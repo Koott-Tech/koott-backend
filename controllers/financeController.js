@@ -1947,8 +1947,9 @@ const getDoctorPayouts = async (req, res) => {
       let shouldInclude = false;
       
       if (status === 'pending') {
-        // For pending: payment date in range AND not completed
-        if (!isCompleted && isInDateRange(s.created_at)) {
+        // For pending: payment date in range, not completed, not cancelled/refunded
+        const isCancelledOrRefunded = s.status === 'cancelled' || s.status === 'refunded';
+        if (!isCompleted && !isCancelledOrRefunded && isInDateRange(s.created_at)) {
           shouldInclude = true;
         }
       } else if (status === 'completed') {
@@ -4092,6 +4093,9 @@ const getCommissions = async (req, res) => {
         }
       }
 
+      // Cancelled/refunded sessions don't contribute to any payout bucket
+      const isCancelledOrRefunded = s.status === 'cancelled' || s.status === 'refunded';
+
       // Add to total stats (for all sessions - booked sessions show expected amounts, completed show actual)
       statsByPsych[s.psychologist_id].total_revenue += sessionPrice;
       statsByPsych[s.psychologist_id].total_commission_to_company += commissionToCompany;
@@ -4099,7 +4103,7 @@ const getCommissions = async (req, res) => {
       if (isCompleted) {
         statsByPsych[s.psychologist_id].completed_sessions += 1;
         statsByPsych[s.psychologist_id].completed_payout += toDoctorWallet;
-      } else {
+      } else if (!isCancelledOrRefunded) {
         statsByPsych[s.psychologist_id].pending_sessions += 1;
         statsByPsych[s.psychologist_id].pending_payout += toDoctorWallet;
       }
