@@ -3763,10 +3763,10 @@ const getCommissions = async (req, res) => {
     // Get all sessions (booked, completed, rescheduled, etc.) for counts, but commissions only for completed
     let allSessionsQuery = supabaseAdmin
       .from('sessions')
-      .select(`id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, ${commSessionsBcf} wix_payload, source, package_session_number`)
+      .select(`id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, completion_date, ${commSessionsBcf} wix_payload, source, package_session_number`)
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']); // Include all paid sessions
+      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
 
     if (dateFrom && dateTo) {
       if (doctorDateBasis === 'scheduled') {
@@ -3795,6 +3795,59 @@ const getCommissions = async (req, res) => {
     }
 
     const { data: allSessions } = await allSessionsQuery;
+
+    // Derive the view-month IST boundaries so we can correctly bucket completed_payout.
+    // completed_payout uses completion_date (when the doctor actually did the work),
+    // not booking_created_at (when money was received). This allows June-booked sessions
+    // that complete in July to show up in July's completed_payout (carry-over).
+    let viewMonthStart = null; // IST date string, e.g. "2026-06-01"
+    let viewMonthEnd = null;   // IST date string, e.g. "2026-06-30"
+    if (dateFrom && dateTo) {
+      viewMonthStart = dateFrom;
+      viewMonthEnd = dateTo;
+    } else if (month && year) {
+      viewMonthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+      viewMonthEnd   = `${year}-${String(month).padStart(2, '0')}-31`;
+    }
+
+    // Fetch sessions completed this view-month (by completion_date) that were booked in
+    // PREVIOUS months — these are the "carry-over" sessions that must appear in this
+    // month's completed_payout even though booking_created_at is outside the view range.
+    let carryOverCompleted = [];
+    if (viewMonthStart && viewMonthEnd && allPsychologistIds.length > 0) {
+      const bookedSessionIds = new Set((allSessions || []).map(s => s.id));
+      const { data: coRows } = await supabaseAdmin
+        .from('sessions')
+        .select(`id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, completion_date, ${commSessionsBcf} wix_payload, source, package_session_number`)
+        .eq('status', 'completed')
+        .not('psychologist_id', 'is', null)
+        .neq('session_type', 'free_assessment')
+        .in('psychologist_id', allPsychologistIds)
+        .gte('completion_date', `${viewMonthStart}${IST_DAY_START_SUFFIX}`)
+        .lte('completion_date', `${viewMonthEnd}${IST_DAY_END_SUFFIX}`);
+      // Only keep sessions NOT already in allSessions (i.e., booked in a previous month)
+      carryOverCompleted = (coRows || []).filter(s => !bookedSessionIds.has(s.id));
+    }
+
+    // Fetch pending sessions from PREVIOUS months that are scheduled within the view month
+    // (or are overdue — scheduled before the view month ends).
+    // This ensures e.g. June-booked July-scheduled sessions appear in July's pending from day 1.
+    // We exclude future-scheduled sessions (scheduled after view month end) — those belong
+    // in the month they're scheduled.
+    let allPendingSessions = [];
+    if (viewMonthEnd && allPsychologistIds.length > 0) {
+      const bookedSessionIds = new Set((allSessions || []).map(s => s.id));
+      const { data: pendingRows } = await supabaseAdmin
+        .from('sessions')
+        .select(`id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, completion_date, ${commSessionsBcf} wix_payload, source, package_session_number`)
+        .in('status', ['booked', 'rescheduled', 'reschedule_requested'])
+        .not('psychologist_id', 'is', null)
+        .neq('session_type', 'free_assessment')
+        .in('psychologist_id', allPsychologistIds)
+        .lte('scheduled_date', viewMonthEnd); // only sessions scheduled up to end of view month
+      // Only keep sessions NOT already in allSessions (those are handled in the main loop)
+      allPendingSessions = (pendingRows || []).filter(s => !bookedSessionIds.has(s.id));
+    }
 
     // Get commission rates for all psychologists
     let commissions = [];
@@ -4096,17 +4149,29 @@ const getCommissions = async (req, res) => {
       // Cancelled/refunded sessions don't contribute to any payout bucket
       const isCancelledOrRefunded = s.status === 'cancelled' || s.status === 'refunded';
 
-      // Add to total stats (for all sessions - booked sessions show expected amounts, completed show actual)
+      // completed_payout uses completion_date so sessions carry over to the correct month.
+      // A session booked in June but completed in July → June pending, July completed.
+      const completionDateStr = s.completion_date
+        ? String(s.completion_date).slice(0, 10)
+        : null;
+      const completedThisViewMonth = isCompleted && completionDateStr !== null &&
+        viewMonthStart && viewMonthEnd &&
+        completionDateStr >= viewMonthStart && completionDateStr <= viewMonthEnd;
+
+      // Add to total stats (revenue + company commission always follow booking_created_at)
       statsByPsych[s.psychologist_id].total_revenue += sessionPrice;
       statsByPsych[s.psychologist_id].total_commission_to_company += commissionToCompany;
       statsByPsych[s.psychologist_id].total_to_doctor_wallet += toDoctorWallet;
-      if (isCompleted) {
+      if (completedThisViewMonth) {
         statsByPsych[s.psychologist_id].completed_sessions += 1;
         statsByPsych[s.psychologist_id].completed_payout += toDoctorWallet;
-      } else if (!isCancelledOrRefunded) {
+      } else if (!isCompleted && !isCancelledOrRefunded) {
         statsByPsych[s.psychologist_id].pending_sessions += 1;
         statsByPsych[s.psychologist_id].pending_payout += toDoctorWallet;
       }
+      // If isCompleted but NOT this view month: session appears in revenue (booked this month)
+      // but NOT in pending or completed — it will appear in the completion month's completed_payout
+      // via the carryOverCompleted query.
 
       // Monthly breakdown buckets: align with doctorDateBasis (booked vs therapy month)
       const bucketYmd =
@@ -4140,6 +4205,32 @@ const getCommissions = async (req, res) => {
         statsByPsych[s.psychologist_id].monthly_breakdown[monthKey].to_doctor_wallet += toDoctorWallet;
       }
     });
+
+    // Move require to top-of-block to avoid repeated require calls in loops
+    const { computeSessionDoctorWallet } = require('../utils/sessionCommission');
+
+    // Accumulate carry-over completed sessions (booked in previous months, completed this month).
+    // These contribute ONLY to completed_payout — revenue and company commission stay in the
+    // booking month's numbers.
+    for (const s of carryOverCompleted) {
+      if (!s.psychologist_id || !statsByPsych[s.psychologist_id]) continue;
+      const dc = commissionRecordsMap[s.psychologist_id] || null;
+      const ch = commissionHistoryMap[s.id] || null;
+      const toDoctorWallet = computeSessionDoctorWallet(s, dc, ch);
+      statsByPsych[s.psychologist_id].completed_sessions += 1;
+      statsByPsych[s.psychologist_id].completed_payout += toDoctorWallet;
+    }
+
+    // Accumulate all pending sessions from previous months (carry-over pending).
+    // These show in pending_payout so the finance team sees the doctor's full outstanding
+    // liability from day 1 of the view month — not just sessions booked this month.
+    for (const s of allPendingSessions) {
+      if (!s.psychologist_id || !statsByPsych[s.psychologist_id]) continue;
+      const dc = commissionRecordsMap[s.psychologist_id] || null;
+      const toDoctorWallet = computeSessionDoctorWallet(s, dc, null);
+      statsByPsych[s.psychologist_id].pending_sessions += 1;
+      statsByPsych[s.psychologist_id].pending_payout += toDoctorWallet;
+    }
 
     // Build final response with all doctors
     const commissionsWithTotals = psychologists?.map(psych => {
