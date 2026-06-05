@@ -31,11 +31,13 @@ function computeSessionDoctorWallet(session, dc, ch) {
   const totalSessions = Math.max(1, parseInt(s.session_count, 10) || 1);
 
   // ── 1. commission_history (already settled — most authoritative) ─────────
+  // commission_history stores per-session amounts (not totals), so no further
+  // splitting by totalSessions is needed here.
   if (ch) {
     const sessionAmt = parseFloat(ch.session_amount || s.price || 0);
     const companyAmt = parseFloat(ch.commission_amount || 0);
     const totalDoc = Math.max(0, sessionAmt - companyAmt);
-    return isPackage ? Math.round(totalDoc / totalSessions) : Math.round(totalDoc);
+    return Math.round(totalDoc);
   }
 
   // ── 2. therapist_commission (manually set by admin) ──────────────────────

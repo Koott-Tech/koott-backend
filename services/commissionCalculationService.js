@@ -126,8 +126,12 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
       }
     }
 
-    // Determine initial vs follow-up for commission selection
+    // Determine initial vs follow-up for commission selection.
+    // For packages: check if the client had ANY prior paid session before this package was
+    // booked. All sessions within the same package share the same first/followup designation.
+    // For individuals: check if any prior paid session exists for this client.
     if (sessionType === 'package' && session.package_id && clientId) {
+      // Find the earliest created_at across all sessions in this package
       const { data: packageSessions } = await supabaseAdmin
         .from('sessions')
         .select('id, created_at, scheduled_date')
@@ -140,8 +144,24 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
         return aDate - bDate;
       });
 
-      const firstPackageSessionId = ordered[0]?.id || null;
-      isInitialCommissionSession = firstPackageSessionId === sessionId;
+      const firstPackageCreatedAt = ordered[0]?.created_at || ordered[0]?.scheduled_date;
+
+      // Look for any paid, non-assessment session from this client that pre-dates this package
+      let priorQuery = supabaseAdmin
+        .from('sessions')
+        .select('id')
+        .eq('client_id', clientId)
+        .neq('session_type', 'free_assessment')
+        .gt('price', 0)
+        // Exclude sessions belonging to this same package
+        .or(`package_id.is.null,package_id.neq.${session.package_id}`);
+
+      if (firstPackageCreatedAt) {
+        priorQuery = priorQuery.lt('created_at', firstPackageCreatedAt);
+      }
+
+      const { data: priorSessions } = await priorQuery.limit(1);
+      isInitialCommissionSession = !priorSessions || priorSessions.length === 0;
     } else if (clientId) {
       const { data: priorSessions } = await supabaseAdmin
         .from('sessions')
@@ -190,41 +210,76 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
       }
     } else if (sessionType === 'package') {
       const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-      let doctorCommissionAmount = null;
+      let totalDoctorPackageCommission = null;
       
       if (isInitialCommissionSession) {
         const packageFirstSessionKey = `${packageType}_first_session`;
         if (doctorCommissionPackages[packageFirstSessionKey] !== null && doctorCommissionPackages[packageFirstSessionKey] !== undefined) {
-          doctorCommissionAmount = parseFloat(doctorCommissionPackages[packageFirstSessionKey]) || 0;
+          totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[packageFirstSessionKey]) || 0;
         } else if (commissionRecord?.doctor_commission_first_session_package !== null && commissionRecord?.doctor_commission_first_session_package !== undefined) {
-          doctorCommissionAmount = parseFloat(commissionRecord.doctor_commission_first_session_package) || 0;
+          totalDoctorPackageCommission = parseFloat(commissionRecord.doctor_commission_first_session_package) || 0;
         }
       } else {
         const packageFollowupKey = `${packageType}_followup`;
         if (doctorCommissionPackages[packageFollowupKey] !== null && doctorCommissionPackages[packageFollowupKey] !== undefined) {
-          doctorCommissionAmount = parseFloat(doctorCommissionPackages[packageFollowupKey]) || 0;
+          totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[packageFollowupKey]) || 0;
         } else if (commissionRecord?.doctor_commission_followup_package !== null && commissionRecord?.doctor_commission_followup_package !== undefined) {
-          doctorCommissionAmount = parseFloat(commissionRecord.doctor_commission_followup_package) || 0;
+          totalDoctorPackageCommission = parseFloat(commissionRecord.doctor_commission_followup_package) || 0;
         }
       }
       
-      if (doctorCommissionAmount === null) {
+      if (totalDoctorPackageCommission === null) {
         throw new Error(`Doctor commission not configured for ${isInitialCommissionSession ? 'initial' : 'follow-up'} package type: ${packageType}.`);
       }
       
-      // Package commissions are credited per completed session.
-      finalCommissionAmount = Math.max(0, sessionAmount - doctorCommissionAmount);
+      // Derive session count from packageType (e.g. "package_3") or fallback to 1
+      const countMatch = String(packageType).match(/\d+/);
+      const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 1;
+      
+      // Split the doctor's commission evenly across all sessions in the package
+      const splitDoctorCommission = totalDoctorPackageCommission / (sessionCount > 0 ? sessionCount : 1);
+      
+      // Company commission is whatever remains of the sessionAmount
+      finalCommissionAmount = sessionAmount - splitDoctorCommission;
     } else {
       // safe fallback
       finalCommissionAmount = Math.max(0, commissionAmount);
     }
 
     // Commission calculation (Fixed Amount System):
-    // finalCommissionAmount = commission amount based on first/follow-up = what COMPANY gets as commission
-    // doctorWalletAmount = sessionAmount - finalCommissionAmount = what DOCTOR gets
-    const doctorWalletAmount = Math.max(0, sessionAmount - finalCommissionAmount);
-    const companyCommission = finalCommissionAmount; // Company gets this commission amount
-
+    // finalCommissionAmount = what COMPANY gets as commission
+    // doctorWalletAmount = what DOCTOR gets
+    let doctorWalletAmount;
+    let companyCommission = finalCommissionAmount;
+    
+    if (sessionType === 'package') {
+      // For packages, the doctor gets the exact split amount regardless of sessionAmount (even if it's 0)
+      const countMatch = String(packageType).match(/\d+/);
+      const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 1;
+      let totalDoctorPackageCommission = 0;
+      
+      const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
+      
+      if (isInitialCommissionSession) {
+        const packageFirstSessionKey = `${packageType}_first_session`;
+        if (doctorCommissionPackages[packageFirstSessionKey] !== null && doctorCommissionPackages[packageFirstSessionKey] !== undefined) {
+          totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[packageFirstSessionKey]) || 0;
+        } else if (commissionRecord?.doctor_commission_first_session_package !== null && commissionRecord?.doctor_commission_first_session_package !== undefined) {
+          totalDoctorPackageCommission = parseFloat(commissionRecord.doctor_commission_first_session_package) || 0;
+        }
+      } else {
+        const packageFollowupKey = `${packageType}_followup`;
+        if (doctorCommissionPackages[packageFollowupKey] !== null && doctorCommissionPackages[packageFollowupKey] !== undefined) {
+          totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[packageFollowupKey]) || 0;
+        } else if (commissionRecord?.doctor_commission_followup_package !== null && commissionRecord?.doctor_commission_followup_package !== undefined) {
+          totalDoctorPackageCommission = parseFloat(commissionRecord.doctor_commission_followup_package) || 0;
+        }
+      }
+      
+      doctorWalletAmount = totalDoctorPackageCommission / (sessionCount > 0 ? sessionCount : 1);
+    } else {
+      doctorWalletAmount = Math.max(0, sessionAmount - finalCommissionAmount);
+    }
     // Net company revenue equals company commission (no GST deduction)
     const netCompanyRevenue = companyCommission;
 
@@ -237,15 +292,8 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
       .insert([{
         psychologist_id: psychologistId,
         session_id: sessionId,
-        session_type: sessionType,
-        package_id: session.package_id || null,
-        session_date: session.scheduled_date,
         session_amount: sessionAmount,
-        commission_percentage: 0, // Not used in fixed amount system
-        commission_amount: finalCommissionAmount, // Final commission (1x for first, 2x for follow-up) = what COMPANY gets
-        commission_amount_fixed: commissionAmount, // Store base fixed amount (before first/follow-up multiplier)
-        company_revenue: companyCommission, // Company gets this commission amount
-        net_company_revenue: netCompanyRevenue,
+        commission_amount: finalCommissionAmount, // what COMPANY gets; doctor gets session_amount - commission_amount
         payment_status: 'pending',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()

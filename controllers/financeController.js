@@ -1032,7 +1032,16 @@ const getDashboard = async (req, res) => {
             }
           });
         }
-        
+
+        // Build a set of package_ids whose package is the client's first engagement.
+        // All sessions in such a package use the first-session commission rate.
+        const firstPackages = new Set();
+        (allSessions || []).forEach(s => {
+          if (s.package_id && clientFirstSessions.has(s.id)) {
+            firstPackages.add(s.package_id);
+          }
+        });
+
         // Calculate totals - separate completed vs pending
         // Apply different date filters for pending vs completed payouts
         let sessionsToProcess = allSessions || [];
@@ -1907,7 +1916,14 @@ const getDoctorPayouts = async (req, res) => {
         }
       });
     }
-    
+
+    const firstPackages = new Set();
+    (allSessions || []).forEach(s => {
+      if (s.package_id && clientFirstSessions.has(s.id)) {
+        firstPackages.add(s.package_id);
+      }
+    });
+
     // Helper function to check if a date falls within the date range
     const isInDateRange = (dateStr) => {
       if (!dateFrom || !dateTo || !dateStr) return true;
@@ -3894,6 +3910,13 @@ const getCommissions = async (req, res) => {
       });
     }
 
+    const firstPackages = new Set();
+    (allSessions || []).forEach(s => {
+      if (s.package_id && clientFirstSessions.has(s.id)) {
+        firstPackages.add(s.package_id);
+      }
+    });
+
     // Calculate average prices from actual sessions
     const averagePricesByPsych = {};
     allSessions?.forEach(s => {
@@ -3987,48 +4010,55 @@ const getCommissions = async (req, res) => {
         let hasExplicitDoctorCommission = false;
         
         if (isPackage) {
-          // Package session - commission is calculated per session:
-          // first package session uses initial commission, remaining sessions use follow-up.
+          // Package session - commission is split evenly across all sessions in the package.
           const pkg = s.package_id ? packagePricesMap[s.psychologist_id]?.find(p => p.id === s.package_id) : null;
           let packageType = pkg?.type || (s.package_id ? packageTypeMap[s.package_id] : null);
           if (!packageType && s.session_count) {
-             packageType = \`package_\${s.session_count}\`;
+             packageType = `package_${s.session_count}`;
           } else if (!packageType) {
              packageType = 'package';
           }
 
           // Get package-specific doctor commissions from JSONB field
           const doctorCommissionPackages = commissionRecord?.doctor_commission_packages || {};
-          
-          if (isInitialPackageSession) {
+          let totalDoctorPackageCommission = 0;
+
+          // Use firstPackages (not isFirstSession) so all sessions in the same package
+          // share the same first/followup designation.
+          const isPackageFirstForClient = s.package_id ? firstPackages.has(s.package_id) : isFirstSession;
+
+          if (isPackageFirstForClient) {
             const packageFirstSessionKey = `${packageType}_first_session`;
             if (hasConfiguredMoneyValue(doctorCommissionPackages, packageFirstSessionKey)) {
-              doctorCommission = toMoneyNumber(doctorCommissionPackages[packageFirstSessionKey]);
+              totalDoctorPackageCommission = toMoneyNumber(doctorCommissionPackages[packageFirstSessionKey]);
               hasExplicitDoctorCommission = true;
             } else if (hasConfiguredMoneyValue(commissionRecord, 'doctor_commission_first_session_package')) {
-              doctorCommission = toMoneyNumber(commissionRecord.doctor_commission_first_session_package);
+              totalDoctorPackageCommission = toMoneyNumber(commissionRecord.doctor_commission_first_session_package);
               hasExplicitDoctorCommission = true;
             }
           } else {
             const packageFollowupKey = `${packageType}_followup`;
             if (hasConfiguredMoneyValue(doctorCommissionPackages, packageFollowupKey)) {
-              doctorCommission = toMoneyNumber(doctorCommissionPackages[packageFollowupKey]);
+              totalDoctorPackageCommission = toMoneyNumber(doctorCommissionPackages[packageFollowupKey]);
               hasExplicitDoctorCommission = true;
             } else if (hasConfiguredMoneyValue(commissionRecord, 'doctor_commission_followup_package')) {
-              doctorCommission = toMoneyNumber(commissionRecord.doctor_commission_followup_package);
+              totalDoctorPackageCommission = toMoneyNumber(commissionRecord.doctor_commission_followup_package);
               hasExplicitDoctorCommission = true;
             }
           }
           
-          // Only use fallback when no doctor-side commission is configured at all.
-          if (!hasExplicitDoctorCommission) {
-            const commissionAmount = toMoneyNumber(commissionAmounts?.[packageType] || commissionAmounts?.package || 0);
-            doctorCommission = Math.max(0, sessionPrice - commissionAmount);
-          }
+          // Derive session count from packageType (e.g. "package_3") or fallback to 1
+          const countMatch = String(packageType).match(/\d+/);
+          const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 1;
           
-          // Per-session package math
-          commissionToCompany = Math.max(0, sessionPrice - doctorCommission);
-          toDoctorWallet = Math.min(sessionPrice, Math.max(0, doctorCommission));
+          // Split the doctor's commission evenly across all sessions in the package
+          const splitDoctorCommission = totalDoctorPackageCommission / (sessionCount > 0 ? sessionCount : 1);
+          
+          doctorCommission = splitDoctorCommission;
+          
+          // Per-session package math (Doctor gets exactly split amount, Company gets the rest)
+          commissionToCompany = sessionPrice - doctorCommission;
+          toDoctorWallet = doctorCommission;
         } else {
           // Individual/couple session
           const isCoupleSession = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
