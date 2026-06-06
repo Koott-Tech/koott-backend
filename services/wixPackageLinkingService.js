@@ -49,7 +49,7 @@ async function linkPackageSessions() {
     // ₹0 child rows often have null contact_id, so contact_id can't be the primary key.
     let q = supabaseAdmin
       .from('wix_bookings')
-      .select('wix_booking_id, start_time, package_parent_booking_id, session_index, price')
+      .select('wix_booking_id, start_time, package_parent_booking_id, session_index, price, payload')
       .neq('wix_booking_id', pkg.wix_booking_id)
       .in('price', ['0', '0.00', '0.0', 0])
       .gte('start_time', pkg.start_time || '1970-01-01')
@@ -58,7 +58,19 @@ async function linkPackageSessions() {
 
     if (pkg.service_id) q = q.eq('service_id', pkg.service_id);
 
-    const { data: candidates, error: childErr } = await q.limit(cap);
+    const { data: rawCandidates, error: childErr } = await q.limit(cap + 20); // fetch extra to account for filtered-out coupon rows
+
+    // Exclude bookings that are ₹0 due to a coupon (not plan-credit children).
+    // Real package children have isPlanCreditBooking=true; coupon-free individual
+    // sessions have isPlanCreditBooking=false and a couponDetails entry.
+    const candidates = (rawCandidates || []).filter(c => {
+      const p = c.payload || {};
+      // If explicitly marked as NOT a plan credit booking, skip it
+      if (p.isPlanCreditBooking === false) return false;
+      // If a coupon was applied and it's not a plan credit, skip it
+      if (p.paymentDetails?.couponDetails?.couponId && !p.isPlanCreditBooking) return false;
+      return true;
+    }).slice(0, cap);
     if (childErr) {
       console.warn(`[wixPackageLinking] child query failed for ${pkg.wix_booking_id}:`, childErr.message);
       continue;
