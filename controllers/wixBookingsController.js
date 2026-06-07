@@ -256,7 +256,7 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
       if (wixBookingIds.length > 0) {
         const { data: existing } = await supabaseAdmin
           .from('sessions')
-          .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at, status, session_type, session_count')
+          .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at, status, session_type, session_count, price')
           .in('wix_booking_id', wixBookingIds);
         if (existing?.length) {
           const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
@@ -275,6 +275,15 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
               // If admin soft-deleted this session (cancelled + notified_at set), lock status too
               // so Wix sync can't resurrect it back to 'booked'
               if (prev.notified_at && prev.status === 'cancelled') row.status = 'cancelled';
+              // Price guard: keep whichever price is higher — Wix payloads sometimes omit the
+              // actual charge (e.g. Razorpay paid outside Wix), causing sync to overwrite a
+              // correct higher price with the catalog rate.
+              const prevPrice = parseFloat(prev.price ?? 0);
+              const newPrice  = parseFloat(row.price ?? 0);
+              if (prevPrice > newPrice && prevPrice > 0) {
+                row.price  = prev.price;
+                row.amount = prev.price;
+              }
             }
           });
         }
@@ -709,7 +718,7 @@ async function performWixSync(options = {}) {
     if (wixBookingIds.length > 0) {
       const { data: existing } = await supabaseAdmin
         .from('sessions')
-        .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at, session_type, session_count')
+        .select('wix_booking_id, client_id, psychologist_id, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_event_id, notified_at, session_type, session_count, price')
         .in('wix_booking_id', wixBookingIds);
       if (existing?.length) {
         const existingMap = new Map(existing.map(e => [e.wix_booking_id, e]));
@@ -725,6 +734,13 @@ async function performWixSync(options = {}) {
             if (prev.google_calendar_event_id) row.google_calendar_event_id = prev.google_calendar_event_id;
             // Preserve notified_at — never let a sync upsert clear this after it's been stamped
             if (prev.notified_at) row.notified_at = prev.notified_at;
+            // Price guard: keep whichever price is higher
+            const prevPrice = parseFloat(prev.price ?? 0);
+            const newPrice  = parseFloat(row.price ?? 0);
+            if (prevPrice > newPrice && prevPrice > 0) {
+              row.price  = prev.price;
+              row.amount = prev.price;
+            }
           }
         });
       }

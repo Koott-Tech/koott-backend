@@ -3480,6 +3480,15 @@ const updateSession = async (req, res) => {
 
         // Fallback: no old event ID OR update failed → create a fresh event (new Meet link)
         if (!meetResult || !meetResult.success) {
+          // Delete the old event first so it doesn't linger on therapist/client calendars
+          if (primaryEventId) {
+            try {
+              await meetLinkService.deleteCalendarEvent(primaryEventId, userAuth);
+              console.log('✅ [Admin] Deleted old calendar event before creating replacement:', primaryEventId);
+            } catch (delErr) {
+              console.warn('⚠️ [Admin] Could not delete old event before creating new one (non-fatal):', delErr.message);
+            }
+          }
           meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
           if (meetResult.success && meetResult.meetLink) {
             console.log('✅ [Admin] Created new Meet link for rescheduled session (no old event to update):', sessionId);
