@@ -288,10 +288,28 @@ async function processOneSession(session, tempPassword = null) {
         time: session.scheduled_time,
         meetLink: meetLink,
       }).then(() => {
-        console.log(`${LOG_PREFIX} ✅ WhatsApp confirmation sent to ${clientPhone}`);
+        console.log(`${LOG_PREFIX} ✅ WhatsApp booking_confirmation_v1 sent to client ${clientPhone.slice(0, 6)}****`);
       }).catch(err => {
-        console.warn(`${LOG_PREFIX} ⚠️ WhatsApp failed for session ${session.id} (non-blocking):`, err.message || err);
+        console.warn(`${LOG_PREFIX} ⚠️ Client WhatsApp failed for session ${session.id} (non-blocking):`, err.message || err);
       });
+    }
+
+    // Send WhatsApp notification to therapist — best-effort
+    const therapistPhone = psychologistDetails.phone || null;
+    if (therapistPhone) {
+      interaktService.sendSessionNotificationPsychologist(therapistPhone, {
+        therapistName: psychologistName,
+        clientName: clientName,
+        date: session.scheduled_date,
+        time: session.scheduled_time,
+        meetLink: meetLink,
+      }).then(() => {
+        console.log(`${LOG_PREFIX} ✅ WhatsApp therapistconfirmation sent to therapist ${therapistPhone.slice(0, 6)}****`);
+      }).catch(err => {
+        console.warn(`${LOG_PREFIX} ⚠️ Therapist WhatsApp failed for session ${session.id} (non-blocking):`, err.message || err);
+      });
+    } else {
+      console.log(`${LOG_PREFIX} ℹ️ No therapist phone for session ${session.id} — skipping therapist WhatsApp`);
     }
 
   } catch (notifyErr) {
