@@ -2447,6 +2447,184 @@ const getRescheduleRequests = async (req, res) => {
   }
 };
 
+/**
+ * POST /admin/sessions/:sessionId/transfer
+ * Transfer a session to a different therapist.
+ * Optionally change date/time at the same time.
+ * Side-effects:
+ *  - Removes old Google Calendar event from the old therapist's calendar
+ *  - Creates a new GMeet / calendar event under the new therapist's credentials
+ *  - Updates the session row with new psychologist_id, new meet fields, new date/time
+ */
+async function transferSession(req, res) {
+  try {
+    const { sessionId } = req.params;
+    const { new_psychologist_id, new_date, new_time } = req.body;
+
+    if (!new_psychologist_id) {
+      return res.status(400).json(errorResponse('new_psychologist_id is required'));
+    }
+
+    // ── 1. Fetch session + old psychologist creds ────────────────────────────
+    const { data: session, error: fetchErr } = await supabaseAdmin
+      .from('sessions')
+      .select(`
+        id, status, psychologist_id, client_id, session_type, package_id,
+        scheduled_date, scheduled_time,
+        google_calendar_event_id, google_meet_link, google_meet_join_url,
+        google_meet_start_url, google_calendar_link,
+        client:clients(id, first_name, last_name, child_name, phone_number, user:users(email)),
+        psychologist:psychologists(id, first_name, last_name, email, google_calendar_credentials)
+      `)
+      .eq('id', sessionId)
+      .single();
+
+    if (fetchErr || !session) {
+      return res.status(404).json(errorResponse('Session not found'));
+    }
+
+    // ── 2. Fetch new psychologist ────────────────────────────────────────────
+    const { data: newPsych, error: psychErr } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, first_name, last_name, email, google_calendar_credentials')
+      .eq('id', new_psychologist_id)
+      .single();
+
+    if (psychErr || !newPsych) {
+      return res.status(404).json(errorResponse('New psychologist not found'));
+    }
+
+    // ── 3. Determine final date / time ───────────────────────────────────────
+    const finalDate = new_date || session.scheduled_date;
+    const finalTime = new_time || session.scheduled_time;
+
+    // ── 4. Delete old calendar event from old therapist ──────────────────────
+    const oldPsych = Array.isArray(session.psychologist) ? session.psychologist[0] : session.psychologist;
+    let calendarEventRemoved = false;
+    if (session.google_calendar_event_id) {
+      try {
+        let oldUserAuth = null;
+        const oldCreds = oldPsych?.google_calendar_credentials;
+        if (oldCreds?.access_token) {
+          oldUserAuth = {
+            access_token: oldCreds.access_token,
+            refresh_token: oldCreds.refresh_token,
+            expiry_date: oldCreds.expiry_date,
+          };
+        }
+        const eventIds = String(session.google_calendar_event_id).split(',').map(id => id.trim()).filter(Boolean);
+        for (const eid of eventIds) {
+          const delResult = await meetLinkService.deleteCalendarEvent(eid, oldUserAuth);
+          if (delResult?.success) {
+            calendarEventRemoved = true;
+            console.log('✅ [transferSession] Deleted old calendar event:', eid);
+          } else {
+            console.warn('[transferSession] calendar delete non-fatal:', delResult?.error);
+          }
+        }
+      } catch (calErr) {
+        console.warn('[transferSession] old calendar delete failed (non-fatal):', calErr.message || calErr);
+      }
+    }
+
+    // ── 5. Create new GMeet / calendar event under new therapist ─────────────
+    let newMeetData = { meetLink: null, eventId: null, calendarLink: null };
+    try {
+      const client = Array.isArray(session.client) ? session.client[0] : session.client;
+      const clientName = getClientDisplayName(client, 'Client');
+      const newPsychName = getPsychologistDisplayName(newPsych);
+      const clientEmail = Array.isArray(client?.user) ? client.user[0]?.email : client?.user?.email;
+
+      // Resolve duration
+      let durationMinutes = 50;
+      if (session.package_id) {
+        const { data: pkg } = await supabaseAdmin
+          .from('packages')
+          .select('package_type')
+          .eq('id', session.package_id)
+          .maybeSingle();
+        durationMinutes = getMeetEventDurationMinutes(pkg?.package_type);
+      }
+
+      const meetSessionData = {
+        summary: buildKoottSessionTitle({ clientName, psychologistName: newPsychName }),
+        description: buildKoottSessionDescription({ clientName, psychologistName: newPsychName, clientPhone: client?.phone_number }),
+        startDate: finalDate,
+        startTime: finalTime,
+        endTime: addMinutesToTime(finalTime, durationMinutes),
+        clientEmail: clientEmail || null,
+        psychologistEmail: newPsych.email || null,
+      };
+
+      // Build OAuth creds for new therapist
+      let newUserAuth = null;
+      const newCreds = newPsych.google_calendar_credentials;
+      if (newCreds?.access_token) {
+        newUserAuth = {
+          access_token: newCreds.access_token,
+          refresh_token: newCreds.refresh_token,
+          expiry_date: newCreds.expiry_date,
+        };
+      }
+
+      const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, newUserAuth);
+      if (meetResult?.eventId) {
+        newMeetData.eventId = meetResult.eventId;
+        newMeetData.calendarLink = meetResult.eventLink || meetResult.calendarLink || null;
+      }
+      if (meetResult?.meetLink && !meetResult.meetLink.includes('meet.google.com/new')) {
+        newMeetData.meetLink = meetResult.meetLink;
+        console.log('✅ [transferSession] New Meet link created:', meetResult.method);
+      } else {
+        console.warn('[transferSession] Meet link fallback or OAuth required');
+      }
+    } catch (meetErr) {
+      console.error('❌ [transferSession] Meet link creation failed (non-fatal):', meetErr.message || meetErr);
+    }
+
+    // ── 6. Update session row ─────────────────────────────────────────────────
+    const updates = {
+      psychologist_id: new_psychologist_id,
+      scheduled_date: formatDate(finalDate),
+      scheduled_time: formatTime(finalTime),
+      google_calendar_event_id: newMeetData.eventId || null,
+      google_meet_link: newMeetData.meetLink || null,
+      google_meet_join_url: newMeetData.meetLink || null,
+      google_meet_start_url: newMeetData.meetLink || null,
+      google_calendar_link: newMeetData.calendarLink || null,
+      updated_at: new Date().toISOString(),
+    };
+    // Only update date/time fields when explicitly requested
+    if (!new_date && !new_time) {
+      updates.scheduled_date = formatDate(session.scheduled_date);
+      updates.scheduled_time = formatTime(session.scheduled_time);
+    }
+
+    const { data: updatedSession, error: updateErr } = await supabaseAdmin
+      .from('sessions')
+      .update(updates)
+      .eq('id', sessionId)
+      .select('*')
+      .single();
+
+    if (updateErr) {
+      console.error('❌ [transferSession] Update failed:', updateErr.message);
+      return res.status(500).json(errorResponse(updateErr.message));
+    }
+
+    console.log('✅ [transferSession] Session transferred to psychologist:', new_psychologist_id);
+
+    return res.json(successResponse({
+      session: updatedSession,
+      calendarEventRemoved,
+      newMeetLink: newMeetData.meetLink,
+    }, 'Session transferred successfully'));
+  } catch (err) {
+    console.error('❌ [transferSession] Unexpected error:', err.message || err);
+    return res.status(500).json(errorResponse('Internal server error'));
+  }
+}
+
 module.exports = {
   bookSession,
   getClientSessions,
@@ -2461,6 +2639,7 @@ module.exports = {
   getRescheduleRequests,
   cancelRefundSession,
   verifyPayment,
+  transferSession,
 };
 
 /**

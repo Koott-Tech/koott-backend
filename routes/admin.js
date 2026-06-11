@@ -69,6 +69,7 @@ router.patch('/wix/bookings/:id/complete', wixBookingsController.completeWixBook
 router.patch('/wix/bookings/:id/no-show', wixBookingsController.noShowWixBooking);
 router.patch('/wix/bookings/:id/cancel-refund', wixBookingsController.cancelRefundWixBooking);
 router.post('/wix/bookings/:id/book-next-session', wixBookingsController.bookWixNextSession);
+router.post('/wix/bookings/:id/transfer', wixBookingsController.transferWixBooking);
 router.get('/wix/therapists', wixBookingsController.listWixTherapists);
 router.post('/wix/backfill-clients', wixBookingsController.backfillWixClients);
 
@@ -101,6 +102,7 @@ router.put('/sessions/:sessionId/no-show', sessionController.markSessionAsNoShow
 router.post('/sessions/:sessionId/complete', sessionController.completeSession);
 router.patch('/sessions/:sessionId/cancel-refund', sessionController.cancelRefundSession);
 router.patch('/sessions/:sessionId/verify-payment', sessionController.verifyPayment);
+router.post('/sessions/:sessionId/transfer', sessionController.transferSession);
 router.delete('/sessions/:sessionId', sessionController.deleteSession);
 router.get('/psychologists/:psychologistId/availability', adminController.getPsychologistAvailabilityForReschedule);
 

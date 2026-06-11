@@ -2179,6 +2179,172 @@ async function bookWixNextSession(req, res) {
   }
 }
 
+/**
+ * POST /admin/wix/bookings/:id/transfer
+ * Transfer a Wix booking to a different therapist.
+ * Optionally change date/time too.
+ * - Removes old calendar event from old therapist
+ * - Creates new GMeet under new therapist's credentials
+ * - Updates wix_bookings row (therapist_name, psychologist_id, meet fields, optionally start_time)
+ * - If a linked platform session exists (via wix_booking_id), updates that too
+ */
+async function transferWixBooking(req, res) {
+  try {
+    const { id } = req.params;
+    const { new_psychologist_id, new_date, new_time } = req.body;
+
+    if (!new_psychologist_id) {
+      return res.status(400).json({ success: false, error: 'new_psychologist_id is required' });
+    }
+
+    // 1. Fetch the wix booking
+    const { data: booking, error: fetchErr } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('id, wix_booking_id, psychologist_id, therapist_name, client_id, client_full_name, client_first_name, client_email, session_type, package_id, start_time, google_calendar_event_id, google_meet_link')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !booking) {
+      return res.status(404).json({ success: false, error: 'Wix booking not found' });
+    }
+
+    // 2. Fetch new psychologist
+    const { data: newPsych, error: psychErr } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, first_name, last_name, email, google_calendar_credentials')
+      .eq('id', new_psychologist_id)
+      .single();
+
+    if (psychErr || !newPsych) {
+      return res.status(404).json({ success: false, error: 'New psychologist not found' });
+    }
+
+    // 3. Delete old calendar event from old therapist (non-fatal)
+    let calendarEventRemoved = false;
+    if (booking.google_calendar_event_id) {
+      try {
+        let oldUserAuth = null;
+        if (booking.psychologist_id) {
+          const { data: oldPsych } = await supabaseAdmin
+            .from('psychologists')
+            .select('google_calendar_credentials')
+            .eq('id', booking.psychologist_id)
+            .single();
+          const creds = oldPsych?.google_calendar_credentials;
+          if (creds?.access_token) {
+            oldUserAuth = { access_token: creds.access_token, refresh_token: creds.refresh_token, expiry_date: creds.expiry_date };
+          }
+        }
+        const eventIds = String(booking.google_calendar_event_id).split(',').map(e => e.trim()).filter(Boolean);
+        for (const eid of eventIds) {
+          const del = await meetLinkService.deleteCalendarEvent(eid, oldUserAuth);
+          if (del?.success) { calendarEventRemoved = true; console.log('✅ [transferWixBooking] deleted old cal event:', eid); }
+          else console.warn('[transferWixBooking] calendar delete non-fatal:', del?.error);
+        }
+      } catch (calErr) {
+        console.warn('[transferWixBooking] old calendar delete failed (non-fatal):', calErr.message || calErr);
+      }
+    }
+
+    // 4. Build new start_time ISO if date/time provided
+    let newStartTimeIso = booking.start_time;
+    if (new_date && new_time) {
+      const timeClean = String(new_time).split('.')[0].trim();
+      newStartTimeIso = `${new_date}T${timeClean.length === 5 ? timeClean + ':00' : timeClean}+05:30`;
+    }
+
+    // 5. Create new GMeet under new therapist (non-fatal)
+    let newMeetData = { meetLink: null, eventId: null, calendarLink: null };
+    try {
+      const clientName = booking.client_full_name || booking.client_first_name || 'Client';
+      const newPsychName = `${newPsych.first_name || ''} ${newPsych.last_name || ''}`.trim();
+
+      let startDate, startTime;
+      if (new_date && new_time) {
+        startDate = new_date;
+        startTime = String(new_time).split('.')[0].trim();
+      } else if (booking.start_time) {
+        const d = new Date(booking.start_time);
+        const ist = new Date(d.getTime() + 5.5 * 3600 * 1000);
+        startDate = ist.toISOString().slice(0, 10);
+        startTime = ist.toISOString().slice(11, 19);
+      }
+
+      const durationMinutes = 50;
+      const addMins = (t, m) => {
+        const [h, min] = t.split(':').map(Number);
+        const total = h * 60 + min + m;
+        return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}:00`;
+      };
+
+      const meetSessionData = {
+        summary: `Koott Session — ${clientName} & ${newPsychName}`,
+        description: `Therapy session\nClient: ${clientName}\nTherapist: ${newPsychName}`,
+        startDate,
+        startTime,
+        endTime: startTime ? addMins(startTime, durationMinutes) : undefined,
+        clientEmail: booking.client_email || null,
+        psychologistEmail: newPsych.email || null,
+      };
+
+      let newUserAuth = null;
+      const newCreds = newPsych.google_calendar_credentials;
+      if (newCreds?.access_token) {
+        newUserAuth = { access_token: newCreds.access_token, refresh_token: newCreds.refresh_token, expiry_date: newCreds.expiry_date };
+      }
+
+      const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, newUserAuth);
+      if (meetResult?.eventId) newMeetData.eventId = meetResult.eventId;
+      if (meetResult?.eventLink || meetResult?.calendarLink) newMeetData.calendarLink = meetResult.eventLink || meetResult.calendarLink;
+      if (meetResult?.meetLink && !meetResult.meetLink.includes('meet.google.com/new')) {
+        newMeetData.meetLink = meetResult.meetLink;
+        console.log('✅ [transferWixBooking] new Meet link:', meetResult.method);
+      }
+    } catch (meetErr) {
+      console.error('❌ [transferWixBooking] Meet creation failed (non-fatal):', meetErr.message || meetErr);
+    }
+
+    // 6. Update wix_bookings row
+    const newPsychName = `${newPsych.first_name || ''} ${newPsych.last_name || ''}`.trim();
+    const wbUpdates = {
+      psychologist_id: new_psychologist_id,
+      therapist_name: newPsychName,
+      google_calendar_event_id: newMeetData.eventId || null,
+      google_meet_link: newMeetData.meetLink || null,
+      synced_at: new Date().toISOString(),
+      ...(newStartTimeIso !== booking.start_time ? { start_time: newStartTimeIso } : {}),
+    };
+
+    const { error: wbErr } = await supabaseAdmin.from('wix_bookings').update(wbUpdates).eq('id', id);
+    if (wbErr) return res.status(500).json({ success: false, error: wbErr.message });
+
+    // 7. Also update linked platform session if one exists
+    if (booking.wix_booking_id) {
+      const sessionUpdates = {
+        psychologist_id: new_psychologist_id,
+        google_calendar_event_id: newMeetData.eventId || null,
+        google_meet_link: newMeetData.meetLink || null,
+        google_meet_join_url: newMeetData.meetLink || null,
+        google_meet_start_url: newMeetData.meetLink || null,
+        google_calendar_link: newMeetData.calendarLink || null,
+        updated_at: new Date().toISOString(),
+      };
+      if (new_date) sessionUpdates.scheduled_date = new_date;
+      if (new_time) sessionUpdates.scheduled_time = new_time;
+      await supabaseAdmin.from('sessions').update(sessionUpdates).eq('wix_booking_id', booking.wix_booking_id);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Wix booking transferred successfully',
+      data: { calendarEventRemoved, newMeetLink: newMeetData.meetLink },
+    });
+  } catch (e) {
+    console.error('[transferWixBooking]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
 module.exports = {
   performWixSync,
   upsertEnrichedBookings,
@@ -2196,6 +2362,7 @@ module.exports = {
   cancelRefundWixBooking,
   bookWixNextSession,
   handleWixWebhook,
+  transferWixBooking,
 };
 
 /**
