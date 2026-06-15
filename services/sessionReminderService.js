@@ -164,62 +164,6 @@ class SessionReminderService {
         });
       }
 
-      // Get free assessments in the next 1 hour
-      const { data: freeAssessments, error: freeAssessmentsError } = await supabaseAdmin
-        .from('free_assessments')
-        .select(`
-          id,
-          client_id,
-          psychologist_id,
-          scheduled_date,
-          scheduled_time,
-          status,
-          user_id,
-          client:clients(
-            id,
-            first_name,
-            last_name,
-            child_name,
-            phone_number,
-            email,
-            user_id
-          ),
-          psychologist:psychologists(
-            id,
-            first_name,
-            last_name,
-            phone,
-            email
-          )
-        `)
-        .in('scheduled_date', datesToCheck)
-        .in('status', ['booked', 'rescheduled'])
-        .order('scheduled_date', { ascending: true })
-        .order('scheduled_time', { ascending: true });
-
-      if (freeAssessmentsError) {
-        console.error('❌ Error fetching free assessments:', {
-          message: freeAssessmentsError.message,
-          details: freeAssessmentsError.details || freeAssessmentsError.toString()
-        });
-      } else {
-        console.log(`📋 Found ${freeAssessments?.length || 0} free assessments in date range`);
-      }
-
-      // Filter free assessments that are in the next 1 hour
-      const reminderFreeAssessments = (freeAssessments || []).filter(assessment => {
-        if (!assessment.scheduled_time) return false;
-        
-        // Parse directly in IST timezone to avoid UTC conversion issues
-        const assessmentTime = dayjs.tz(`${assessment.scheduled_date} ${assessment.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
-        const timeDiffMinutes = assessmentTime.diff(now, 'minute');
-        
-        // Check if assessment is between 0 and 120 minutes from now (next 2 hours)
-        return timeDiffMinutes >= 0 && timeDiffMinutes <= 120;
-      });
-
-      console.log(`🔔 Found ${reminderFreeAssessments.length} free assessments in the next 1 hour requiring reminders`);
-
       // Process sessions in batches with parallel processing within each batch
       // This balances speed with API rate limiting
       const BATCH_SIZE = 5; // Process 5 sessions at a time
@@ -239,21 +183,6 @@ class SessionReminderService {
         }
       }
 
-      // Process free assessments
-      for (let i = 0; i < reminderFreeAssessments.length; i += BATCH_SIZE) {
-        const batch = reminderFreeAssessments.slice(i, i + BATCH_SIZE);
-      
-        // Process batch in parallel
-        await Promise.all(
-          batch.map(assessment => this.sendReminderForFreeAssessment(assessment))
-        );
-        
-        // Add delay between batches
-        if (i + BATCH_SIZE < reminderFreeAssessments.length) {
-          await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
-        }
-      }
-
       console.log('✅ Reminder check completed (sessions and free assessments)');
     } catch (error) {
       console.error('❌ Error in session reminder check:', error);
@@ -267,11 +196,7 @@ class SessionReminderService {
    */
   async sendReminderForSession(session) {
     try {
-      // Free assessments get reminder only from free_assessments table (one reminder per session)
-      if (session.session_type === 'free_assessment') {
-        console.log(`⏭️  Session ${session.id} is free_assessment; reminder handled via free_assessments table, skipping...`);
-        return;
-      }
+
 
       // ATOMIC CHECK AND LOCK: Try to update reminder_sent from false to true
       // This acts as a distributed lock - only one process can successfully update
@@ -366,149 +291,7 @@ class SessionReminderService {
     }
   }
 
-  /**
-   * Send WhatsApp reminder for a specific free assessment
-   */
-  async sendReminderForFreeAssessment(assessment) {
-    try {
-      // Already-sent check: only one reminder per free assessment (cron can run every hour; same assessment can fall in window twice)
-      const { data: existingReminder } = await supabaseAdmin
-        .from('notifications')
-        .select('id')
-        .eq('type', 'free_assessment_reminder_2h')
-        .eq('related_id', assessment.id)
-        .limit(1);
 
-      if (existingReminder && existingReminder.length > 0) {
-        console.log(`⏭️  Reminder already sent for free assessment ${assessment.id}, skipping...`);
-        return;
-      }
-
-      // ATOMIC CHECK: Try to insert a "lock" notification first
-      // This acts as a distributed lock - only one process can successfully insert
-      // We'll insert a temporary lock notification, then send reminders, then update it
-      const lockNotification = {
-        user_id: assessment.user_id || assessment.client?.user_id || assessment.client?.id,
-        user_role: 'client',
-        type: 'free_assessment_reminder_2h',
-        title: 'Free Assessment Reminder',
-        message: 'Reminder lock', // Temporary message
-        related_id: assessment.id,
-        is_read: false
-      };
-
-      // Try to insert the lock notification
-      // If it fails (duplicate), it means another process is already handling this
-      const { data: insertedLock, error: lockError } = await supabaseAdmin
-        .from('notifications')
-        .insert([lockNotification])
-        .select('id')
-        .single();
-
-      // If insert failed (likely due to unique constraint or duplicate), skip
-      if (lockError || !insertedLock) {
-        // Check if notification already exists (to confirm it's a duplicate, not another error)
-        const { data: existingNotifications } = await supabaseAdmin
-          .from('notifications')
-          .select('id')
-          .eq('related_id', assessment.id)
-          .eq('type', 'free_assessment_reminder_2h')
-          .limit(1);
-
-        if (existingNotifications && existingNotifications.length > 0) {
-          console.log(`⏭️  Reminder already sent for free assessment ${assessment.id}, skipping...`);
-          return;
-        } else {
-          // If it's a different error, log it but still proceed (fail-safe)
-          console.warn(`⚠️  Error creating lock notification for free assessment ${assessment.id}:`, lockError);
-        }
-      } else {
-        console.log(`🔒 Lock acquired for free assessment ${assessment.id}, proceeding with reminder...`);
-      }
-
-      const client = assessment.client;
-      const psychologist = assessment.psychologist;
-
-      if (!client) {
-        console.warn(`⚠️  Missing client data for free assessment ${assessment.id}`);
-        return;
-      }
-
-      // Format assessment date and time
-      // Parse directly in IST timezone to avoid UTC conversion issues
-      const assessmentDateTime = dayjs.tz(`${assessment.scheduled_date} ${assessment.scheduled_time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Kolkata');
-      const formattedDate = assessmentDateTime.format('DD MMM YYYY');
-      const formattedTime = assessmentDateTime.format('h:mm A');
-
-      const clientName = getClientDisplayName(client, 'Client');
-      const psychologistName = psychologist ? `${psychologist.first_name} ${psychologist.last_name}`.trim() : 'our specialist';
-
-      // Client reminder via Interakt template (free assessment uses the same reminder template)
-      if (client.phone_number) {
-        try {
-          const meetLink = assessment.google_meet_link || null;
-          const result = await interaktService.sendSessionReminder(client.phone_number, {
-            recipientName: clientName,
-            otherPartyName: psychologistName,
-            meetLink,
-            timeToStart: '30 minutes',
-          });
-          if (result?.success) {
-            console.log(`✅ sessionreminderautomatic sent to client for free assessment ${assessment.id}`);
-          } else {
-            console.warn(`⚠️  Failed to send reminder to client for free assessment ${assessment.id}:`, result?.error || result?.reason);
-          }
-        } catch (err) {
-          console.error(`❌ Error sending reminder to client for free assessment ${assessment.id}:`, err);
-        }
-      } else {
-        console.log(`ℹ️  No phone number for client in free assessment ${assessment.id}`);
-      }
-
-      // Therapist reminder intentionally removed — per product spec, only the client gets the reminder.
-
-      // Update the lock notification with proper messages, or create new ones if lock wasn't created
-      const notificationsToInsert = [
-        {
-          user_id: assessment.user_id || client.user_id || client.id,
-          user_role: 'client',
-          type: 'free_assessment_reminder_2h',
-          title: 'Free Assessment Reminder',
-          message: `Your free assessment session is scheduled`,
-          related_id: assessment.id,
-          is_read: false
-        }
-      ];
-
-      // Psychologist in-app notification intentionally removed — per spec, reminders are client-only.
-
-      // Update the lock notification or insert new ones
-      if (insertedLock) {
-        // Update the lock notification with proper message
-        await supabaseAdmin
-          .from('notifications')
-          .update({ message: notificationsToInsert[0].message })
-          .eq('id', insertedLock.id);
-
-        // No psychologist notification — reminders are client-only.
-      } else {
-        // If lock wasn't created, try to insert all notifications (may fail if duplicates exist)
-        const { error: insertError } = await supabaseAdmin
-          .from('notifications')
-          .insert(notificationsToInsert);
-        if (insertError) {
-          // Ignore duplicate errors - it means another process already created them
-          if (!insertError.message?.includes('duplicate') && !insertError.code?.includes('23505')) {
-            console.error(`Error inserting notifications for free assessment ${assessment.id}:`, insertError);
-          }
-        }
-      }
-
-      console.log(`✅ Reminder notifications created for free assessment ${assessment.id}`);
-    } catch (error) {
-      console.error(`❌ Error sending reminder for free assessment ${assessment.id}:`, error);
-    }
-  }
 
   /**
    * Check for any new sessions that were created/rescheduled during the reminder processing
@@ -668,11 +451,7 @@ class SessionReminderService {
         return;
       }
 
-      // Free assessments get reminder only from free_assessments batch (one reminder per session)
-      if (session.session_type === 'free_assessment') {
-        console.log(`⏭️  [PRIORITY] Session ${sessionId} is free_assessment; reminder handled via free_assessments table, skipping...`);
-        return;
-      }
+
 
       // Check if reminder already sent
       if (session.reminder_sent === true) {

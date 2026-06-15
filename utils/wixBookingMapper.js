@@ -356,7 +356,7 @@ function discoverRowToSessionDb(booking) {
     price: amount,
     amount,
     wix_payload: b,
-    booking_created_at: fromWixInstant || createdAt,
+    booking_created_at: fromWixInstant || null,
     created_at: createdAt,
     updated_at: updatedAt,
   };

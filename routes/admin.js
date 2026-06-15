@@ -70,6 +70,7 @@ router.patch('/wix/bookings/:id/no-show', wixBookingsController.noShowWixBooking
 router.patch('/wix/bookings/:id/cancel-refund', wixBookingsController.cancelRefundWixBooking);
 router.post('/wix/bookings/:id/book-next-session', wixBookingsController.bookWixNextSession);
 router.post('/wix/bookings/:id/transfer', wixBookingsController.transferWixBooking);
+router.post('/wix/bookings/:id/reschedule', wixBookingsController.rescheduleWixBooking);
 router.get('/wix/therapists', wixBookingsController.listWixTherapists);
 router.post('/wix/backfill-clients', wixBookingsController.backfillWixClients);
 

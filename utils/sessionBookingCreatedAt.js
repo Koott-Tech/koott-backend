@@ -96,11 +96,16 @@ function getFinanceBookingDedupeKey(sessionRow) {
   const src = String(sessionRow.source || '').toLowerCase();
   const wp = sessionRow.wix_payload;
   if (src === 'wix') {
-    if (!wp || typeof wp !== 'object') return '';
-    const sid = wp.sessionId;
-    if (sid != null && String(sid).trim() !== '') {
-      return `wixBooking:${String(sid).trim()}`;
+    if (wp && typeof wp === 'object') {
+      const sid = wp.sessionId;
+      if (sid != null && String(sid).trim() !== '') {
+        return `wixBooking:${String(sid).trim()}`;
+      }
     }
+    // Fall back to wix_booking_id or row id so the booking is still counted
+    const wbid = sessionRow.wix_booking_id;
+    if (wbid != null && String(wbid).trim() !== '') return `wixRow:${String(wbid).trim()}`;
+    if (sessionRow.id != null && String(sessionRow.id).trim() !== '') return `row:${String(sessionRow.id)}`;
     return '';
   }
 
@@ -131,13 +136,20 @@ function getSessionFinanceRevenueAmount(sessionRow) {
   if (!sessionRow || typeof sessionRow !== 'object') return 0;
   const db = parseFloat(sessionRow.price) || 0;
   const wp = sessionRow.wix_payload;
+  const src = String(sessionRow.source || '').toLowerCase();
   if (wp && typeof wp === 'object') {
     const fp = wp.paymentDetails?.balance?.finalPrice?.amount;
     const fpNum = fp != null ? parseFloat(fp) : NaN;
-    if (Number.isFinite(fpNum) && fpNum >= 0) return Math.max(fpNum, db);
+    if (Number.isFinite(fpNum) && fpNum >= 0) {
+      // For Wix-sourced rows use the actual Wix payment amount; only fall back to db price
+      // if Wix payload has no price, to avoid inflating revenue from stale sessions.price values
+      return src === 'wix' ? fpNum : Math.max(fpNum, db);
+    }
     const ar = wp.paymentDetails?.balance?.amountReceived;
     const arNum = ar != null ? parseFloat(ar) : NaN;
-    if (Number.isFinite(arNum) && arNum >= 0) return Math.max(arNum, db);
+    if (Number.isFinite(arNum) && arNum >= 0) {
+      return src === 'wix' ? arNum : Math.max(arNum, db);
+    }
   }
   return db;
 }

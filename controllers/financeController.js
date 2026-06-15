@@ -1247,7 +1247,7 @@ const getDashboard = async (req, res) => {
           if (isCompleted && !isRefunded) {
             const completionYmd = s.completion_date
               ? String(s.completion_date).split('T')[0]
-              : (s.updated_at ? String(s.updated_at).split('T')[0] : null);
+              : (s.scheduled_date ? String(s.scheduled_date).split('T')[0] : null);
             const completedInMonth = mtdFrom && mtdTo
               ? !!(completionYmd && completionYmd >= mtdFrom && completionYmd <= mtdTo)
               : true;
@@ -1264,7 +1264,7 @@ const getDashboard = async (req, res) => {
             const bookedByMonthEnd = !mtdTo || (bookedYmd && bookedYmd <= mtdTo);
             const completionYmd = s.completion_date
               ? String(s.completion_date).split('T')[0]
-              : (s.updated_at ? String(s.updated_at).split('T')[0] : null);
+              : (s.scheduled_date ? String(s.scheduled_date).split('T')[0] : null);
             const stillPendingAtMonthEnd = !isCompleted ||
               (completionYmd && mtdTo && completionYmd > mtdTo);
             if (bookedByMonthEnd && stillPendingAtMonthEnd) {

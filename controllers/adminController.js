@@ -1384,11 +1384,15 @@ const getAllUsers = async (req, res) => {
       if (search) {
         const escapedSearch = escapeLike(search);
         let emailMatchedUserIds = [];
+        // Cap email matches: each id becomes a 36-char UUID inside the `.or()` filter,
+        // so a broad search (e.g. "a") that matches hundreds of emails would build a
+        // multi-KB query string and the PostgREST request fails (500). 100 keeps the
+        // URL small; specific searches (full email/name) match far fewer than the cap.
         const { data: matchedUsers, error: matchedUsersError } = await supabaseAdmin
           .from('users')
           .select('id')
           .ilike('email', `%${escapedSearch}%`)
-          .limit(500);
+          .limit(100);
 
         if (matchedUsersError) {
           console.warn('[admin.getAllUsers] client email search lookup failed:', matchedUsersError.message);
