@@ -163,6 +163,25 @@ router.post('/trigger-calendar-conflict-check', async (req, res) => {
   }
 });
 
+// Manual trigger for the overbooking crawler (admin only, for testing).
+// Scans all therapists for future same-slot double-bookings and emails ops if any found.
+router.post('/trigger-overbooking-crawler', async (req, res) => {
+  try {
+    const overbookingCrawlerService = require('../services/overbookingCrawlerService');
+    const result = await overbookingCrawlerService.trigger();
+    res.json({
+      success: true,
+      message: result.clashes > 0
+        ? `Found ${result.clashes} overbooked slot(s); alert email sent.`
+        : 'No overbookings found; no email sent.',
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error triggering overbooking crawler:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // File uploads (admin only)
 // Store in Supabase Storage bucket 'psychologists' and return public URL
 const memoryStorage = multer.memoryStorage();

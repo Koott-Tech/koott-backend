@@ -32,6 +32,7 @@ const calendarSyncService = require('./services/calendarSyncService');
 const sessionReminderService = require('./services/sessionReminderService');
 const dailyAvailabilityService = require('./services/dailyAvailabilityService');
 const dailyCalendarConflictAlert = require('./services/dailyCalendarConflictAlert');
+const overbookingCrawlerService = require('./services/overbookingCrawlerService');
 const wixRealtimeSyncService = require('./services/wixRealtimeSyncService');
 const monthlyFinanceSnapshotService = require('./services/monthlyFinanceSnapshotService');
 const googleCalendarRoutes = require('./routes/googleCalendar');
@@ -945,7 +946,10 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
   
   // Start Daily Calendar Conflict Monitor service (checks for conflicts at 1 AM)
   dailyCalendarConflictAlert.start();
-  
+
+  // Start Daily Overbooking Crawler (05:30 IST; emails ops only if overbookings found)
+  overbookingCrawlerService.start();
+
   // Start Wix discover mirror sync service (near real-time fallback)
   wixRealtimeSyncService.start();
 

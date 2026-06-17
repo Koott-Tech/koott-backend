@@ -1775,7 +1775,7 @@ async function deleteWixBooking(req, res) {
         .eq('wix_booking_id', data.wix_booking_id);
 
       // Clean up calendar events (Koott + Wix Native)
-      deleteCalendarEventsForWixBooking(data.wix_booking_id).catch(err => {
+      deleteCalendarEventsForWixBooking(data.wix_booking_id, { force: true }).catch(err => {
         console.warn('[deleteWixBooking] calendar event cleanup failed:', err);
       });
     }
@@ -1948,7 +1948,7 @@ async function cancelRefundWixBooking(req, res) {
 
     // 4. Delete Google Calendar event (Koott + Wix Native) so the therapist's slot reopens
     if (booking.wix_booking_id) {
-      deleteCalendarEventsForWixBooking(booking.wix_booking_id).catch(err => {
+      deleteCalendarEventsForWixBooking(booking.wix_booking_id, { force: true }).catch(err => {
         console.warn('[cancelRefundWixBooking] calendar event cleanup failed:', err);
       });
     }
@@ -2314,7 +2314,9 @@ async function transferWixBooking(req, res) {
         startTime = ist.toISOString().slice(11, 19);
       }
 
-      const durationMinutes = 50;
+      // Match the calendar event length to the booking's real slot length so Wix
+      // blocks the correct duration (50 / 60 / 80 / 90 / 120 min).
+      const durationMinutes = getWixBookingDurationMin(booking);
       const addMins = (t, m) => {
         const [h, min] = t.split(':').map(Number);
         const total = h * 60 + min + m;
@@ -2352,7 +2354,7 @@ async function transferWixBooking(req, res) {
     //    mark locally_modified so the next Wix sync doesn't overwrite the transfer.
     const newPsychName = `${newPsych.first_name || ''} ${newPsych.last_name || ''}`.trim();
     const timeChanged = newStartTimeIso !== booking.start_time;
-    const durationMin = parseInt(booking.payload?.sessionDurationMin, 10) || 50;
+    const durationMin = getWixBookingDurationMin(booking);
     const wbUpdates = {
       therapist_name: newPsychName,
       locally_modified: true,
@@ -2370,6 +2372,8 @@ async function transferWixBooking(req, res) {
     if (linkedSession?.id) {
       const sessionUpdates = {
         psychologist_id: new_psychologist_id,
+        // Fix 1 — shield the session from the next Wix sync / calendar cleanup.
+        locally_modified: true,
         updated_at: new Date().toISOString(),
       };
       if (newMeetData.eventId) sessionUpdates.google_calendar_event_id = newMeetData.eventId;
@@ -2496,7 +2500,7 @@ async function rescheduleWixBooking(req, res) {
     //    (Computed before any calendar op so the move/create uses the new time.)
     const timeClean = String(new_time).split('.')[0].trim();          // HH:MM or HH:MM:SS
     const timeHms = timeClean.length === 5 ? `${timeClean}:00` : timeClean;
-    const durationMin = parseInt(booking.payload?.sessionDurationMin, 10) || 50;
+    const durationMin = getWixBookingDurationMin(booking);
     const newStartTimeIso = `${new_date}T${timeHms}+05:30`;
     const newEndTimeIso = new Date(new Date(newStartTimeIso).getTime() + durationMin * 60000).toISOString();
 
@@ -2584,6 +2588,14 @@ async function rescheduleWixBooking(req, res) {
     const { error: wbErr } = await supabaseAdmin.from('wix_bookings').update(wbUpdates).eq('id', booking.id);
     if (wbErr) return res.status(500).json({ success: false, error: wbErr.message });
 
+    // Fix 3 — durability check: a rescheduled slot is only "held" if there is a live
+    // calendar event blocking it (Wix reads the therapist's Google Calendar for
+    // availability). If we ended up without an event id, the slot is NOT blocked and
+    // Wix can resell it → log loudly so it can be caught before a double-booking.
+    if (!newMeetData.eventId) {
+      console.error(`🚨 [rescheduleWixBooking] NO calendar event for rescheduled slot ${new_date} ${timeHms} (session ${linkedSession?.id || '-'}). Slot is NOT blocked in Google Calendar — Wix may resell it.`);
+    }
+
     // 8. Update the linked platform session (carries psychologist + meet/calendar)
     if (linkedSession?.id) {
       const sessionUpdates = {
@@ -2591,6 +2603,9 @@ async function rescheduleWixBooking(req, res) {
         scheduled_time: timeHms,
         status: 'rescheduled',
         reminder_sent: false, // reset so the new time gets a fresh reminder
+        // Fix 1 — shield the session from the next Wix sync (and its calendar cleanup),
+        // so the rescheduled event/time is never overwritten or cancelled.
+        locally_modified: true,
         updated_at: new Date().toISOString(),
       };
       // Only overwrite meet/calendar fields if we successfully created a new event;
@@ -2718,6 +2733,22 @@ async function deleteSessionCalendarEventHelper(psychologistId, eventIdStr) {
 /**
  * Helper to search for and delete the Wix Native Event at a given time slot.
  */
+/**
+ * Resolve a Wix booking's true slot length in minutes so the Google Calendar event
+ * matches it (Wix blocks availability by the calendar event length). Most authoritative
+ * source is the booking's own end_time − start_time; then payload.sessionDurationMin;
+ * else default 50. Handles 50/60/80/90/120-min sessions correctly.
+ */
+function getWixBookingDurationMin(booking) {
+  if (booking?.start_time && booking?.end_time) {
+    const d = Math.round((new Date(booking.end_time).getTime() - new Date(booking.start_time).getTime()) / 60000);
+    if (Number.isFinite(d) && d > 0 && d <= 600) return d;
+  }
+  const fromPayload = parseInt(booking?.payload?.sessionDurationMin, 10);
+  if (Number.isFinite(fromPayload) && fromPayload > 0) return fromPayload;
+  return 50;
+}
+
 async function deleteWixNativeEventHelper(psychologistId, startTimeStr, endTimeStr, clientDetails, excludeEventIds = []) {
   if (!psychologistId || !startTimeStr || !endTimeStr) return;
   try {
@@ -2782,8 +2813,17 @@ async function deleteWixNativeEventHelper(psychologistId, startTimeStr, endTimeS
 
 /**
  * Helper to delete all calendar events (Koott + Wix Native) associated with a Wix booking.
+ *
+ * Fix 2 — SAFETY GUARD: this must only run when the booking is genuinely being
+ * cancelled/deleted. It is NEVER safe to run for an active session, because the
+ * Wix-native cleanup deletes events by time-window+name and would wipe the live
+ * calendar block for the slot — which makes Wix (whose availability is driven by the
+ * therapist's Google Calendar) resell the slot. The previous reschedule race that
+ * caused triple-bookings came from exactly this. Active or locally_modified sessions
+ * are skipped.
  */
-async function deleteCalendarEventsForWixBooking(wixBookingId) {
+const ACTIVE_SESSION_STATUSES = ['booked', 'rescheduled', 'reschedule_requested', 'confirmed', 'scheduled', 'upcoming'];
+async function deleteCalendarEventsForWixBooking(wixBookingId, { force = false } = {}) {
   if (!wixBookingId) return;
   try {
     const { data: booking } = await supabaseAdmin
@@ -2796,11 +2836,21 @@ async function deleteCalendarEventsForWixBooking(wixBookingId) {
 
     const { data: session } = await supabaseAdmin
       .from('sessions')
-      .select('psychologist_id, google_calendar_event_id')
+      .select('psychologist_id, google_calendar_event_id, status, locally_modified')
       .eq('wix_booking_id', wixBookingId)
       .maybeSingle();
 
     if (!session) return;
+
+    // Guard: never tear down calendar events for a session that is still active or
+    // locally protected, unless the caller explicitly forces it (delete/cancel actions).
+    if (!force) {
+      const status = String(session.status || '').toLowerCase();
+      if (session.locally_modified || ACTIVE_SESSION_STATUSES.includes(status)) {
+        console.warn(`[deleteCalendarEventsForWixBooking] SKIP cleanup for active/protected session (status=${status}, locally_modified=${!!session.locally_modified}) wix_booking_id=${wixBookingId}`);
+        return;
+      }
+    }
 
     const oldEventId = session.google_calendar_event_id;
     const eventIds = oldEventId ? String(oldEventId).split(',').map(e => e.trim()).filter(Boolean) : [];

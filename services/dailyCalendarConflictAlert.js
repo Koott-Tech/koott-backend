@@ -364,6 +364,10 @@ class CalendarConflictMonitorService {
         }
       }
 
+      // Step 3: Detect same-slot double-bookings in our own sessions table.
+      console.log(`\n🔍 Step 3: Checking for same-slot double-bookings...\n`);
+      const doubleBookings = await this.checkSameSlotDoubleBookings();
+
       // Summary
       console.log(`\n${'='.repeat(80)}`);
       console.log(`📊 CHECK SUMMARY`);
@@ -371,11 +375,79 @@ class CalendarConflictMonitorService {
       console.log(`✅ Psychologists Checked: ${validPsychologists.length}`);
       console.log(`⚠️  Psychologists with Conflicts: ${psychologistsWithConflicts.length}`);
       console.log(`🚨 Total Conflicts: ${totalConflicts}`);
+      console.log(`🚨 Same-slot Double-bookings: ${doubleBookings}`);
       console.log(`${'='.repeat(80)}\n`);
 
     } catch (error) {
       console.error('❌ Error checking for conflicts:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Fix 5 — Detect same-slot double-bookings among ACTIVE sessions.
+   * A slot is double-booked when 2+ active sessions share the same
+   * psychologist_id + scheduled_date + scheduled_time. This is the symptom of the
+   * Wix-availability/reschedule race; surfacing it lets ops intervene before the
+   * sessions actually clash. Returns the number of double-booked slots found.
+   */
+  async checkSameSlotDoubleBookings() {
+    const ACTIVE = ['booked', 'rescheduled', 'reschedule_requested', 'confirmed', 'scheduled', 'upcoming'];
+    const today = dayjs().tz('Asia/Kolkata').format('YYYY-MM-DD');
+    try {
+      const { data: sessions, error } = await supabaseAdmin
+        .from('sessions')
+        .select('id, client_id, psychologist_id, scheduled_date, scheduled_time, status, source')
+        .gte('scheduled_date', today)
+        .in('status', ACTIVE)
+        .not('psychologist_id', 'is', null)
+        .not('scheduled_time', 'is', null);
+
+      if (error) {
+        console.error('   ❌ Double-booking query failed:', error.message);
+        return 0;
+      }
+
+      // Group by psychologist + date + time
+      const groups = new Map();
+      for (const s of sessions || []) {
+        const key = `${s.psychologist_id}|${s.scheduled_date}|${s.scheduled_time}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(s);
+      }
+
+      const clashes = [...groups.values()].filter(g => g.length > 1);
+      if (clashes.length === 0) {
+        console.log('   ✅ No same-slot double-bookings found');
+        return 0;
+      }
+
+      // Resolve names for the clashing rows
+      const psychIds = [...new Set(clashes.flat().map(s => s.psychologist_id))];
+      const clientIds = [...new Set(clashes.flat().map(s => s.client_id).filter(Boolean))];
+      const [{ data: psychs }, { data: clients }] = await Promise.all([
+        supabaseAdmin.from('psychologists').select('id, first_name, last_name').in('id', psychIds),
+        clientIds.length
+          ? supabaseAdmin.from('clients').select('id, first_name, last_name, phone_number').in('id', clientIds)
+          : Promise.resolve({ data: [] }),
+      ]);
+      const pName = new Map((psychs || []).map(p => [p.id, `${p.first_name || ''} ${p.last_name || ''}`.trim()]));
+      const cMap = new Map((clients || []).map(c => [c.id, c]));
+
+      for (const g of clashes) {
+        const [{ psychologist_id, scheduled_date, scheduled_time }] = g;
+        console.error(`   🚨 DOUBLE-BOOKED: ${pName.get(psychologist_id) || psychologist_id} on ${scheduled_date} ${scheduled_time} → ${g.length} active sessions:`);
+        for (const s of g) {
+          const c = cMap.get(s.client_id);
+          const who = c ? `${c.first_name || ''} ${c.last_name || ''}`.trim() + (c.phone_number ? ` (${c.phone_number})` : '') : '(no client)';
+          console.error(`        • ${who} | status=${s.status} | src=${s.source || '-'} | sid=${s.id}`);
+        }
+      }
+      console.log(`   ⚠️  Found ${clashes.length} double-booked slot(s)`);
+      return clashes.length;
+    } catch (e) {
+      console.error('   ❌ checkSameSlotDoubleBookings error:', e.message || e);
+      return 0;
     }
   }
 

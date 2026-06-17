@@ -2922,6 +2922,30 @@ The Koott Team
     const finalMailOptions = this.addEmailHeaders(mailOptions);
     return this.transporter.sendMail(finalMailOptions);
   }
+
+  /**
+   * Generic email sender for internal/ops alerts (e.g. overbooking crawler).
+   * @param {{ to: string, subject: string, html: string, text?: string }} opts
+   */
+  async sendCustomEmail({ to, subject, html, text }) {
+    if (!this.transporter) {
+      console.error('📧 Email Service - Transporter not initialized (sendCustomEmail)');
+      throw new Error('Email service not properly initialized');
+    }
+    const mailOptions = {
+      from: {
+        name: process.env.EMAIL_FROM_NAME || 'Koott',
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in',
+      },
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
+      to,
+      subject,
+      html,
+      ...(text ? { text } : {}),
+    };
+    const finalMailOptions = this.addEmailHeaders(mailOptions);
+    return this.transporter.sendMail(finalMailOptions);
+  }
 }
 
 module.exports = new EmailService();
