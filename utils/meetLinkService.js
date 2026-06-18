@@ -916,9 +916,12 @@ class MeetLinkService {
       const { data: existing } = await calendar.events.get({ calendarId: 'primary', eventId });
       if (!existing) return { success: false, error: 'Event not found' };
 
-      // Build new start/end in IST
-      const startISO = `${sessionData.startDate}T${sessionData.startTime}:00+05:30`;
-      const endISO = `${sessionData.startDate}T${sessionData.endTime}:00+05:30`;
+      // Build new start/end in IST. Normalize to HH:MM first so callers may pass either
+      // "HH:MM" or "HH:MM:SS" without producing a malformed "...:00:00" datetime (which
+      // Google rejects with 400 Bad Request).
+      const toHHMM = (t) => String(t || '').trim().slice(0, 5);
+      const startISO = `${sessionData.startDate}T${toHHMM(sessionData.startTime)}:00+05:30`;
+      const endISO = `${sessionData.startDate}T${toHHMM(sessionData.endTime)}:00+05:30`;
 
       const patchBody = {
         start: { dateTime: startISO, timeZone: 'Asia/Kolkata' },

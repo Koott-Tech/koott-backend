@@ -2233,7 +2233,7 @@ async function transferWixBooking(req, res) {
     // 1. Fetch the wix booking (only real columns)
     const { data: booking, error: fetchErr } = await supabaseAdmin
       .from('wix_bookings')
-      .select('id, wix_booking_id, therapist_name, client_full_name, client_first_name, client_email, session_type, start_time, end_time, payload')
+      .select('id, wix_booking_id, therapist_name, client_full_name, client_first_name, client_email, client_phone, session_type, start_time, end_time, payload')
       .eq('id', id)
       .maybeSingle();
 
@@ -2389,6 +2389,28 @@ async function transferWixBooking(req, res) {
         sessionUpdates.scheduled_time = t.length === 5 ? `${t}:00` : t;
       }
       await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
+    }
+
+    // 8. Remove the Wix-native event from the OLD therapist's calendar at the old slot.
+    //    (Wix creates a therapist-only "<Therapist> for <Client> <phone>" event with no
+    //    client attendee; transferring away leaves it behind on the old therapist's
+    //    calendar unless we clean it up.) Excludes the new event so it can't be touched.
+    if (linkedSession?.psychologist_id && booking.start_time && booking.end_time) {
+      try {
+        await deleteWixNativeEventHelper(
+          linkedSession.psychologist_id,
+          booking.start_time,
+          booking.end_time,
+          {
+            client_full_name: booking.client_full_name,
+            client_first_name: booking.client_first_name,
+            client_phone: booking.client_phone,
+          },
+          [newMeetData.eventId, linkedSession?.google_calendar_event_id].filter(Boolean)
+        );
+      } catch (nativeErr) {
+        console.warn('[transferWixBooking] Wix-native old event cleanup failed (non-fatal):', nativeErr.message || nativeErr);
+      }
     }
 
     return res.json({
@@ -2575,6 +2597,31 @@ async function rescheduleWixBooking(req, res) {
       }
     } catch (meetErr) {
       console.error('[rescheduleWixBooking] calendar move/create failed (non-fatal):', meetErr.message || meetErr);
+    }
+
+    // 6b. Remove the Wix-native event from the therapist's calendar at the OLD slot.
+    //     Wix Bookings creates its own event ("<Therapist> for <Client> <phone>") directly
+    //     on the therapist's Google Calendar with NO client attendee, so cancelling the
+    //     Koott event (which has the client) frees the client's calendar but leaves the
+    //     therapist still showing the old slot. We search the OLD time window (booking.*
+    //     is still the pre-update time in memory) and exclude the freshly created event,
+    //     so this can never touch the new event at the new slot.
+    if (psych?.id && booking.start_time && booking.end_time) {
+      try {
+        await deleteWixNativeEventHelper(
+          psych.id,
+          booking.start_time,
+          booking.end_time,
+          {
+            client_full_name: booking.client_full_name,
+            client_first_name: booking.client_first_name,
+            client_phone: booking.client_phone,
+          },
+          [newMeetData.eventId, linkedSession?.google_calendar_event_id].filter(Boolean)
+        );
+      } catch (nativeErr) {
+        console.warn('[rescheduleWixBooking] Wix-native old event cleanup failed (non-fatal):', nativeErr.message || nativeErr);
+      }
     }
 
     // 7. Update wix_bookings row (only real columns). Mark locally_modified so the next
