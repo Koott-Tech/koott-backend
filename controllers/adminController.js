@@ -1384,15 +1384,20 @@ const getAllUsers = async (req, res) => {
       if (search) {
         const escapedSearch = escapeLike(search);
         let emailMatchedUserIds = [];
+        // Emails never contain spaces, so a multi-word search can't match one — skip the
+        // extra email lookup query entirely in that case (one less full scan).
+        const skipEmailLookup = /\s/.test(search);
         // Cap email matches: each id becomes a 36-char UUID inside the `.or()` filter,
         // so a broad search (e.g. "a") that matches hundreds of emails would build a
         // multi-KB query string and the PostgREST request fails (500). 100 keeps the
         // URL small; specific searches (full email/name) match far fewer than the cap.
-        const { data: matchedUsers, error: matchedUsersError } = await supabaseAdmin
-          .from('users')
-          .select('id')
-          .ilike('email', `%${escapedSearch}%`)
-          .limit(100);
+        const { data: matchedUsers, error: matchedUsersError } = skipEmailLookup
+          ? { data: [], error: null }
+          : await supabaseAdmin
+              .from('users')
+              .select('id')
+              .ilike('email', `%${escapedSearch}%`)
+              .limit(100);
 
         if (matchedUsersError) {
           console.warn('[admin.getAllUsers] client email search lookup failed:', matchedUsersError.message);
@@ -1405,6 +1410,17 @@ const getAllUsers = async (req, res) => {
           `last_name.ilike.%${escapedSearch}%`,
           `child_name.ilike.%${escapedSearch}%`,
         ];
+
+        // Multi-word search (e.g. "abhishek ravi"): match first token against
+        // first_name AND the rest against last_name (and the reverse), so a full
+        // "first last" name is found even though no single column holds the whole string.
+        const parts = escapedSearch.split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) {
+          const head = parts[0];
+          const tail = parts.slice(1).join(' ');
+          searchTerms.push(`and(first_name.ilike.%${head}%,last_name.ilike.%${tail}%)`);
+          searchTerms.push(`and(first_name.ilike.%${tail}%,last_name.ilike.%${head}%)`);
+        }
 
         if (emailMatchedUserIds.length > 0) {
           searchTerms.push(`user_id.in.(${emailMatchedUserIds.join(',')})`);
