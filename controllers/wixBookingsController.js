@@ -1700,8 +1700,10 @@ async function editWixBooking(req, res) {
     const { id } = req.params;
     const updates = req.body || {};
 
-    // Sanitise: only allow editing known columns
-    const allowed = ['status', 'title', 'start_time', 'end_time', 'notes', 'price', 'currency', 'therapist_name'];
+    // Sanitise: only allow editing columns that actually exist on wix_bookings.
+    // NOTE: wix_bookings has NO `notes` column — notes are mirrored to the linked
+    // sessions row instead (see below), so it is intentionally excluded here.
+    const allowed = ['status', 'title', 'start_time', 'end_time', 'price', 'currency', 'therapist_name'];
     const safeUpdates = {};
     for (const key of allowed) {
       if (updates[key] !== undefined) safeUpdates[key] = updates[key];
@@ -1724,7 +1726,13 @@ async function editWixBooking(req, res) {
     if (data.wix_booking_id) {
       const sessionUpdates = { locally_modified: true };
       if (safeUpdates.status) sessionUpdates.status = safeUpdates.status;
-      if (safeUpdates.title) sessionUpdates.notes = safeUpdates.title;
+      // Notes column lives on sessions (not wix_bookings). Prefer the form's Notes field;
+      // fall back to the title if notes wasn't provided.
+      if (updates.notes !== undefined && String(updates.notes).trim() !== '') {
+        sessionUpdates.notes = updates.notes;
+      } else if (safeUpdates.title) {
+        sessionUpdates.notes = safeUpdates.title;
+      }
       if (safeUpdates.session_type) sessionUpdates.session_type = safeUpdates.session_type;
       if (safeUpdates.price) {
         sessionUpdates.price = safeUpdates.price;
@@ -2011,6 +2019,75 @@ async function cancelRefundWixBooking(req, res) {
     });
   } catch (e) {
     console.error('[cancelRefundWixBooking]', e);
+    return res.status(500).json({ success: false, error: e.message || String(e) });
+  }
+}
+
+/**
+ * POST /admin/wix/bookings/:id/cancel-only
+ * Cancel a session WITHOUT refunding — for when a client can't attend but doesn't want
+ * their money back and intends to reschedule later (date not yet confirmed).
+ * - status → 'on_hold' (NOT a refund; money is retained)
+ * - Frees the slot: removes the Koott + Wix-native calendar events from BOTH the
+ *   therapist's and client's calendars so Wix availability reopens the slot.
+ * - Keeps the booking + session rows so it can be rescheduled later once the client
+ *   confirms a new date/time.
+ */
+async function cancelOnlyWixBooking(req, res) {
+  try {
+    const { id } = req.params;
+
+    const { data: booking, error: fetchErr } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('id, wix_booking_id, status, client_full_name, client_first_name, client_email, therapist_name, start_time')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (fetchErr || !booking) {
+      return res.status(404).json({ success: false, error: 'Wix booking not found' });
+    }
+
+    // 1. Free the calendars FIRST (force) — removes the Koott event (client attendee) and
+    //    the Wix-native therapist event, so the slot reopens in Wix availability.
+    if (booking.wix_booking_id) {
+      await deleteCalendarEventsForWixBooking(booking.wix_booking_id, { force: true }).catch(err => {
+        console.warn('[cancelOnlyWixBooking] calendar cleanup failed (non-fatal):', err.message || err);
+      });
+    }
+
+    // 2. wix_bookings → on_hold; locally_modified so the next Wix sync won't resurrect it.
+    const { error: wbErr } = await supabaseAdmin
+      .from('wix_bookings')
+      .update({ status: 'on_hold', locally_modified: true, synced_at: new Date().toISOString() })
+      .eq('id', id);
+    if (wbErr) return res.status(500).json({ success: false, error: wbErr.message });
+
+    // 3. Linked session → on_hold; clear calendar/meet fields (events are gone) but keep the
+    //    record so it can be rescheduled later.
+    if (booking.wix_booking_id) {
+      await supabaseAdmin
+        .from('sessions')
+        .update({
+          status: 'on_hold',
+          locally_modified: true,
+          google_calendar_event_id: null,
+          google_meet_link: null,
+          google_meet_join_url: null,
+          google_meet_start_url: null,
+          google_calendar_link: null,
+          reminder_sent: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('wix_booking_id', booking.wix_booking_id);
+    }
+
+    console.log(`⏸️  [cancelOnlyWixBooking] ${booking.wix_booking_id} → on_hold (no refund); slot freed.`);
+    return res.json({
+      success: true,
+      message: 'Session cancelled without refund and put on hold. The slot is now free — reschedule it once the client confirms a new date/time.',
+    });
+  } catch (e) {
+    console.error('[cancelOnlyWixBooking]', e);
     return res.status(500).json({ success: false, error: e.message || String(e) });
   }
 }
@@ -2935,6 +3012,7 @@ module.exports = {
   handleWixWebhook,
   transferWixBooking,
   rescheduleWixBooking,
+  cancelOnlyWixBooking,
 };
 
 /**

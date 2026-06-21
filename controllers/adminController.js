@@ -230,6 +230,223 @@ const buildWixMirrorIsoWindow = (scheduledDate, scheduledTime, durationMinutes =
 // handleRescheduleRequest, getRescheduleRequests, approveAssessmentRescheduleRequest,
 // getPsychologistCalendarEvents, checkCalendarSyncStatus
 
+// ============================================================================
+// Multi-session package booking — schedule ALL sessions of a package upfront.
+// Creates ONE payment + N sessions (each with its own Google Calendar event,
+// Meet link, Wix-mirror row, and email/WhatsApp), linked by a shared
+// package_group_id. Isolated from createManualBooking (single-session path).
+// ============================================================================
+async function createOneManualPackageSession({
+  client, psychologist, paymentId, packageGroupId, syntheticWixBookingId,
+  sessionType, sessionCount, sessionNumber,
+  scheduledDate, scheduledTime, durationMinutes,
+  price, therapistCommission, notes,
+}) {
+  const meetLinkService = require('../utils/meetLinkService');
+  const { addMinutesToTime } = require('../utils/helpers');
+  const clientName = getClientDisplayName(client, 'Client');
+  const psychologistName = getPsychologistDisplayName(psychologist);
+  const clientEmailResolved = Array.isArray(client?.user) ? client.user?.[0]?.email : client?.user?.email;
+
+  // 1. Calendar event + Meet link (on the therapist's calendar)
+  const meetData = { meetLink: null, eventId: null, calendarLink: null };
+  try {
+    let userAuth = null;
+    const creds = psychologist.google_calendar_credentials;
+    if (creds?.access_token) userAuth = { access_token: creds.access_token, refresh_token: creds.refresh_token, expiry_date: creds.expiry_date };
+    const meetResult = await meetLinkService.generateSessionMeetLink({
+      summary: buildKoottSessionTitle({ clientName, psychologistName }),
+      description: buildKoottSessionDescription({ clientName, psychologistName, clientPhone: client.phone_number }),
+      startDate: scheduledDate,
+      startTime: scheduledTime.slice(0, 5),
+      endTime: addMinutesToTime(scheduledTime.slice(0, 5), durationMinutes),
+      clientEmail: clientEmailResolved || null,
+      psychologistEmail: psychologist?.email || null,
+    }, userAuth);
+    if (meetResult?.eventId) meetData.eventId = meetResult.eventId;
+    if (meetResult?.eventLink || meetResult?.calendarLink) meetData.calendarLink = meetResult.eventLink || meetResult.calendarLink;
+    if (meetResult?.meetLink && !meetResult.meetLink.includes('meet.google.com/new')) meetData.meetLink = meetResult.meetLink;
+  } catch (e) { console.error('[manualPackage] meet failed (non-fatal):', e.message); }
+
+  // 2. Insert the session
+  const sessionRow = {
+    client_id: client.id,
+    psychologist_id: psychologist.id,
+    package_id: null,
+    session_type: sessionType,
+    session_count: sessionCount,
+    package_group_id: packageGroupId,
+    package_session_number: sessionNumber,
+    scheduled_date: scheduledDate,
+    scheduled_time: scheduledTime,
+    status: 'booked',
+    payment_id: paymentId,
+    price: price,
+    therapist_commission: therapistCommission || 0,
+    session_notes: notes || null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    booking_created_at: new Date().toISOString(),
+    original_scheduled_date: scheduledDate,
+    // NOTE: wix_booking_id is set AFTER the mirror row exists (FK constraint) — see below.
+  };
+  if (meetData.eventId) sessionRow.google_calendar_event_id = meetData.eventId;
+  if (meetData.meetLink) { sessionRow.google_meet_link = meetData.meetLink; sessionRow.google_meet_join_url = meetData.meetLink; sessionRow.google_meet_start_url = meetData.meetLink; }
+  if (meetData.calendarLink) sessionRow.google_calendar_link = meetData.calendarLink;
+
+  const { data: session, error: sessionError } = await supabaseAdmin.from('sessions').insert([sessionRow]).select('*').single();
+  if (sessionError) throw new Error(`Session ${sessionNumber} creation failed: ${sessionError.message}`);
+
+  // 3. Wix discovery mirror row
+  try {
+    const wixMirrorRow = buildAdminManualWixMirror({
+      syntheticWixBookingId, scheduledDate, scheduledTime, durationMinutes,
+      sessionType, sessionCount,
+      therapistName: `${psychologist.first_name || ''} ${psychologist.last_name || ''}`.trim(),
+      therapistEmail: psychologist.email || null, therapistPhone: psychologist.phone || null,
+      psychologistId: psychologist.id, client, amount: price, currency: 'INR',
+      packageId: null, sessionId: session.id,
+      title: `${psychologist.first_name || ''} ${psychologist.last_name || ''}`.trim() || 'Manual booking', notes: notes || null,
+    });
+    wixMirrorRow.package_session_number = sessionNumber;
+    wixMirrorRow.payload.planSessionNumber = sessionNumber;
+    wixMirrorRow.payload.creditsAvailable = sessionCount;
+    const { error: mirrorErr } = await supabaseAdmin.from('wix_bookings').insert([wixMirrorRow]);
+    if (!mirrorErr) {
+      // Link the session to the mirror only after the mirror row exists (FK constraint).
+      await supabaseAdmin.from('sessions').update({ wix_booking_id: syntheticWixBookingId }).eq('id', session.id);
+      session.wix_booking_id = syntheticWixBookingId;
+    } else {
+      console.warn('[manualPackage] wix mirror insert failed (non-fatal):', mirrorErr.message);
+    }
+  } catch (e) { console.warn('[manualPackage] wix mirror failed (non-fatal):', e.message); }
+
+  // 4. Block the slot in availability
+  try { await availabilityService.updateAvailabilityOnBooking(psychologist.id, scheduledDate, scheduledTime); }
+  catch (e) { console.warn('[manualPackage] availability update failed (non-fatal):', e.message); }
+
+  // 5. Notifications (email + WhatsApp + immediate-reminder check) — fire-and-forget
+  (async () => {
+    const packageInfo = { totalSessions: sessionCount, completedSessions: sessionNumber - 1, remainingSessions: sessionCount - sessionNumber, packageType: sessionType === 'couple' ? `couple_package_${sessionCount}` : `package_${sessionCount}` };
+    try {
+      const emailService = require('../utils/emailService');
+      await emailService.sendSessionConfirmation({
+        clientName, psychologistName, sessionDate: scheduledDate, sessionTime: scheduledTime,
+        sessionDuration: `${durationMinutes} minutes`, clientEmail: clientEmailResolved,
+        psychologistEmail: psychologist.email, googleMeetLink: meetData.meetLink, meetLink: meetData.meetLink,
+        googleCalendarEventId: meetData.eventId, sessionId: session.id, amount: price, price,
+        status: 'booked', psychologistId: psychologist.id, clientId: client.id, packageInfo,
+      });
+    } catch (e) { console.error('[manualPackage] email failed:', e.message); }
+    try {
+      const interaktService = require('../utils/interaktService');
+      const meetOrNull = meetData.meetLink || null;
+      if (client.phone_number) await interaktService.sendBookingConfirmation(client.phone_number, { clientName, psychologistName, date: scheduledDate, time: scheduledTime, meetLink: meetOrNull });
+      if (psychologist.phone) await interaktService.sendSessionNotificationPsychologist(psychologist.phone, { therapistName: psychologistName, clientName, date: scheduledDate, time: scheduledTime, meetLink: meetOrNull });
+    } catch (e) { console.error('[manualPackage] whatsapp failed:', e.message); }
+    try { require('../services/sessionReminderService').checkAndSendReminderForSessionId(session.id).catch(() => {}); } catch {}
+  })();
+
+  return session;
+}
+
+const createManualPackageBooking = async (req, res) => {
+  try {
+    const { client_id, psychologist_id, session_type, schedules, amount, payment_received_date, payment_method, receipt_url, therapist_commission, notes } = req.body;
+
+    if (!client_id || !psychologist_id || !Array.isArray(schedules) || schedules.length === 0 || !amount || !payment_received_date) {
+      return res.status(400).json(errorResponse('Missing required fields: client_id, psychologist_id, schedules[], amount, payment_received_date'));
+    }
+    const selection = normalizeManualSessionSelection(session_type, null);
+    if (!selection.isPackage) return res.status(400).json(errorResponse('session_type must be a package (e.g. package_3, package_6, package_9, couple_package_3)'));
+    const sessionCount = selection.sessionCount;
+    if (schedules.length !== sessionCount) return res.status(400).json(errorResponse(`This package needs ${sessionCount} dates, but ${schedules.length} were provided`));
+
+    const seen = new Set();
+    for (const s of schedules) {
+      if (!s?.date || !s?.time) return res.status(400).json(errorResponse('Every session needs a date and a time'));
+      const k = `${s.date}T${String(s.time).slice(0, 5)}`;
+      if (seen.has(k)) return res.status(400).json(errorResponse('Two sessions are scheduled at the same date & time — pick distinct slots'));
+      seen.add(k);
+    }
+    if (isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) return res.status(400).json(errorResponse('Please enter a valid amount'));
+
+    // Resolve client — the frontend may pass either the clients.id or the user_id,
+    // so fall back to a user_id lookup (mirrors createManualBooking).
+    const CLIENT_SELECT = 'id, first_name, last_name, child_name, phone_number, user_id, user:users(email)';
+    let client = null;
+    {
+      const { data: byId } = await supabaseAdmin.from('clients').select(CLIENT_SELECT).eq('id', client_id).maybeSingle();
+      client = byId || null;
+      if (!client) {
+        const { data: byUser } = await supabaseAdmin.from('clients').select(CLIENT_SELECT).eq('user_id', client_id).maybeSingle();
+        client = byUser || null;
+      }
+    }
+    if (!client) return res.status(404).json(errorResponse(`Client not found with id or user_id: ${client_id}`));
+    const { data: psychologist } = await supabaseAdmin.from('psychologists').select('id, first_name, last_name, email, phone, google_calendar_credentials').eq('id', psychologist_id).single();
+    if (!psychologist) return res.status(404).json(errorResponse('Psychologist not found'));
+
+    // ONE payment for the whole package. Some optional columns (e.g. session_type) may
+    // not exist in every deployment's payments schema — strip & retry on PGRST204.
+    const transactionId = `MANUAL-PKG-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    let paymentInsert = {
+      transaction_id: transactionId, session_id: null, psychologist_id, client_id: client.id, package_id: null,
+      amount, session_type: selection.sessionType, status: 'success',
+      payment_method: (payment_method || 'cash').toLowerCase(),
+      receipt_url: (typeof receipt_url === 'string' && receipt_url.trim()) || null,
+      razorpay_params: { notes: { manual: true, admin_created: true, package_upfront: true, created_by: req.user.id, payment_received_date } },
+      completed_at: payment_received_date, created_at: new Date().toISOString(),
+    };
+    let payment = null;
+    let payErr = null;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      ({ data: payment, error: payErr } = await supabaseAdmin.from('payments').insert(paymentInsert).select().single());
+      if (!payErr || String(payErr.code || '') !== 'PGRST204') break;
+      const missing = String(payErr.message || '').match(/Could not find the '([^']+)' column/)?.[1];
+      if (!missing || !Object.prototype.hasOwnProperty.call(paymentInsert, missing)) break;
+      console.warn(`[createManualPackageBooking] payments missing optional column '${missing}'; retrying without it`);
+      delete paymentInsert[missing];
+    }
+    if (payErr) { console.error('[createManualPackageBooking] payment failed:', payErr); return res.status(500).json(errorResponse('Failed to create payment record')); }
+
+    const { randomUUID } = require('crypto');
+    const packageGroupId = randomUUID();
+    const durationMinutes = getManualSessionDurationMinutes(selection.sessionType, null);
+    const normTime = (t) => { const x = String(t).split('.')[0].trim(); return x.length === 5 ? `${x}:00` : x; };
+
+    const created = [];
+    try {
+      for (let i = 0; i < schedules.length; i++) {
+        const sess = await createOneManualPackageSession({
+          client, psychologist, paymentId: payment.id, packageGroupId,
+          syntheticWixBookingId: `admin_manual_pkg_${Date.now()}_${i + 1}`,
+          sessionType: selection.sessionType, sessionCount, sessionNumber: i + 1,
+          scheduledDate: schedules[i].date, scheduledTime: normTime(schedules[i].time),
+          durationMinutes,
+          // Full package amount lives on session #1; others 0. Finance dedupes by payment_id
+          // so revenue is still counted exactly once for the whole package.
+          price: i === 0 ? amount : 0,
+          therapistCommission: therapist_commission ? parseFloat(therapist_commission) : 0,
+          notes,
+        });
+        created.push({ id: sess.id, session_number: i + 1, scheduled_date: sess.scheduled_date, scheduled_time: sess.scheduled_time });
+      }
+    } catch (loopErr) {
+      console.error('[createManualPackageBooking] session loop error:', loopErr.message);
+      // Partial success is possible; report what was created so admin can finish the rest.
+      return res.status(207).json(errorResponse(`Created ${created.length}/${sessionCount} sessions before an error: ${loopErr.message}`));
+    }
+
+    await supabaseAdmin.from('payments').update({ session_id: created[0]?.id }).eq('id', payment.id);
+    console.log(`✅ [createManualPackageBooking] booked ${created.length} sessions (group ${packageGroupId})`);
+    return res.json(successResponse({ sessions: created, package_group_id: packageGroupId, count: created.length }, `Booked ${created.length} package sessions with calendar + notifications`));
+  } catch (e) {
+    console.error('[createManualPackageBooking]', e);
+    return res.status(500).json(errorResponse(e.message || 'Failed to create package booking'));
+  }
+};
+
 // Create manual booking (admin only - for edge cases)
 // Rebuilt from scratch to match normal booking flow with proper error handling
 const createManualBooking = async (req, res) => {
@@ -4877,6 +5094,7 @@ module.exports = {
   updateSession,
   getPsychologistAvailabilityForReschedule,
   createManualBooking,
+  createManualPackageBooking,
   createRecordOnlyBooking,
   bookPackageNextSession,
   getPackagesWithRemainingSessions,

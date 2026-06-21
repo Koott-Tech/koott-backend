@@ -71,6 +71,7 @@ router.patch('/wix/bookings/:id/cancel-refund', wixBookingsController.cancelRefu
 router.post('/wix/bookings/:id/book-next-session', wixBookingsController.bookWixNextSession);
 router.post('/wix/bookings/:id/transfer', wixBookingsController.transferWixBooking);
 router.post('/wix/bookings/:id/reschedule', wixBookingsController.rescheduleWixBooking);
+router.post('/wix/bookings/:id/cancel-only', wixBookingsController.cancelOnlyWixBooking);
 router.get('/wix/therapists', wixBookingsController.listWixTherapists);
 router.post('/wix/backfill-clients', wixBookingsController.backfillWixClients);
 
@@ -109,6 +110,9 @@ router.get('/psychologists/:psychologistId/availability', adminController.getPsy
 
 // Manual booking (admin only - for edge cases)
 router.post('/bookings/manual', adminController.createManualBooking);
+
+// Manual package booking (admin only): schedule ALL N sessions of a package upfront
+router.post('/bookings/manual-package', adminController.createManualPackageBooking);
 
 // Record-only booking (admin only): add session record only, no Meet creation, no notifications
 router.post('/bookings/record-only', adminController.createRecordOnlyBooking);
