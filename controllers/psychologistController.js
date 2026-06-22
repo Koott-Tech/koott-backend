@@ -1558,7 +1558,11 @@ const completeSession = async (req, res) => {
           console.log(`✅ In-app notification created successfully`);
         }
 
-        // Send session_follow_up_v2 to client via Interakt
+        // ── TEMPORARILY DISABLED: client follow-up WhatsApp on completion ──
+        // No completion message is sent to the client for now (per request).
+        // To re-enable, uncomment the block below.
+        console.log(`⏸️ session_follow_up_v2 to client is temporarily disabled (session ${sessionId})`);
+        /*
         try {
           const interaktService = require('../utils/interaktService');
           const clientPhone = client?.phone_number || null;
@@ -1579,6 +1583,7 @@ const completeSession = async (req, res) => {
         } catch (waError) {
           console.error(`❌ Error sending session_follow_up_v2 for session ${sessionId}:`, waError.message);
         }
+        */
       } catch (notificationError) {
         console.error('Error sending completion notification:', notificationError);
         // Don't fail the request if notification fails
