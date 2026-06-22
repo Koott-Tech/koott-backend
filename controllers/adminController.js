@@ -412,7 +412,9 @@ const createManualPackageBooking = async (req, res) => {
 
     const { randomUUID } = require('crypto');
     const packageGroupId = randomUUID();
-    const durationMinutes = getManualSessionDurationMinutes(selection.sessionType, null);
+    // Optional admin-chosen duration override; else derive from the package type.
+    const reqDur = parseInt(req.body.duration_minutes, 10);
+    const durationMinutes = (Number.isFinite(reqDur) && reqDur > 0) ? reqDur : getManualSessionDurationMinutes(selection.sessionType, null);
     const normTime = (t) => { const x = String(t).split('.')[0].trim(); return x.length === 5 ? `${x}:00` : x; };
 
     const created = [];
@@ -610,6 +612,11 @@ const createManualBooking = async (req, res) => {
     const manualSessionStage = session_stage === 'follow_up' ? 'follow_up' : 'first';
     const manualSessionCount = manualSelection.sessionCount;
     const manualPackageSessionNumber = manualSessionCount > 1 ? (manualSessionStage === 'follow_up' ? 2 : 1) : null;
+    // Optional admin-chosen duration override (e.g. 15 min for psychiatrist). Falls back
+    // to the type/package-derived default when not provided.
+    const requestedDurationMin = parseInt(req.body.duration_minutes, 10);
+    const overrideDurationMin = Number.isFinite(requestedDurationMin) && requestedDurationMin > 0 ? requestedDurationMin : null;
+    const resolveMeetMinutes = () => overrideDurationMin || getManualSessionDurationMinutes(manualSessionType, packageData);
 
     // ============================================
     // STEP 5: MANUAL DATE/TIME ENTRY
@@ -728,7 +735,7 @@ const createManualBooking = async (req, res) => {
     try {
       console.log('🔄 [MANUAL BOOKING] Creating Google Meet link...');
 
-      const manualMeetMinutes = getManualSessionDurationMinutes(manualSessionType, packageData);
+      const manualMeetMinutes = resolveMeetMinutes();
       const clientName = getClientDisplayName(client, 'Client');
       const psychologistName = getPsychologistDisplayName(psychologist);
 
@@ -896,7 +903,7 @@ const createManualBooking = async (req, res) => {
     // STEP 8.5: CREATE WIX DISCOVERY MIRROR ROW
     // ============================================
     try {
-      const manualMeetMinutes = getManualSessionDurationMinutes(manualSessionType, packageData);
+      const manualMeetMinutes = resolveMeetMinutes();
       const syntheticWixBookingId = `admin_manual_${Date.now()}`;
       const wixMirrorRow = buildAdminManualWixMirror({
         syntheticWixBookingId,
@@ -1074,7 +1081,7 @@ const createManualBooking = async (req, res) => {
             packageType: packageData?.package_type || (manualSessionType === 'couple' ? `couple_package_${manualSessionCount}` : `package_${manualSessionCount}`)
           }
         : null;
-      const manualNotifyMeetMinutes = getManualSessionDurationMinutes(manualSessionType, packageData);
+      const manualNotifyMeetMinutes = resolveMeetMinutes();
 
       try {
         // Email notifications

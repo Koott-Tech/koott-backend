@@ -17,8 +17,24 @@ function normalizeName(value) {
     .trim();
 }
 
+// Strip leading honorific titles (Dr/Mr/Mrs/Ms/Miss/Prof/Doctor) so the SAME person
+// matches whether or not the title is present. Titles being baked into names \u2014 and
+// split inconsistently ("Dr." vs "Dr. Gayathri" as first_name) \u2014 is what created
+// duplicate psychologist profiles.
+function stripTitles(value) {
+  let s = normalizeName(value);
+  // remove one or more leading titles, e.g. "Dr. Prof. Jane" \u2192 "Jane"
+  while (true) {
+    const next = s.replace(/^(dr|mr|mrs|ms|miss|prof|doctor)\.?\s+/i, '');
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
+// Title-insensitive, lowercased full name used as the canonical match key.
 function normalizedFullName(firstName, lastName) {
-  return normalizeName([firstName, lastName].filter(Boolean).join(' ')).toLowerCase();
+  return stripTitles([firstName, lastName].filter(Boolean).join(' ')).toLowerCase();
 }
 
 function therapistFromBooking(booking) {
@@ -69,28 +85,28 @@ async function resolveOrCreateWixPsychologist(booking) {
     if (existingByEmail?.[0]?.id) return { psychologistId: existingByEmail[0].id, isNew: false };
   }
 
-  // 2. Try resolving by name (fallback)
+  // 2. Try resolving by name (fallback).
+  // Compare the TITLE-STRIPPED full name against ALL psychologists rather than an exact
+  // first_name query — the previous `ilike('first_name', firstName)` missed the existing
+  // profile whenever the name was stored/split differently (e.g. "Dr. Gayathri" vs "Dr."),
+  // which silently created duplicates. The table is small, so a full scan is cheap.
   const { firstName, lastName } = splitName(rawName);
-  if (firstName) {
-    const targetFullName = normalizedFullName(firstName, lastName);
-    let query = supabaseAdmin
+  const targetFullName = stripTitles(rawName).toLowerCase(); // title-insensitive key
+  if (targetFullName) {
+    const { data: allPsychs } = await supabaseAdmin
       .from('psychologists')
-      .select('id, first_name, last_name')
-      .ilike('first_name', firstName);
-
-    const { data: existingByName } = await query.limit(50);
-    if (existingByName?.length) {
-      const exactMatch = existingByName.find((row) =>
-        normalizedFullName(row.first_name, row.last_name) === targetFullName
+      .select('id, first_name, last_name, email, google_calendar_credentials');
+    const matches = (allPsychs || []).filter((row) =>
+      normalizedFullName(row.first_name, row.last_name) === targetFullName
+    );
+    if (matches.length) {
+      // If a duplicate already exists, prefer the most complete profile (has email,
+      // then a live Google Calendar) so bookings land on the real, calendar-synced one.
+      matches.sort((a, b) =>
+        ((b.email ? 1 : 0) - (a.email ? 1 : 0)) ||
+        ((b.google_calendar_credentials?.access_token ? 1 : 0) - (a.google_calendar_credentials?.access_token ? 1 : 0))
       );
-      if (exactMatch?.id) return { psychologistId: exactMatch.id, isNew: false };
-      if (lastName) {
-        const byLast = existingByName.find((row) =>
-          String(row.last_name || '').trim().toLowerCase() === String(lastName || '').trim().toLowerCase()
-        );
-        if (byLast?.id) return { psychologistId: byLast.id, isNew: false };
-      }
-      if (!lastName && existingByName[0]?.id) return { psychologistId: existingByName[0].id, isNew: false };
+      return { psychologistId: matches[0].id, isNew: false };
     }
   }
 
@@ -121,22 +137,18 @@ async function resolveOrCreateWixPsychologist(booking) {
     .single();
 
   if (error) {
-    // Fetch again just in case
+    // Fetch again just in case (e.g. a concurrent insert) — match on title-stripped full name.
     const { data: retryCheck } = await supabaseAdmin
       .from('psychologists')
-      .select('id, first_name, last_name')
-      .ilike('first_name', firstName)
-      .limit(50);
+      .select('id, first_name, last_name');
 
     if (retryCheck?.length) {
-      const targetFullName = normalizedFullName(firstName, lastName);
       const exactMatch = retryCheck.find((row) =>
         normalizedFullName(row.first_name, row.last_name) === targetFullName
       );
       if (exactMatch?.id) return { psychologistId: exactMatch.id, isNew: false };
-      if (retryCheck[0]?.id) return { psychologistId: retryCheck[0].id, isNew: false };
     }
-    
+
     console.warn('[wixPsychologistResolver] insert failed:', error.message || error);
     return { psychologistId: null, isNew: false };
   }

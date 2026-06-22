@@ -1430,21 +1430,25 @@ const completeSession = async (req, res) => {
     // Use frontend format if provided, otherwise fall back to backend format
     const finalSummary = summary || session_summary;
     const finalNotes = summary_notes || session_notes;
-    const finalReport = report || ''; // Report is optional
+    const finalReport = report || '';
 
-    // Validate required fields
-    if (!finalSummary || finalSummary.trim().length === 0) {
+    // Only the "Message to Team" (report) is required — it's what's sent to operations.
+    // The client-visible summary and therapist notes are optional.
+    if (!finalReport || finalReport.trim().length === 0) {
       return res.status(400).json(
-        errorResponse('Session summary is required')
+        errorResponse('Message to Team (report) is required')
       );
     }
 
     // Prepare update data
     const updateData = {
       status: status,
-      session_summary: finalSummary.trim(),
       updated_at: new Date().toISOString()
     };
+    // Store the client-visible summary only if provided (now optional)
+    if (finalSummary && finalSummary.trim().length > 0) {
+      updateData.session_summary = finalSummary.trim();
+    }
 
     // Add session notes if provided (optional)
     if (finalNotes && finalNotes.trim().length > 0) {
