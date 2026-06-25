@@ -1060,7 +1060,7 @@ async function listWixBookings(req, res) {
     if (wixBookingIds.length > 0) {
       const { data: sessionsData } = await supabaseAdmin
         .from('sessions')
-        .select('id, wix_booking_id, package_id, client_id, psychologist_id, package_session_number, session_count, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link')
+        .select('id, wix_booking_id, package_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link')
         .in('wix_booking_id', wixBookingIds);
       
       if (sessionsData) {
@@ -1133,14 +1133,27 @@ async function listWixBookings(req, res) {
         bookings: dedupedData.map((row) => {
           const linkedSession = sessionMap.get(row.wix_booking_id) || null;
           if (!linkedSession) return row;
+          // The linked session is the source of truth for package-ness. Wix mirrors a package
+          // session as a raw "INDIVIDUAL" booking, so prefer the session's package info when it
+          // indicates a package — otherwise the row shows "Individual" and the package/book-next
+          // logic (which keys on session_type) never fires.
+          const sessionIsPackage =
+            String(linkedSession.session_type || '').toLowerCase() === 'package' ||
+            !!linkedSession.package_id ||
+            (Number(linkedSession.session_count) > 1);
+          const resolvedType = sessionIsPackage ? 'package' : row.session_type;
+          const resolvedCount = sessionIsPackage
+            ? (Number(linkedSession.session_count) > 1 ? linkedSession.session_count : (row.session_count ?? linkedSession.session_count ?? null))
+            : (row.session_count ?? linkedSession.session_count ?? null);
           return {
             ...row,
+            session_type: resolvedType,
             session_id: linkedSession.id || null,
             package_id: linkedSession.package_id || null,
             client_id: linkedSession.client_id || null,
             psychologist_id: linkedSession.psychologist_id || null,
             package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
-            session_count: row.session_count ?? linkedSession.session_count ?? null,
+            session_count: resolvedCount,
             session_status: linkedSession.status || null,
             google_meet_link: linkedSession.google_meet_link || null,
             google_meet_join_url: linkedSession.google_meet_join_url || null,

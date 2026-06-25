@@ -43,7 +43,7 @@ async function processNewWixSessions(wixBookingIds, tempPasswordMap = new Map())
   // where GMeet saved but email/WhatsApp crashed before notifications went out.
   const { data: sessions, error } = await supabaseAdmin
     .from('sessions')
-    .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, notified_at, wix_payload, source, price, amount')
+    .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, google_calendar_event_id, notified_at, wix_payload, source, price, amount')
     .in('wix_booking_id', wixBookingIds)
     .is('notified_at', null)
     .eq('status', 'booked'); // Only notify confirmed bookings — not 'pending' (pre-payment / UNDEFINED from Wix)
@@ -97,7 +97,7 @@ async function processOneSession(session, tempPassword = null) {
     return 'skipped';
   }
 
-  // Already fully processed (double-check in case of concurrent runs)
+  // Already fully processed
   if (session.notified_at) {
     return 'skipped';
   }
@@ -199,12 +199,38 @@ async function processOneSession(session, tempPassword = null) {
     };
   }
 
+  // ── ATOMIC CLAIM ──────────────────────────────────────────────────────
+  // processNewWixSessions runs from several triggers (realtime sync, interval sync,
+  // enrichment). Two near-simultaneous runs both fetched this session with
+  // notified_at = null and each created its own Google Meet event → the client got
+  // TWO calendar invites / Meet links. Claim the session atomically here (after all
+  // the "skip" checks so a transient fetch error can't leave it stuck): conditionally
+  // stamp notified_at only if still null; if another run already claimed it, skip.
+  // (Meet creation below is also guarded by google_calendar_event_id, so a retry
+  // never duplicates the event.)
+  const { data: claimed, error: claimErr } = await supabaseAdmin
+    .from('sessions')
+    .update({ notified_at: new Date().toISOString() })
+    .eq('id', session.id)
+    .is('notified_at', null)
+    .select('id')
+    .maybeSingle();
+  if (claimErr || !claimed) {
+    console.log(`${LOG_PREFIX} session ${session.id} already claimed/processed by a concurrent run — skipping`);
+    return 'skipped';
+  }
+
   let meetResult = { success: false, meetLink: null };
   const masterFallback = process.env.MASTER_FALLBACK_MEET_LINK || 'https://meet.google.com/ovr-qpsi-mwr';
   let finalMeetLink = session.google_meet_link || masterFallback;
 
   if (DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING) {
     console.log(`${LOG_PREFIX} Google Meet auto-scheduling temporarily disabled for session ${session.id}`);
+  } else if (session.google_calendar_event_id) {
+    // IDEMPOTENT: a calendar event already exists for this session — reuse its link,
+    // never create a second one (prevents duplicate Meet links to the client).
+    finalMeetLink = session.google_meet_link || finalMeetLink;
+    console.log(`${LOG_PREFIX} session ${session.id} already has calendar event ${session.google_calendar_event_id} — skipping Meet creation`);
   } else {
     console.log(`${LOG_PREFIX} Processing session ${session.id} for ${clientEmail}...`);
 
@@ -314,7 +340,11 @@ async function processOneSession(session, tempPassword = null) {
 
   } catch (notifyErr) {
     console.error(`${LOG_PREFIX} ❌ notification error for session ${session.id}:`, notifyErr.message || notifyErr);
-    // notified_at NOT set — interval sync will retry this session automatically
+    // Release the claim so a later sync retries notifications. Safe to retry now:
+    // Meet creation is guarded by google_calendar_event_id, so the retry reuses the
+    // existing event instead of creating a duplicate.
+    await supabaseAdmin.from('sessions').update({ notified_at: null }).eq('id', session.id)
+      .then(() => {}, () => {});
   }
 
   return 'processed';
