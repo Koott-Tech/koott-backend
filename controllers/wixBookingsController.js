@@ -2260,6 +2260,7 @@ async function bookWixNextSession(req, res) {
         client_id: linkedSession.client_id,
         psychologist_id: linkedSession.psychologist_id,
         session_type: sessionType,       // same resolved value as mirror row
+        session_count: totalSessions,    // carry the package total so "N/M" renders everywhere
         package_group_id: packageGroupId,
         package_session_number: nextSessionNumber,
         scheduled_date,

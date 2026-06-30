@@ -598,22 +598,38 @@ const getAllSessions = async (req, res) => {
         if (uid) userIds.add(uid);
       }
       if (userIds.size) {
-        const { data: users, error: usersError } = await supabaseAdmin
-          .from('users')
-          .select('id, email')
-          .in('id', [...userIds]);
-        if (!usersError && users) {
-          const emailById = new Map(users.map((u) => [u.id, u.email]));
-          const attach = (s) => {
-            if (s?.client && s.client.user_id) {
-              s.client.user = { email: emailById.get(s.client.user_id) || null };
+        // Resilient lookup: chunk the ids and retry each batch. A single transient
+        // "fetch failed" was dropping ALL client emails for the admin Bookings page.
+        const emailById = new Map();
+        const idList = [...userIds];
+        const CHUNK = 100;
+        for (let i = 0; i < idList.length; i += CHUNK) {
+          const batch = idList.slice(i, i + CHUNK);
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const { data: users, error: usersError } = await supabaseAdmin
+                .from('users')
+                .select('id, email')
+                .in('id', batch);
+              if (usersError) throw usersError;
+              (users || []).forEach((u) => emailById.set(u.id, u.email));
+              break; // batch succeeded
+            } catch (batchErr) {
+              if (attempt === 2) {
+                console.warn(`[getAllSessions] users email lookup failed for a batch (after retries):`, batchErr?.message || batchErr);
+              } else {
+                await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+              }
             }
-          };
-          (sessions || []).forEach(attach);
-          assessmentSessions.forEach(attach);
-        } else if (usersError) {
-          console.warn('[getAllSessions] users email lookup failed:', usersError.message || usersError);
+          }
         }
+        const attach = (s) => {
+          if (s?.client && s.client.user_id) {
+            s.client.user = { email: emailById.get(s.client.user_id) || null };
+          }
+        };
+        (sessions || []).forEach(attach);
+        assessmentSessions.forEach(attach);
       }
     } catch (emailAttachError) {
       console.warn('[getAllSessions] email reattach non-blocking error:', emailAttachError?.message || emailAttachError);
