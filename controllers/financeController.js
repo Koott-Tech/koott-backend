@@ -67,6 +67,33 @@ function subtractMonthsFromIstCalendarYmd(ymdStr, months) {
 }
 
 /**
+ * Clients imported from past contact lists (backdated to 2024-12-31, no password_hash/google_id)
+ * are pre-existing/past clients even though they have no session history in our system. Their
+ * first booking here must NOT be treated as a "first session" for commission purposes — they
+ * should get the follow-up rate. Cutoff is safely before any real signup (earliest real signup
+ * seen is 2026+).
+ */
+const PRE_EXISTING_CLIENT_CUTOFF = '2025-06-01';
+
+/** Returns a Set of client_ids that are pre-existing (imported) clients, given a list of client_ids to check. */
+async function getPreExistingClientIds(clientIds) {
+  const ids = Array.from(new Set((clientIds || []).filter(Boolean)));
+  if (!ids.length) return new Set();
+  const result = new Set();
+  const CHUNK = 500;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const { data } = await supabaseAdmin
+      .from('clients')
+      .select('id, created_at')
+      .in('id', chunk)
+      .lt('created_at', PRE_EXISTING_CLIENT_CUTOFF);
+    (data || []).forEach((c) => result.add(c.id));
+  }
+  return result;
+}
+
+/**
  * Store monthly finance dashboard snapshot
  * @param {Object} snapshotData - Monthly snapshot data
  * @param {Boolean} forceUpdate - If true, update even if locked (default: false)
@@ -1031,6 +1058,16 @@ const getDashboard = async (req, res) => {
               clientFirstSessions.add(sortedSessions[0].id);
             }
           });
+
+          // Pre-existing (imported) clients don't get the first-session rate even
+          // though this is their first session in our system — they're past clients.
+          const preExistingIds = await getPreExistingClientIds(Object.keys(sessionsByClient));
+          if (preExistingIds.size) {
+            Object.entries(sessionsByClient).forEach(([clientId, clientSessions]) => {
+              if (!preExistingIds.has(clientId)) return;
+              clientSessions.forEach(s => clientFirstSessions.delete(s.id));
+            });
+          }
         }
 
         // Build a set of package_ids whose package is the client's first engagement.
@@ -1915,6 +1952,16 @@ const getDoctorPayouts = async (req, res) => {
           clientFirstSessions.add(sortedSessions[0].id);
         }
       });
+
+      // Pre-existing (imported) clients don't get the first-session rate even
+      // though this is their first session in our system — they're past clients.
+      const preExistingIds = await getPreExistingClientIds(Object.keys(sessionsByClient));
+      if (preExistingIds.size) {
+        Object.entries(sessionsByClient).forEach(([clientId, clientSessions]) => {
+          if (!preExistingIds.has(clientId)) return;
+          clientSessions.forEach(s => clientFirstSessions.delete(s.id));
+        });
+      }
     }
 
     const firstPackages = new Set();
@@ -2612,6 +2659,13 @@ const getSessionDetails = async (req, res) => {
         .lt('created_at', session.created_at)
         .limit(1);
       isFirstSession = !earlierSessions?.length;
+
+      // Pre-existing (imported) clients don't get the first-session rate even
+      // though this may be their first session in our system — they're past clients.
+      if (isFirstSession) {
+        const preExistingIds = await getPreExistingClientIds([session.client_id]);
+        if (preExistingIds.has(session.client_id)) isFirstSession = false;
+      }
     }
 
     const sessionAmount = parseFloat(
@@ -3834,10 +3888,15 @@ const getCommissions = async (req, res) => {
     // This ensures e.g. June-booked July-scheduled sessions appear in July's pending from day 1.
     // We exclude future-scheduled sessions (scheduled after view month end) — those belong
     // in the month they're scheduled.
+    //
+    // FINANCE_PENDING_CARRY_FROM: hard cutoff date (IST, YYYY-MM-DD). Sessions booked
+    // before this date are NOT carried forward into pending payout — used when starting
+    // a fresh accounting period (e.g. "2026-07-01" means only July+ sessions carry forward).
+    const pendingCarryFrom = process.env.FINANCE_PENDING_CARRY_FROM || null;
     let allPendingSessions = [];
     if (viewMonthEnd && allPsychologistIds.length > 0) {
       const bookedSessionIds = new Set((allSessions || []).map(s => s.id));
-      const { data: pendingRows } = await supabaseAdmin
+      let pendingQuery = supabaseAdmin
         .from('sessions')
         .select(`id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, completion_date, ${commSessionsBcf} wix_payload, source, package_session_number`)
         .in('status', ['booked', 'rescheduled', 'reschedule_requested'])
@@ -3845,6 +3904,11 @@ const getCommissions = async (req, res) => {
         .neq('session_type', 'free_assessment')
         .in('psychologist_id', allPsychologistIds)
         .lte('scheduled_date', viewMonthEnd); // only sessions scheduled up to end of view month
+      if (pendingCarryFrom) {
+        // Only carry forward sessions booked on or after the cutoff date.
+        pendingQuery = pendingQuery.gte('created_at', `${pendingCarryFrom}T00:00:00+05:30`);
+      }
+      const { data: pendingRows } = await pendingQuery;
       // Only keep sessions NOT already in allSessions (those are handled in the main loop)
       allPendingSessions = (pendingRows || []).filter(s => !bookedSessionIds.has(s.id));
     }
@@ -3962,6 +4026,16 @@ const getCommissions = async (req, res) => {
           clientFirstSessions.add(sortedSessions[0].id);
         }
       });
+
+      // Pre-existing (imported) clients don't get the first-session rate even
+      // though this is their first session in our system — they're past clients.
+      const preExistingIds = await getPreExistingClientIds(Object.keys(sessionsByClient));
+      if (preExistingIds.size) {
+        Object.entries(sessionsByClient).forEach(([clientId, clientSessions]) => {
+          if (!preExistingIds.has(clientId)) return;
+          clientSessions.forEach(s => clientFirstSessions.delete(s.id));
+        });
+      }
     }
 
     const firstPackages = new Set();
@@ -4104,15 +4178,20 @@ const getCommissions = async (req, res) => {
           // Derive session count from packageType (e.g. "package_3") or fallback to 1
           const countMatch = String(packageType).match(/\d+/);
           const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 1;
-          
-          // Split the doctor's commission evenly across all sessions in the package
-          const splitDoctorCommission = totalDoctorPackageCommission / (sessionCount > 0 ? sessionCount : 1);
-          
-          doctorCommission = splitDoctorCommission;
-          
-          // Per-session package math (Doctor gets exactly split amount, Company gets the rest)
-          commissionToCompany = sessionPrice - doctorCommission;
-          toDoctorWallet = doctorCommission;
+          const divisor = sessionCount > 0 ? sessionCount : 1;
+
+          // Split doctor commission evenly across all sessions in the package.
+          // Follow-up sessions have price=0 but still earn their share.
+          toDoctorWallet = Math.round(totalDoctorPackageCommission / divisor);
+
+          // Company commission: use the configured total package commission and split it.
+          // Do NOT derive from sessionPrice — follow-up sessions have price=0 which would
+          // give a negative result. commissionAmounts[packageType] is the total company
+          // cut for the whole package (e.g. commissionAmounts.package_3 = ₹1500).
+          const totalCompanyPackageCommission = toMoneyNumber(
+            commissionAmounts?.[packageType] || commissionAmounts?.package || 0
+          );
+          commissionToCompany = Math.round(totalCompanyPackageCommission / divisor);
         } else {
           // Individual/couple session
           const isCoupleSession = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
@@ -4166,8 +4245,13 @@ const getCommissions = async (req, res) => {
         statsByPsych[s.psychologist_id].completed_sessions += 1;
         statsByPsych[s.psychologist_id].completed_payout += toDoctorWallet;
       } else if (!isCompleted && !isCancelledOrRefunded) {
-        statsByPsych[s.psychologist_id].pending_sessions += 1;
-        statsByPsych[s.psychologist_id].pending_payout += toDoctorWallet;
+        // Respect the pending carry-from cutoff: sessions booked before the cutoff date
+        // are excluded from pending payout (used to start a fresh accounting period).
+        const sessionCreatedYmd = String(s.created_at || '').slice(0, 10);
+        if (!pendingCarryFrom || sessionCreatedYmd >= pendingCarryFrom) {
+          statsByPsych[s.psychologist_id].pending_sessions += 1;
+          statsByPsych[s.psychologist_id].pending_payout += toDoctorWallet;
+        }
       }
       // If isCompleted but NOT this view month: session appears in revenue (booked this month)
       // but NOT in pending or completed — it will appear in the completion month's completed_payout

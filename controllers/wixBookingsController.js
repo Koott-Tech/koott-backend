@@ -1752,8 +1752,10 @@ async function editWixBooking(req, res) {
         sessionUpdates.amount = safeUpdates.price;
       }
       if (safeUpdates.start_time) {
-        sessionUpdates.scheduled_date = safeUpdates.start_time.split('T')[0];
-        sessionUpdates.scheduled_time = safeUpdates.start_time.split('T')[1]?.split('.')[0];
+        // start_time is UTC ISO — convert to IST before extracting date/time for sessions table.
+        const startIST = new Date(new Date(safeUpdates.start_time).getTime() + IST_OFFSET_MS).toISOString();
+        sessionUpdates.scheduled_date = startIST.slice(0, 10);
+        sessionUpdates.scheduled_time = startIST.slice(11, 19);
       }
       await supabaseAdmin.from('sessions').update(sessionUpdates).eq('wix_booking_id', data.wix_booking_id);
     }

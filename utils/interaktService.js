@@ -408,25 +408,24 @@ async function sendSessionFollowUp(toPhone, details) {
  *
  * Template: sessionreminderautomatic
  * Variables (in order, 4 total):
- *   {{1}} = recipient name (client or therapist receiving the reminder)
- *   {{2}} = other party name
- *   {{3}} = meet link
- *   {{4}} = time-to-start text (e.g. "30 minutes", "1 hour")
+ *   {{1}} = client name
+ *   {{2}} = scheduled time (e.g. "3:00 PM")
+ *   {{3}} = therapist name
+ *   {{4}} = meet link (join here)
  *
  * @param {string} toPhone
  * @param {object} details
- *   - recipientName, otherPartyName, meetLink
- *   - timeToStart (optional, default "30 minutes")
+ *   - clientName, scheduledTime, psychologistName, meetLink
  */
 async function sendSessionReminder(toPhone, details) {
-  const { recipientName, otherPartyName, meetLink, timeToStart } = details || {};
+  const { clientName, scheduledTime, psychologistName, meetLink } = details || {};
   const link = meetLink || 'Link will be shared shortly';
   return sendTemplateWithRetry(toPhone, TEMPLATES.SESSION_REMINDER, 'en', {
     bodyValues: [
-      (recipientName || '').trim() || 'there',
-      (otherPartyName || '').trim() || 'our team',
+      (clientName || '').trim() || 'there',
+      (scheduledTime || '').trim() || '',
+      (psychologistName || '').trim() || 'our team',
       link,
-      (timeToStart || '').trim() || '30 minutes',
     ],
     callbackData: 'session_reminder',
   });

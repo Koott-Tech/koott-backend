@@ -236,7 +236,15 @@ class SessionReminderService {
 
       // Send reminder to CLIENT ONLY via Interakt `sessionreminderautomatic` template.
       // Therapists do not receive automatic reminders (per product spec).
-      const meetLink = session.google_meet_link || null;
+
+      // Re-fetch the meet link fresh from DB right before sending — the link may have been
+      // created after the initial batch-fetch (e.g. wixMeetNotifyService runs concurrently).
+      const { data: freshRow } = await supabaseAdmin
+        .from('sessions')
+        .select('google_meet_link')
+        .eq('id', session.id)
+        .single();
+      const meetLink = freshRow?.google_meet_link || session.google_meet_link || null;
 
       // Compute time-to-start label based on actual time until session
       const minsUntil = sessionDateTime.diff(dayjs().tz('Asia/Kolkata'), 'minute');
@@ -250,10 +258,10 @@ class SessionReminderService {
       if (client.phone_number) {
         try {
           const result = await interaktService.sendSessionReminder(client.phone_number, {
-            recipientName: clientName,
-            otherPartyName: psychologistName,
+            clientName,
+            scheduledTime: formattedTime,
+            psychologistName,
             meetLink,
-            timeToStart,
           });
           if (result?.success) {
             console.log(`✅ sessionreminderautomatic sent to client for session ${session.id}`);
