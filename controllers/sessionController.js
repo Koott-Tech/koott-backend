@@ -7,7 +7,7 @@ const {
   addMinutesToTime
 } = require('../utils/helpers');
 const { getSessionBookingCreatedAtIso } = require('../utils/sessionBookingCreatedAt');
-const { getBookingTimeColumnKey, appendBookingTimeSelectFragment } = require('../utils/sessionsBookingTimeColumn');
+const { getBookingTimeColumnKey, appendBookingTimeSelectFragment, hasOriginalPsychologistColumn } = require('../utils/sessionsBookingTimeColumn');
 const { createRealMeetLink } = require('../utils/meetEventHelper'); // Use real Meet link creation
 const meetLinkService = require('../utils/meetLinkService'); // New Meet Link Service
 const emailService = require('../utils/emailService');
@@ -763,6 +763,30 @@ const getAllSessions = async (req, res) => {
       }
     } catch (commEx) {
       console.warn('[getAllSessions] commission attach non-blocking:', commEx?.message || commEx);
+    }
+
+    // Resolve original_psychologist_id -> name for sessions that were transferred,
+    // so View Details can show "Transferred From Dr. X To Dr. Y".
+    try {
+      const transferredIds = Array.from(new Set(
+        paginatedSessions
+          .filter((s) => s.original_psychologist_id && s.original_psychologist_id !== s.psychologist_id)
+          .map((s) => s.original_psychologist_id)
+      ));
+      if (transferredIds.length) {
+        const { data: origPsychs } = await supabaseAdmin
+          .from('psychologists')
+          .select('id, first_name, last_name')
+          .in('id', transferredIds);
+        const nameMap = new Map((origPsychs || []).map((p) => [p.id, `${p.first_name || ''} ${p.last_name || ''}`.trim()]));
+        for (const s of paginatedSessions) {
+          if (s.original_psychologist_id && s.original_psychologist_id !== s.psychologist_id) {
+            s.original_therapist_name = nameMap.get(s.original_psychologist_id) || null;
+          }
+        }
+      }
+    } catch (origPsychEx) {
+      console.warn('[getAllSessions] original therapist name attach non-blocking:', origPsychEx?.message || origPsychEx);
     }
 
     console.log('Pagination summary:', {
@@ -2482,13 +2506,14 @@ async function transferSession(req, res) {
     }
 
     // ── 1. Fetch session + old psychologist creds ────────────────────────────
+    const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
     const { data: session, error: fetchErr } = await supabaseAdmin
       .from('sessions')
       .select(`
         id, status, psychologist_id, client_id, session_type, package_id,
         scheduled_date, scheduled_time,
         google_calendar_event_id, google_meet_link, google_meet_join_url,
-        google_meet_start_url, google_calendar_link,
+        google_meet_start_url, google_calendar_link${hasOrigPsychCol ? ', original_psychologist_id' : ''},
         client:clients(id, first_name, last_name, child_name, phone_number, user:users(email)),
         psychologist:psychologists(id, first_name, last_name, email, google_calendar_credentials)
       `)
@@ -2614,6 +2639,11 @@ async function transferSession(req, res) {
     if (!new_date && !new_time) {
       updates.scheduled_date = formatDate(session.scheduled_date);
       updates.scheduled_time = formatTime(session.scheduled_time);
+    }
+    // Preserve the ORIGINAL (pre-transfer) therapist so View Details can show
+    // "Transferred From Dr. X To Dr. Y" — never overwrite once already set.
+    if (hasOrigPsychCol && !session.original_psychologist_id) {
+      updates.original_psychologist_id = session.psychologist_id;
     }
 
     const { data: updatedSession, error: updateErr } = await supabaseAdmin

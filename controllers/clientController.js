@@ -2145,7 +2145,8 @@ const rescheduleSession = async (req, res) => {
       .single();
 
     // Update session with new date/time (Meet link will be added later in background)
-    // Do NOT update original_scheduled_date — it stays as the first scheduled date forever
+    // Do NOT overwrite original_scheduled_date/time if already set — it stays as the
+    // first scheduled date/time forever, so View Details can show "was X, now Y".
     const updateData = {
       scheduled_date: formatDate(new_date),
       scheduled_time: formatTime(new_time),
@@ -2154,6 +2155,8 @@ const rescheduleSession = async (req, res) => {
       reminder_sent: false, // Reset reminder flag when rescheduled
       updated_at: new Date().toISOString()
     };
+    if (!session.original_scheduled_date) updateData.original_scheduled_date = session.scheduled_date;
+    if (!session.original_scheduled_time) updateData.original_scheduled_time = session.scheduled_time;
 
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
     const { data: updatedSession, error: updateError } = await supabaseAdmin

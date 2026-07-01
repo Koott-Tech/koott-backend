@@ -28,7 +28,28 @@ function appendBookingTimeSelectFragment(col) {
   return col === 'booking_created_at' ? 'booking_created_at,' : '';
 }
 
+/**
+ * Whether sessions.original_psychologist_id exists (post-migration
+ * 20260701120000_session_original_psychologist.sql). Probed once and cached.
+ */
+let cachedHasOriginalPsych = null;
+
+async function hasOriginalPsychologistColumn(supabaseAdmin) {
+  if (cachedHasOriginalPsych != null) return cachedHasOriginalPsych;
+  const { error } = await supabaseAdmin.from('sessions').select('original_psychologist_id').limit(1);
+  if (error?.code === '42703' || String(error?.message || '').includes('does not exist')) {
+    cachedHasOriginalPsych = false;
+    console.warn(
+      '[sessions] column original_psychologist_id is missing — "Transferred From" will not persist. Apply supabase migration 20260701120000_session_original_psychologist.sql.'
+    );
+    return cachedHasOriginalPsych;
+  }
+  cachedHasOriginalPsych = !error;
+  return cachedHasOriginalPsych;
+}
+
 module.exports = {
   getBookingTimeColumnKey,
   appendBookingTimeSelectFragment,
+  hasOriginalPsychologistColumn,
 };

@@ -1,5 +1,5 @@
 const { supabaseAdmin } = require('../config/supabase');
-const { getBookingTimeColumnKey } = require('../utils/sessionsBookingTimeColumn');
+const { getBookingTimeColumnKey, hasOriginalPsychologistColumn } = require('../utils/sessionsBookingTimeColumn');
 const meetLinkService = require('../utils/meetLinkService');
 const googleCalendarService = require('../utils/googleCalendarService');
 const { fetchWixDiscover, extractBookingsList } = require('../utils/wixDiscoverClient');
@@ -1057,16 +1057,32 @@ async function listWixBookings(req, res) {
     // Manually fetch session IDs to avoid missing FK relationship error
     const wixBookingIds = bookingsData.map(b => b.wix_booking_id).filter(Boolean);
     let sessionMap = new Map();
+    let origPsychNameMap = new Map();
     if (wixBookingIds.length > 0) {
+      const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
       const { data: sessionsData } = await supabaseAdmin
         .from('sessions')
-        .select('id, wix_booking_id, package_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link')
+        .select(`id, wix_booking_id, package_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
         .in('wix_booking_id', wixBookingIds);
-      
+
       if (sessionsData) {
         sessionsData.forEach(s => {
           sessionMap.set(s.wix_booking_id, s);
         });
+      }
+
+      // Resolve original_psychologist_id -> name for sessions that were transferred.
+      const origPsychIds = Array.from(new Set(
+        (sessionsData || [])
+          .filter(s => s.original_psychologist_id && s.original_psychologist_id !== s.psychologist_id)
+          .map(s => s.original_psychologist_id)
+      ));
+      if (origPsychIds.length) {
+        const { data: origPsychs } = await supabaseAdmin
+          .from('psychologists')
+          .select('id, first_name, last_name')
+          .in('id', origPsychIds);
+        (origPsychs || []).forEach(p => origPsychNameMap.set(p.id, `${p.first_name || ''} ${p.last_name || ''}`.trim()));
       }
     }
 
@@ -1159,6 +1175,16 @@ async function listWixBookings(req, res) {
             google_meet_join_url: linkedSession.google_meet_join_url || null,
             google_meet_start_url: linkedSession.google_meet_start_url || null,
             google_calendar_link: linkedSession.google_calendar_link || null,
+            // Original (pre-reschedule) date/time, so View Details can show "was X, now Y".
+            // Only meaningful if it differs from the current scheduled date/time.
+            original_scheduled_date: linkedSession.original_scheduled_date || null,
+            original_scheduled_time: linkedSession.original_scheduled_time || null,
+            // Original (pre-transfer) therapist, so View Details can show
+            // "Transferred From Dr. X To Dr. Y". Only set when it differs from current.
+            original_psychologist_id: (linkedSession.original_psychologist_id && linkedSession.original_psychologist_id !== linkedSession.psychologist_id)
+              ? linkedSession.original_psychologist_id : null,
+            original_therapist_name: (linkedSession.original_psychologist_id && linkedSession.original_psychologist_id !== linkedSession.psychologist_id)
+              ? (origPsychNameMap.get(linkedSession.original_psychologist_id) || null) : null,
           };
         }),
         pagination: {
@@ -1939,15 +1965,27 @@ async function cancelRefundWixBooking(req, res) {
   try {
     const { id } = req.params;
 
-    // 1. Fetch the wix_booking row (need wix_booking_id + calendar info + client/therapist details for emails)
+    // 1. Fetch the wix_booking row (only real columns — wix_bookings has NO psychologist_id
+    //    or google_* columns; those live on the linked sessions row, fetched separately below).
     const { data: booking, error: fetchErr } = await supabaseAdmin
       .from('wix_bookings')
-      .select('id, wix_booking_id, psychologist_id, google_calendar_event_id, status, client_full_name, client_first_name, client_email, therapist_name, start_time')
+      .select('id, wix_booking_id, status, client_full_name, client_first_name, client_email, therapist_name, start_time')
       .eq('id', id)
       .single();
 
     if (fetchErr || !booking) {
       return res.status(404).json({ success: false, error: 'Wix booking not found' });
+    }
+
+    // 1b. Fetch the linked platform session (source of psychologist + calendar data)
+    let linkedSession = null;
+    if (booking.wix_booking_id) {
+      const { data } = await supabaseAdmin
+        .from('sessions')
+        .select('id, psychologist_id, google_calendar_event_id')
+        .eq('wix_booking_id', booking.wix_booking_id)
+        .maybeSingle();
+      linkedSession = data || null;
     }
 
     // 2. Update wix_bookings → cancelled (no locally_modified — terminal status protects from sync)
@@ -1964,7 +2002,7 @@ async function cancelRefundWixBooking(req, res) {
         .from('sessions')
         .update({ status: 'refunded' })
         .eq('wix_booking_id', booking.wix_booking_id)
-        .select('id, psychologist_id, google_calendar_event_id, google_calendar_credentials_snapshot')
+        .select('id, psychologist_id, google_calendar_event_id')
         .single();
       sessionRow = sess || null;
     }
@@ -1983,13 +2021,14 @@ async function cancelRefundWixBooking(req, res) {
         const clientEmail = booking.client_email || null;
         const clientName = booking.client_full_name || booking.client_first_name || 'Client';
         const psychologistName = booking.therapist_name || 'Therapist';
-        // Pull therapist email by id
+        // Pull therapist email by id (psychologist_id lives on the linked session, not wix_bookings)
         let psychEmail = null;
-        if (booking.psychologist_id) {
+        const psychId = linkedSession?.psychologist_id || null;
+        if (psychId) {
           const { data: psych } = await supabaseAdmin
             .from('psychologists')
             .select('email')
-            .eq('id', booking.psychologist_id)
+            .eq('id', psychId)
             .single();
           psychEmail = psych?.email || null;
         }
@@ -2030,7 +2069,7 @@ async function cancelRefundWixBooking(req, res) {
     return res.json({
       success: true,
       message: 'Booking cancelled and marked as refunded. Calendar event removed. Emails sent.',
-      data: { wix_booking_id: booking.wix_booking_id, calendarEventRemoved: !!calEventId },
+      data: { wix_booking_id: booking.wix_booking_id, calendarEventRemoved: !!sessionRow?.google_calendar_event_id },
     });
   } catch (e) {
     console.error('[cancelRefundWixBooking]', e);
@@ -2346,11 +2385,12 @@ async function transferWixBooking(req, res) {
     }
 
     // 3. Fetch the linked platform session (source of old psychologist + calendar/meet data)
+    const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
     let linkedSession = null;
     if (booking.wix_booking_id) {
       const { data } = await supabaseAdmin
         .from('sessions')
-        .select('id, psychologist_id, google_calendar_event_id, google_meet_link')
+        .select(`id, psychologist_id, google_calendar_event_id, google_meet_link${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
         .eq('wix_booking_id', booking.wix_booking_id)
         .maybeSingle();
       linkedSession = data || null;
@@ -2481,6 +2521,11 @@ async function transferWixBooking(req, res) {
         const t = String(new_time).split('.')[0].trim();
         sessionUpdates.scheduled_time = t.length === 5 ? `${t}:00` : t;
       }
+      // Preserve the ORIGINAL (pre-transfer) therapist so View Details can show
+      // "Transferred From Dr. X To Dr. Y" — never overwrite once already set.
+      if (hasOrigPsychCol && !linkedSession.original_psychologist_id) {
+        sessionUpdates.original_psychologist_id = linkedSession.psychologist_id;
+      }
       await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
     }
 
@@ -2582,7 +2627,7 @@ async function rescheduleWixBooking(req, res) {
     if (booking.wix_booking_id) {
       const { data } = await supabaseAdmin
         .from('sessions')
-        .select('id, psychologist_id, google_calendar_event_id, google_meet_link')
+        .select('id, psychologist_id, google_calendar_event_id, google_meet_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time')
         .eq('wix_booking_id', booking.wix_booking_id)
         .maybeSingle();
       linkedSession = data || null;
@@ -2748,6 +2793,10 @@ async function rescheduleWixBooking(req, res) {
         locally_modified: true,
         updated_at: new Date().toISOString(),
       };
+      // Preserve the ORIGINAL scheduled date/time (before this reschedule) so View
+      // Details can show "was X, now Y" — never overwrite once already set.
+      if (!linkedSession.original_scheduled_date) sessionUpdates.original_scheduled_date = linkedSession.scheduled_date;
+      if (!linkedSession.original_scheduled_time) sessionUpdates.original_scheduled_time = linkedSession.scheduled_time;
       // Only overwrite meet/calendar fields if we successfully created a new event;
       // otherwise keep the existing ones so the session isn't left without a link.
       if (newMeetData.eventId) sessionUpdates.google_calendar_event_id = newMeetData.eventId;
