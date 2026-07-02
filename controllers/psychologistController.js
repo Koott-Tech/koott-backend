@@ -495,9 +495,14 @@ const updateSession = async (req, res) => {
     };
 
     // Remove undefined values
-    Object.keys(allowedUpdates).forEach(key => 
+    Object.keys(allowedUpdates).forEach(key =>
       allowedUpdates[key] === undefined && delete allowedUpdates[key]
     );
+
+    // Stamp completion_date when marking completed (finance Doctors page filters by it).
+    if (allowedUpdates.status === 'completed' && !session.completion_date) {
+      allowedUpdates.completion_date = new Date().toISOString();
+    }
 
     const { data: updatedSession, error } = await supabaseAdmin
       .from('sessions')
@@ -1445,6 +1450,12 @@ const completeSession = async (req, res) => {
       status: status,
       updated_at: new Date().toISOString()
     };
+    // Stamp completion_date when marking completed — the finance Doctors page filters
+    // completed sessions/payouts by completion_date, so a NULL here makes completed
+    // sessions vanish from that page's "Completed" and "Completed Payout" totals.
+    if (status === 'completed') {
+      updateData.completion_date = new Date().toISOString();
+    }
     // Store the client-visible summary only if provided (now optional)
     if (finalSummary && finalSummary.trim().length > 0) {
       updateData.session_summary = finalSummary.trim();

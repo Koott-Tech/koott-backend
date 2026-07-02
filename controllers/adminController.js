@@ -2272,13 +2272,19 @@ const createPsychologist = async (req, res) => {
 
     const isPsychiatrist = (designation || '').toLowerCase().includes('psychiatrist');
 
-    let individualSessionPrice = price ? parseInt(price, 10) : null;
-
-    if (!individualSessionPrice || individualSessionPrice <= 0) {
-      console.error('❌ Error: Individual session price is required and must be positive');
-      return res.status(400).json(
-        errorResponse('Individual session price is required. Please provide a valid price.')
-      );
+    // Price is OPTIONAL when creating a doctor — only name, email and phone are required.
+    // If provided it must be a positive number; if omitted it defaults to 0 (unset) and the
+    // admin can set the real price later via edit. Defaulting to 0 (not null) avoids any
+    // NOT NULL constraint on psychologists.individual_session_price / packages.price.
+    let individualSessionPrice = 0;
+    if (price !== undefined && price !== null && String(price).trim() !== '') {
+      const parsedPrice = parseInt(price, 10);
+      if (Number.isNaN(parsedPrice) || parsedPrice < 0) {
+        return res.status(400).json(
+          errorResponse('If provided, individual session price must be a valid non-negative number.')
+        );
+      }
+      individualSessionPrice = parsedPrice;
     }
 
     const specialistCategoryValue =
@@ -2286,39 +2292,31 @@ const createPsychologist = async (req, res) => {
         ? specialist_category
         : null;
 
-    // Create psychologist directly in psychologists table (standalone) - after validation passes
+    // Create psychologist directly in psychologists table (standalone) - after validation passes.
+    // NOTE: only insert columns that actually exist on the psychologists table. Individual
+    // session price is NOT a column here — it's stored on the linked `packages` row below.
+    // Optional fields (college/faq/personality/display_order/psychiatrist pricing/etc.) are
+    // not columns on this table and are intentionally omitted.
+    const psychInsert = {
+      email,
+      password_hash: hashedPassword,
+      first_name,
+      last_name,
+      phone,
+      area_of_expertise: area_of_expertise || null,
+      description: description || null,
+      designation: designation?.trim() || null,
+      experience_years: experience_years || 0,
+      cover_image_url: cover_image_url || null,
+    };
+    // child_specialist_pricing exists on the table — include it only when provided.
+    if (child_specialist_pricing != null) {
+      psychInsert.child_specialist_pricing = child_specialist_pricing;
+    }
+
     const { data: psychologist, error: psychologistError } = await supabaseAdmin
       .from('psychologists')
-      .insert([{
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        phone,
-        ug_college,
-        pg_college,
-        mphil_college,
-        phd_college,
-        area_of_expertise,
-        personality_traits, // NEW
-        description,
-        designation: designation?.trim() || null,
-        experience_years: experience_years || 0,
-        individual_session_price: individualSessionPrice,
-        psychiatrist_15min_price: psychiatrist_15min_price ? parseInt(psychiatrist_15min_price) : null,
-        psychiatrist_30min_price: psychiatrist_30min_price ? parseInt(psychiatrist_30min_price) : null,
-        cover_image_url: cover_image_url || null,
-        display_order: display_order ? parseInt(display_order) : null,
-        faq_question_1: faq_question_1 || null,
-        faq_answer_1: faq_answer_1 || null,
-        faq_question_2: faq_question_2 || null,
-        faq_answer_2: faq_answer_2 || null,
-        faq_question_3: faq_question_3 || null,
-        faq_answer_3: faq_answer_3 || null,
-        specialist_category: specialistCategoryValue,
-        better_parent_pricing: better_parent_pricing != null ? better_parent_pricing : null,
-        active: true // New psychologists are active by default
-      }])
+      .insert([psychInsert])
       .select('*')
       .single();
 
@@ -2335,6 +2333,7 @@ const createPsychologist = async (req, res) => {
       );
     }
 
+    // NOTE: packages table has no discount_percentage column — do not insert it.
     const individualSession = {
       psychologist_id: psychologist.id,
       package_type: 'individual',
@@ -2342,7 +2341,6 @@ const createPsychologist = async (req, res) => {
       description: 'One therapy session',
       session_count: 1,
       price: individualSessionPrice,
-      discount_percentage: 0
     };
 
     const { error: individualSessionError } = await supabaseAdmin
@@ -2373,6 +2371,7 @@ const createPsychologist = async (req, res) => {
       try {
         console.log('📦 Creating custom packages:', packages);
         
+        // NOTE: packages table has no discount_percentage column — do not insert it.
         const packageData = packages.map(pkg => ({
           psychologist_id: psychologist.id,
           package_type: pkg.package_type || `package_${pkg.session_count}`,
@@ -2380,7 +2379,6 @@ const createPsychologist = async (req, res) => {
           description: pkg.description || `${pkg.session_count} therapy sessions${pkg.discount_percentage > 0 ? ` with ${pkg.discount_percentage}% discount` : ''}`,
           session_count: pkg.session_count,
           price: pkg.price,
-          discount_percentage: pkg.discount_percentage || 0
         }));
 
         const { error: packagesError } = await supabaseAdmin

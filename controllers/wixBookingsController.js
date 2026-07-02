@@ -1380,6 +1380,10 @@ async function listWixTherapists(req, res) {
         ? Math.min(500000, maxBookingsParsed)
         : null;
 
+    // Optional date range (IST calendar YYYY-MM-DD) — same semantics as the Bookings page:
+    // include therapists whose bookings fall in the range by session start_time OR booking created_at.
+    const { dateFrom, dateTo } = req.query;
+
     const summary = new Map();
     let bookingsScanned = 0;
     let bookingRowsWithNoTherapistIdentity = 0;
@@ -1392,11 +1396,20 @@ async function listWixTherapists(req, res) {
 
       const pageEnd = offset + remainingBudget - 1;
 
-      const { data: rows, error } = await supabaseAdmin
+      let q = supabaseAdmin
         .from('wix_bookings')
         .select('therapist_name,created_at,payload')
-        .order('id', { ascending: true })
-        .range(offset, pageEnd);
+        .order('id', { ascending: true });
+      if (dateFrom && dateTo) {
+        q = q.or(
+          `and(start_time.gte.${dateFrom}T00:00:00.000+05:30,start_time.lte.${dateTo}T23:59:59.999+05:30),` +
+          `and(created_at.gte.${dateFrom}T00:00:00.000+05:30,created_at.lte.${dateTo}T23:59:59.999+05:30)`
+        );
+      } else {
+        if (dateFrom) q = q.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
+        if (dateTo) q = q.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+      }
+      const { data: rows, error } = await q.range(offset, pageEnd);
 
       if (error) {
         return res.status(500).json({ success: false, error: error.message || 'Failed to read wix_bookings' });
@@ -1860,11 +1873,12 @@ async function completeWixBooking(req, res) {
       return res.status(404).json({ success: false, error: 'Wix booking not found' });
     }
 
-    // Mirror to sessions (no locally_modified — terminal status protects from sync)
+    // Mirror to sessions (no locally_modified — terminal status protects from sync).
+    // Stamp completion_date so the finance Doctors page (which filters by it) counts it.
     if (data.wix_booking_id) {
       await supabaseAdmin
         .from('sessions')
-        .update({ status: 'completed' })
+        .update({ status: 'completed', completion_date: new Date().toISOString() })
         .eq('wix_booking_id', data.wix_booking_id);
     }
 
