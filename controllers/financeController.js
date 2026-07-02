@@ -2520,7 +2520,7 @@ const getSessionDetails = async (req, res) => {
       .from('sessions')
       .select(`
         *,
-        psychologist:psychologists(*),
+        psychologist:psychologists!sessions_psychologist_id_fkey(*),
         client:clients(
           id,
           first_name,
@@ -2915,7 +2915,7 @@ const getRevenue = async (req, res) => {
         psychologist_id,
         status,
         session_type,
-        psychologist:psychologists(id, first_name, last_name)
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name)
       `)
       .eq('status', 'completed')
       .neq('session_type', 'free_assessment');
@@ -4888,7 +4888,7 @@ const getPendingPayouts = async (req, res) => {
         status,
         payment_id,
         price,
-        psychologist:psychologists(id, first_name, last_name, email, phone, cover_image_url)
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
       `)
       .eq('status', 'completed')
       .gte('updated_at', rangeStartTs)
@@ -4912,7 +4912,7 @@ const getPendingPayouts = async (req, res) => {
           status,
           payment_id,
           price,
-          psychologist:psychologists(id, first_name, last_name, email, phone)
+          psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
         .gte('updated_at', rangeStartTs)
@@ -4937,7 +4937,7 @@ const getPendingPayouts = async (req, res) => {
           status,
           payment_id,
           price,
-          psychologist:psychologists(id, first_name, last_name, email, phone)
+          psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
         .gte('scheduled_date', monthStart)
@@ -5424,7 +5424,7 @@ const markPayoutAsPaid = async (req, res) => {
         status,
         payment_id,
         price,
-        psychologist:psychologists(id, first_name, last_name, email, phone, cover_image_url)
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
       `)
       .eq('status', 'completed')
       .eq('psychologist_id', psychologist_id)
@@ -5443,7 +5443,7 @@ const markPayoutAsPaid = async (req, res) => {
           status,
           payment_id,
           price,
-          psychologist:psychologists(id, first_name, last_name, email, phone)
+          psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
         .eq('psychologist_id', psychologist_id)
@@ -6356,7 +6356,7 @@ const getPayouts = async (req, res) => {
       .from('payouts')
       .select(`
         *,
-        psychologist:psychologists(id, first_name, last_name)
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name)
       `, { count: 'exact' })
       .order('payout_date', { ascending: false });
 
@@ -6424,7 +6424,7 @@ const getPayoutDetails = async (req, res) => {
       .from('payouts')
       .select(`
         *,
-        psychologist:psychologists(id, first_name, last_name, email, phone)
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
       `)
       .eq('id', payoutId)
       .single();

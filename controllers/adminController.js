@@ -1190,7 +1190,7 @@ const createManualBooking = async (req, res) => {
           phone_number,
           user:users(email)
         ),
-        psychologist:psychologists(
+        psychologist:psychologists!sessions_psychologist_id_fkey(
           id,
           first_name,
           last_name,
@@ -1551,7 +1551,7 @@ const createRecordOnlyBooking = async (req, res) => {
       .select(`
         *,
         client:clients(id, first_name, last_name, child_name, phone_number, user:users(email)),
-        psychologist:psychologists(id, first_name, last_name, email),
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email),
         package:packages(*)
       `)
       .eq('id', session.id)
@@ -3494,7 +3494,7 @@ const updateSession = async (req, res) => {
       .from('sessions')
       .select(`
         *,
-        psychologist:psychologists(id, first_name, last_name, email, phone),
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone),
         client:clients(id, first_name, last_name, child_name, phone_number)
       `)
       .eq('id', sessionId)
@@ -3788,7 +3788,7 @@ const updateSession = async (req, res) => {
     // the whole reschedule/update flow.
     const sessionSelect = `
       *,
-      psychologist:psychologists(id, first_name, last_name, email, phone),
+      psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone),
       client:clients(id, first_name, last_name, child_name, phone_number)
     `;
     let updatedSession = null;
@@ -4257,7 +4257,7 @@ const getRescheduleRequests = async (req, res) => {
             *,
             user:users(email)
           ),
-          psychologist:psychologists(*)
+          psychologist:psychologists!sessions_psychologist_id_fkey(*)
         `)
         .in('id', sessionIds);
       if (sessionsError) {
@@ -4523,18 +4523,14 @@ const bookPackageNextSession = async (req, res) => {
 
       const consumedSessions = completedCheck + bookedCheck;
       const remainingSessions = Math.max(totalCheck - consumedSessions, 0);
+      // client_packages only has these columns — psychologist_id/package_type/total_sessions/
+      // total_amount/amount_paid/purchased_at/first_session_id do NOT exist on this table.
+      // That info is derived from the joined `packages` row (pkgRow) elsewhere instead.
       const clientPackagePayload = {
         client_id,
-        psychologist_id: pkgRow.psychologist_id,
         package_id,
-        package_type: pkgRow.package_type,
-        total_sessions: totalCheck,
         remaining_sessions: remainingSessions,
-        total_amount: 0,
-        amount_paid: 0,
         status: remainingSessions > 0 ? 'active' : 'completed',
-        purchased_at: new Date().toISOString(),
-        first_session_id: null
       };
 
       const { data: inserted, error: insertErr } = await supabaseAdmin
@@ -4625,7 +4621,12 @@ const bookPackageNextSession = async (req, res) => {
       );
     }
 
+    // Next session number = all existing non-cancelled sessions in this package + 1.
+    // (completedCount + bookedCount were computed above from packageSessions.)
+    const nextSessionNumber = completedCount + bookedCount + 1;
+
     const fallbackMeetLink = 'https://meet.google.com/new?hs=122&authuser=0';
+    const nowIso = new Date().toISOString();
     const sessionData = {
       client_id,
       psychologist_id: psychologistId,
@@ -4633,11 +4634,18 @@ const bookPackageNextSession = async (req, res) => {
       scheduled_date: formattedDate,
       scheduled_time: formattedTime,
       status: 'booked',
+      // Package metadata so the row shows as "Package (n/total)" and book-next gating works.
+      session_type: 'package',
+      session_count: totalSessionsCount,
+      package_session_number: nextSessionNumber,
       google_calendar_event_id: null,
       google_meet_link: fallbackMeetLink,
       google_calendar_link: null,
       price: 0,
-      original_scheduled_date: formattedDate
+      original_scheduled_date: formattedDate,
+      // booking_created_at MUST be set — the admin sessions list filters the "All" tab by this
+      // column, and a NULL value would silently hide the row from the bookings page.
+      booking_created_at: nowIso,
     };
 
     const { data: session, error: sessionError } = await supabaseAdmin
@@ -4686,6 +4694,8 @@ const bookPackageNextSession = async (req, res) => {
     setImmediate(async () => {
       try {
         const meetLinkService = require('../utils/meetLinkService');
+        const emailService = require('../utils/emailService');
+        const interaktService = require('../utils/interaktService');
         const { data: clientDetails } = await supabaseAdmin
           .from('clients')
           .select('first_name, last_name, child_name, phone_number, user:users(email)')
@@ -4751,7 +4761,34 @@ const bookPackageNextSession = async (req, res) => {
           packageType: clientPackage.package?.package_type || null
         };
 
-        console.log('ℹ️ [BOOK PACKAGE NEXT] Notifications temporarily disabled (email + WhatsApp)');
+        // Notifications: email + WhatsApp to BOTH client and therapist (same as manual booking).
+        // Only send the real Meet link — never the fallback placeholder.
+        try {
+          await emailService.sendSessionConfirmation({
+            clientName, psychologistName,
+            sessionDate: scheduled_date, sessionTime: scheduled_time,
+            sessionDuration: `${nextPkgMeetMinutes} minutes`,
+            clientEmail: clientEmail || undefined,
+            psychologistEmail: psychologistDetails?.email || undefined,
+            googleMeetLink: effectiveMeetLink, meetLink: effectiveMeetLink,
+            googleCalendarEventId: meetResult?.eventId || null,
+            sessionId: session.id, amount: 0, price: 0,
+            status: 'booked', psychologistId, clientId: client_id, packageInfo,
+          });
+        } catch (e) { console.error('[BOOK PACKAGE NEXT] email failed:', e.message); }
+
+        try {
+          if (clientDetails?.phone_number) {
+            await interaktService.sendBookingConfirmation(clientDetails.phone_number, {
+              clientName, psychologistName, date: scheduled_date, time: scheduled_time, meetLink: effectiveMeetLink,
+            });
+          }
+          if (psychologistDetails?.phone) {
+            await interaktService.sendSessionNotificationPsychologist(psychologistDetails.phone, {
+              therapistName: psychologistName, clientName, date: scheduled_date, time: scheduled_time, meetLink: effectiveMeetLink,
+            });
+          }
+        } catch (e) { console.error('[BOOK PACKAGE NEXT] whatsapp failed:', e.message); }
 
         try {
           const sessionReminderService = require('../services/sessionReminderService');

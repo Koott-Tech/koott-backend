@@ -410,7 +410,7 @@ const getReceiptByOrderId = async (req, res) => {
           scheduled_date,
           scheduled_time,
           status,
-          psychologist:psychologists(
+          psychologist:psychologists!sessions_psychologist_id_fkey(
             id,
             first_name,
             last_name

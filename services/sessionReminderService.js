@@ -255,6 +255,11 @@ class SessionReminderService {
       else if (minsUntil <= 105) timeToStart = '1.5 hours';
       else timeToStart = '2 hours';
 
+      // Track whether the WhatsApp reminder actually went out. If it did NOT, we must
+      // revert reminder_sent → false so the next hourly run retries — otherwise a single
+      // transient failure (Interakt hiccup, missing phone, etc.) means the client never
+      // gets a reminder at all.
+      let reminderDelivered = false;
       if (client.phone_number) {
         try {
           const result = await interaktService.sendSessionReminder(client.phone_number, {
@@ -264,6 +269,7 @@ class SessionReminderService {
             meetLink,
           });
           if (result?.success) {
+            reminderDelivered = true;
             console.log(`✅ sessionreminderautomatic sent to client for session ${session.id}`);
           } else {
             console.warn(`⚠️  Failed to send reminder to client for session ${session.id}:`, result?.error || result?.reason);
@@ -275,8 +281,19 @@ class SessionReminderService {
         console.log(`ℹ️  No phone number for client in session ${session.id}`);
       }
 
-      // Note: reminder_sent was already set to true at the start of this function (atomic lock)
-      // This ensures no duplicate reminders are sent even if multiple cron jobs run concurrently
+      // If the reminder did NOT go out, release the lock (reminder_sent → false) so a
+      // later cron tick can retry while the session is still inside the 2-hour window.
+      if (!reminderDelivered) {
+        await supabaseAdmin
+          .from('sessions')
+          .update({ reminder_sent: false })
+          .eq('id', session.id);
+        console.log(`↩️  Reverted reminder_sent for session ${session.id} — will retry next run.`);
+        return;
+      }
+
+      // reminder_sent was set to true at the start (atomic lock) and the send succeeded,
+      // so it stays true — no duplicate reminders even if multiple cron jobs run concurrently.
 
       // Create in-app notification for the client only
       await supabaseAdmin

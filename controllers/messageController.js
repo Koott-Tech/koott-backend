@@ -56,7 +56,7 @@ const getConversations = async (req, res) => {
         .from('conversations')
         .select(`
           *,
-          psychologist:psychologists(first_name, last_name, email, cover_image_url),
+          psychologist:psychologists!sessions_psychologist_id_fkey(first_name, last_name, email, cover_image_url),
           session:sessions(scheduled_date, scheduled_time, status),
           messages:messages(count)
         `)

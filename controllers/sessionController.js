@@ -443,7 +443,7 @@ const getAllSessions = async (req, res) => {
           child_age,
           phone_number
         ),
-        psychologist:psychologists(
+        psychologist:psychologists!sessions_psychologist_id_fkey(
           id,
           first_name,
           last_name,
@@ -832,7 +832,7 @@ const getClientSessions = async (req, res) => {
       .from('sessions')
       .select(`
         *,
-        psychologist:psychologists(
+        psychologist:psychologists!sessions_psychologist_id_fkey(
           id,
           first_name,
           last_name,
@@ -976,7 +976,7 @@ const getSessionById = async (req, res) => {
             email
           )
         ),
-        psychologist:psychologists(
+        psychologist:psychologists!sessions_psychologist_id_fkey(
           id,
           first_name,
           last_name,
@@ -1011,7 +1011,7 @@ const getSessionById = async (req, res) => {
               email
             )
           ),
-          psychologist:psychologists(
+          psychologist:psychologists!sessions_psychologist_id_fkey(
             id,
             first_name,
             last_name,
@@ -1185,7 +1185,7 @@ const updateSessionStatus = async (req, res) => {
           phone_number,
           email
         ),
-        psychologist:psychologists(
+        psychologist:psychologists!sessions_psychologist_id_fkey(
           id,
           first_name,
           last_name,
@@ -1500,7 +1500,7 @@ const searchSessions = async (req, res) => {
           last_name,
           child_name
         ),
-        psychologist:psychologists(
+        psychologist:psychologists!sessions_psychologist_id_fkey(
           id,
           first_name,
           last_name,
@@ -2306,7 +2306,7 @@ const markSessionAsNoShow = async (req, res) => {
           phone_number,
           user:users(email)
         ),
-        psychologist:psychologists(
+        psychologist:psychologists!sessions_psychologist_id_fkey(
           id,
           first_name,
           last_name,
@@ -2368,7 +2368,7 @@ const markSessionAsNoShow = async (req, res) => {
           phone_number,
           user:users(email)
         ),
-        psychologist:psychologists(
+        psychologist:psychologists!sessions_psychologist_id_fkey(
           id,
           first_name,
           last_name,
@@ -2454,7 +2454,7 @@ const getRescheduleRequests = async (req, res) => {
       // Get session details
       const { data: session } = await supabaseAdmin
         .from('sessions')
-        .select('*, client:clients(*), psychologist:psychologists(*)')
+        .select('*, client:clients(*), psychologist:psychologists!sessions_psychologist_id_fkey(*)')
         .eq('id', sessionId)
         .eq('psychologist_id', psychologistId) // Only sessions for this psychologist
         .single();
@@ -2515,7 +2515,7 @@ async function transferSession(req, res) {
         google_calendar_event_id, google_meet_link, google_meet_join_url,
         google_meet_start_url, google_calendar_link${hasOrigPsychCol ? ', original_psychologist_id' : ''},
         client:clients(id, first_name, last_name, child_name, phone_number, user:users(email)),
-        psychologist:psychologists(id, first_name, last_name, email, google_calendar_credentials)
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, google_calendar_credentials)
       `)
       .eq('id', sessionId)
       .single();
@@ -2761,7 +2761,7 @@ async function cancelRefundSession(req, res) {
         id, status, psychologist_id, client_id, wix_booking_id,
         scheduled_date, scheduled_time, google_calendar_event_id,
         client:clients(id, first_name, last_name, child_name, user:users(email)),
-        psychologist:psychologists(id, first_name, last_name, email, google_calendar_credentials)
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, google_calendar_credentials)
       `)
       .eq('id', sessionId)
       .single();
