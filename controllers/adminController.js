@@ -4569,12 +4569,18 @@ const bookPackageNextSession = async (req, res) => {
       return res.status(400).json(errorResponse('Package has no psychologist'));
     }
 
-    // Compute remaining sessions to book (same logic as client bookRemainingSession)
+    // Compute remaining sessions to book (same logic as client bookRemainingSession).
+    // Also read package_group_id so the new session joins the SAME group as its siblings —
+    // otherwise "Book Next" gating (which keys on the group) breaks and the option keeps
+    // showing on earlier sessions of the package.
     const { data: packageSessions } = await supabaseAdmin
       .from('sessions')
-      .select('id, status')
+      .select('id, status, package_group_id')
       .eq('package_id', clientPackage.package.id)
       .eq('client_id', client_id);
+
+    // Inherit the package group id from any existing session in this package.
+    const inheritedGroupId = (packageSessions || []).find(s => s.package_group_id)?.package_group_id || null;
 
     let completedCount = 0;
     let bookedCount = 0;
@@ -4636,6 +4642,9 @@ const bookPackageNextSession = async (req, res) => {
       session_type: 'package',
       session_count: totalSessionsCount,
       package_session_number: nextSessionNumber,
+      // Join the same group as the package's other sessions so "Book Next" only shows on
+      // the latest one (not on every earlier session).
+      package_group_id: inheritedGroupId,
       google_calendar_event_id: null,
       google_meet_link: fallbackMeetLink,
       google_calendar_link: null,
