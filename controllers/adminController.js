@@ -1588,13 +1588,12 @@ const getAllUsers = async (req, res) => {
   try {
     const { page = 1, limit = 50, role, search } = req.query;
     const offset = (page - 1) * limit;
-    
-    // For clients, we need to join with the clients table to get name information
-    if (role === 'client') {
-      // Query clients table first, then fetch user emails separately (no FK embed)
-      let query = supabaseAdmin
-        .from('clients')
-        .select(`
+
+    // Light mode: skip the expensive `count: 'exact'` (which scans every matching row —
+    // ~400ms on 13k+ clients). Callers that only need the rows (e.g. the manual-booking
+    // client-search dropdown) pass ?light=1 and get a ~7x faster response.
+    const lightMode = req.query.light === '1' || req.query.light === 'true' || req.query.count === 'none';
+    const clientSelectCols = `
           id,
           first_name,
           last_name,
@@ -1603,7 +1602,14 @@ const getAllUsers = async (req, res) => {
           child_age,
           created_at,
           user_id
-        `, { count: 'exact' });
+        `;
+
+    // For clients, we need to join with the clients table to get name information
+    if (role === 'client') {
+      // Query clients table first, then fetch user emails separately (no FK embed)
+      let query = lightMode
+        ? supabaseAdmin.from('clients').select(clientSelectCols)
+        : supabaseAdmin.from('clients').select(clientSelectCols, { count: 'exact' });
 
       if (search) {
         const escapedSearch = escapeLike(search);
@@ -3480,7 +3486,11 @@ const updateSession = async (req, res) => {
       transaction_id,
       razorpay_order_id,
       razorpay_payment_id,
-      notify_doctor
+      notify_doctor,
+      // No-show reschedule fee (only present when rescheduling a no-show session).
+      noshow_fee_amount,
+      noshow_fee_method,
+      noshow_fee_receipt_url,
     } = req.body;
 
     if (!sessionId) {
@@ -3822,6 +3832,20 @@ const updateSession = async (req, res) => {
     if (updateError) {
       console.error('Error updating session:', updateError);
       return res.status(500).json(errorResponse('Failed to update session'));
+    }
+
+    // No-show reschedule fee: record the additional payment collected before rescheduling
+    // a no-show session (client's mistake → they pay a top-up). Only fires when provided.
+    if (noshow_fee_amount) {
+      const { recordNoShowRescheduleFee } = require('../utils/noShowRescheduleFee');
+      await recordNoShowRescheduleFee({
+        sessionId,
+        clientId: updatedSession?.client_id || currentSession.client_id,
+        psychologistId: updatedSession?.psychologist_id || currentSession.psychologist_id,
+        amount: noshow_fee_amount,
+        method: noshow_fee_method,
+        receiptUrl: noshow_fee_receipt_url,
+      });
     }
 
     if (updatedSession?.wix_booking_id) {

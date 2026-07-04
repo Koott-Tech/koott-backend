@@ -32,9 +32,15 @@ function stripTitles(value) {
   return s;
 }
 
-// Title-insensitive, lowercased full name used as the canonical match key.
+// Title-insensitive, lowercased, WHITESPACE-STRIPPED full name used as the canonical match
+// key. Removing all spaces means initials variants collapse to the same key — e.g.
+// "Rajina RS" and "Rajina R S" both become "rajinars" — so a differently-spaced Wix name
+// still matches the existing profile instead of silently creating a duplicate.
+function nameMatchKey(value) {
+  return stripTitles(value).toLowerCase().replace(/\s+/g, '');
+}
 function normalizedFullName(firstName, lastName) {
-  return stripTitles([firstName, lastName].filter(Boolean).join(' ')).toLowerCase();
+  return nameMatchKey([firstName, lastName].filter(Boolean).join(' '));
 }
 
 function therapistFromBooking(booking) {
@@ -91,7 +97,7 @@ async function resolveOrCreateWixPsychologist(booking) {
   // profile whenever the name was stored/split differently (e.g. "Dr. Gayathri" vs "Dr."),
   // which silently created duplicates. The table is small, so a full scan is cheap.
   const { firstName, lastName } = splitName(rawName);
-  const targetFullName = stripTitles(rawName).toLowerCase(); // title-insensitive key
+  const targetFullName = nameMatchKey(rawName); // title- and whitespace-insensitive key
   if (targetFullName) {
     const { data: allPsychs } = await supabaseAdmin
       .from('psychologists')

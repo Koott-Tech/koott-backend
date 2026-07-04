@@ -1755,7 +1755,15 @@ async function editWixBooking(req, res) {
     // Sanitise: only allow editing columns that actually exist on wix_bookings.
     // NOTE: wix_bookings has NO `notes` column — notes are mirrored to the linked
     // sessions row instead (see below), so it is intentionally excluded here.
-    const allowed = ['status', 'title', 'start_time', 'end_time', 'price', 'currency', 'therapist_name'];
+    // Client fields here are a PER-BOOKING snapshot (not the shared clients/users record),
+    // so editing them only corrects this one booking's details — safe to allow directly.
+    // psychologist/therapist reassignment and start_time/date changes are intentionally
+    // NOT exposed for silent editing here — those require moving the Google Calendar
+    // event too, which only the dedicated Transfer / Reschedule actions do correctly.
+    const allowed = [
+      'status', 'title', 'price', 'currency',
+      'client_full_name', 'client_first_name', 'client_last_name', 'client_email', 'client_phone',
+    ];
     const safeUpdates = {};
     for (const key of allowed) {
       if (updates[key] !== undefined) safeUpdates[key] = updates[key];
@@ -2641,7 +2649,7 @@ async function rescheduleWixBooking(req, res) {
     if (booking.wix_booking_id) {
       const { data } = await supabaseAdmin
         .from('sessions')
-        .select('id, psychologist_id, google_calendar_event_id, google_meet_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time')
+        .select('id, client_id, psychologist_id, google_calendar_event_id, google_meet_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time')
         .eq('wix_booking_id', booking.wix_booking_id)
         .maybeSingle();
       linkedSession = data || null;
@@ -2823,6 +2831,19 @@ async function rescheduleWixBooking(req, res) {
       await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
     }
     console.log('✅ [rescheduleWixBooking] booking + session updated:', booking.id);
+
+    // 8b. If this was a NO-SHOW reschedule, record the additional payment collected.
+    if (linkedSession?.id && req.body.noshow_fee_amount) {
+      const { recordNoShowRescheduleFee } = require('../utils/noShowRescheduleFee');
+      await recordNoShowRescheduleFee({
+        sessionId: linkedSession.id,
+        clientId: linkedSession.client_id,
+        psychologistId: linkedSession.psychologist_id,
+        amount: req.body.noshow_fee_amount,
+        method: req.body.noshow_fee_method,
+        receiptUrl: req.body.noshow_fee_receipt_url,
+      });
+    }
 
     // 9. Notify client + therapist (email + WhatsApp) — non-fatal, fire-and-forget
     (async () => {
