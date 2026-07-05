@@ -116,6 +116,8 @@ router.post('/bookings/manual-package', adminController.createManualPackageBooki
 
 // Record-only booking (admin only): add session record only, no Meet creation, no notifications
 router.post('/bookings/record-only', adminController.createRecordOnlyBooking);
+// Record-only PACKAGE (admin only): record N already-happened sessions of a package, rest bookable later
+router.post('/bookings/record-only-package', adminController.createRecordOnlyPackage);
 
 // Book next package session (admin only - for clients who prefer admin to book remaining sessions)
 router.post('/bookings/book-package-next-session', adminController.bookPackageNextSession);

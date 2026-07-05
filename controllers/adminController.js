@@ -449,6 +449,176 @@ const createManualPackageBooking = async (req, res) => {
   }
 };
 
+/**
+ * POST /admin/bookings/record-only-package
+ * Record several ALREADY-HAPPENED sessions of a package that were never in our system
+ * (e.g. a 6-session package where 3 were completed offline). Creates N session records with
+ * proper package linkage (package_id, package_group_id, session_count) and leaves the rest
+ * (total − N) bookable normally later via "Book Next Session".
+ *
+ * NO Google Calendar events, NO Meet links, NO notifications — pure records.
+ *
+ * Body: {
+ *   client_id, psychologist_id, session_type ('package'|'couple'),
+ *   total_sessions (number — the full package size),
+ *   total_amount (whole package price — recorded on session #1; the rest are ₹0),
+ *   payment_method, receipt_url, payment_received_date, notes,
+ *   records: [{ scheduled_date, scheduled_time, status }]   // one per session being recorded
+ * }
+ */
+const createRecordOnlyPackage = async (req, res) => {
+  try {
+    const {
+      client_id, psychologist_id, session_type,
+      total_sessions, total_amount,
+      payment_method, receipt_url, payment_screenshot_url, payment_received_date,
+      notes, records,
+    } = req.body;
+
+    const totalSessions = parseInt(total_sessions, 10);
+    if (!client_id || !psychologist_id) {
+      return res.status(400).json(errorResponse('client_id and psychologist_id are required'));
+    }
+    if (!Number.isFinite(totalSessions) || totalSessions < 1) {
+      return res.status(400).json(errorResponse('total_sessions must be a positive whole number'));
+    }
+    if (!Array.isArray(records) || records.length === 0) {
+      return res.status(400).json(errorResponse('At least one session record is required'));
+    }
+    if (records.length > totalSessions) {
+      return res.status(400).json(errorResponse(`Cannot record ${records.length} sessions — the package only has ${totalSessions}`));
+    }
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    const timePattern = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
+    for (const [i, r] of records.entries()) {
+      if (!datePattern.test(String(r.scheduled_date || ''))) {
+        return res.status(400).json(errorResponse(`Record ${i + 1}: invalid date (expected YYYY-MM-DD)`));
+      }
+      const t = String(r.scheduled_time || '').trim().split(':').slice(0, 2).join(':');
+      if (!timePattern.test(t)) {
+        return res.status(400).json(errorResponse(`Record ${i + 1}: invalid time (expected HH:MM)`));
+      }
+    }
+
+    // Resolve client (by id or user_id).
+    const clientIdForQuery = isNaN(client_id) ? client_id : parseInt(client_id);
+    let { data: client } = await supabaseAdmin.from('clients').select('*, user:users(email)').eq('id', clientIdForQuery).single();
+    if (!client) {
+      const { data: byUser } = await supabaseAdmin.from('clients').select('*, user:users(email)').eq('user_id', clientIdForQuery).single();
+      client = byUser || null;
+    }
+    if (!client) return res.status(404).json(errorResponse(`Client not found: ${client_id}`));
+
+    const { data: psychologist } = await supabaseAdmin.from('psychologists').select('id, first_name, last_name, email').eq('id', psychologist_id).single();
+    if (!psychologist) return res.status(404).json(errorResponse('Psychologist not found'));
+
+    // Find or create the packages row for this therapist at this size (no discount_percentage column).
+    const isCouple = String(session_type || '').toLowerCase().includes('couple');
+    const packageType = isCouple ? `couple_package_${totalSessions}` : `package_${totalSessions}`;
+    let packageId = null;
+    const { data: existingPkg } = await supabaseAdmin
+      .from('packages')
+      .select('id')
+      .eq('psychologist_id', psychologist_id)
+      .eq('package_type', packageType)
+      .eq('session_count', totalSessions)
+      .maybeSingle();
+    if (existingPkg?.id) {
+      packageId = existingPkg.id;
+    } else {
+      const { data: newPkg, error: pkgErr } = await supabaseAdmin.from('packages').insert([{
+        psychologist_id, package_type: packageType,
+        name: `${totalSessions} Session ${isCouple ? 'Couple ' : ''}Package`,
+        description: `${totalSessions} therapy sessions`,
+        session_count: totalSessions,
+        price: Number(total_amount) || 0,
+      }]).select('id').single();
+      if (pkgErr) return res.status(500).json(errorResponse('Failed to create package: ' + pkgErr.message));
+      packageId = newPkg.id;
+    }
+
+    const crypto = require('crypto');
+    const groupId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    const normalizedMethod = (payment_method || 'cash').toLowerCase();
+    const normalizedReceipt = (typeof receipt_url === 'string' && receipt_url.trim())
+      || (typeof payment_screenshot_url === 'string' && payment_screenshot_url.trim()) || null;
+    const paidDate = payment_received_date || nowIso.slice(0, 10);
+    const totalAmt = Number(total_amount) || 0;
+
+    // One payment record for the whole package (attached to session #1 below).
+    // NOTE: payments has no transaction_id / session_type columns — the record id goes in
+    // provider_payment_id and razorpay_params.notes instead.
+    const { data: payment } = await supabaseAdmin.from('payments').insert({
+      session_id: null, psychologist_id, client_id: client.id, package_id: packageId,
+      amount: totalAmt, currency: 'INR', status: 'success',
+      provider: 'manual',
+      provider_payment_id: `RECORDPKG-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      payment_method: normalizedMethod, receipt_url: normalizedReceipt,
+      completed_at: paidDate, created_at: nowIso,
+      razorpay_params: { notes: { record_only: true, package_record: true, admin_created: true, created_by: req.user?.id } },
+    }).select('id').single();
+
+    const allowed = ['booked', 'completed', 'cancelled', 'no_show', 'rescheduled'];
+    const created = [];
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      const num = i + 1;
+      const time = String(r.scheduled_time).trim().split(':').slice(0, 2).join(':') + ':00';
+      const status = allowed.includes(String(r.status || '').toLowerCase()) ? String(r.status).toLowerCase() : 'completed';
+      const row = {
+        client_id: client.id,
+        psychologist_id,
+        package_id: packageId,
+        package_group_id: groupId,
+        package_session_number: num,
+        session_count: totalSessions,
+        session_type: isCouple ? 'couple' : 'package',
+        status,
+        scheduled_date: r.scheduled_date,
+        scheduled_time: time,
+        original_scheduled_date: r.scheduled_date,
+        // Whole package price sits on session #1; the rest are ₹0 (normal package accounting).
+        price: num === 1 ? totalAmt : 0,
+        payment_id: num === 1 ? payment?.id || null : null,
+        source: 'admin_manual',
+        session_notes: notes || null,
+        booking_created_at: nowIso,
+        created_at: nowIso,
+        updated_at: nowIso,
+      };
+      // Completed records need completion_date so finance counts them.
+      if (status === 'completed') row.completion_date = r.scheduled_date;
+      const { data: sess, error: sErr } = await supabaseAdmin.from('sessions').insert([row]).select('id, package_session_number, scheduled_date, status').single();
+      if (sErr) {
+        console.error('[createRecordOnlyPackage] session insert failed:', sErr.message);
+        return res.status(500).json(errorResponse(`Failed to create record ${num}: ${sErr.message}`));
+      }
+      created.push(sess);
+      if (num === 1 && payment?.id) {
+        await supabaseAdmin.from('payments').update({ session_id: sess.id }).eq('id', payment.id);
+      }
+    }
+
+    // client_packages: remaining = total − recorded, so "Book Next Session" continues from here.
+    const remaining = Math.max(totalSessions - records.length, 0);
+    await supabaseAdmin.from('client_packages').insert([{
+      client_id: client.id, package_id: packageId,
+      remaining_sessions: remaining,
+      status: remaining > 0 ? 'active' : 'completed',
+    }]).select('id').maybeSingle().then(() => {}).catch(() => {});
+
+    return res.json(successResponse({
+      package_id: packageId, package_group_id: groupId,
+      recorded: created.length, total: totalSessions, remaining,
+      sessions: created,
+    }, `Recorded ${created.length} of ${totalSessions} package sessions. ${remaining} remaining to book.`));
+  } catch (e) {
+    console.error('[createRecordOnlyPackage]', e);
+    return res.status(500).json(errorResponse(e.message || 'Failed to record package sessions'));
+  }
+};
+
 // Create manual booking (admin only - for edge cases)
 // Rebuilt from scratch to match normal booking flow with proper error handling
 const createManualBooking = async (req, res) => {
@@ -5171,6 +5341,7 @@ module.exports = {
   createManualBooking,
   createManualPackageBooking,
   createRecordOnlyBooking,
+  createRecordOnlyPackage,
   bookPackageNextSession,
   getPackagesWithRemainingSessions,
   getRescheduleRequests,

@@ -63,11 +63,11 @@ async function processCandidates(candidates) {
         .order('scheduled_date', { ascending: false })
         .limit(1);
 
-      let parentId = parents?.[0]?.id ?? null;
+      let parent = parents?.[0] ?? null;
 
       // Fallback: any non-zero paid session by same pair, even session_count = 1.
       // Covers cases where session_count wasn't extracted from the title.
-      if (!parentId) {
+      if (!parent) {
         const { data: fallback } = await supabaseAdmin
           .from('sessions')
           .select('id, session_count, scheduled_date')
@@ -79,32 +79,39 @@ async function processCandidates(candidates) {
           .order('scheduled_date', { ascending: false })
           .limit(1);
 
-        parentId = fallback?.[0]?.id ?? null;
+        parent = fallback?.[0] ?? null;
       }
 
+      const parentId = parent?.id ?? null;
       if (!parentId) {
         console.log(`${LOG_PREFIX} no parent found for session ${session.id} (client=${session.client_id}, psych=${session.psychologist_id})`);
         continue;
       }
 
+      // Copy the parent's session_count onto the follow-up. This is CRITICAL: finance splits
+      // the package doctor fee by session_count, so a NULL count on a follow-up defaults to 1
+      // and massively over-credits it. Follow-ups must inherit the package total.
+      const childUpdate = { package_group_id: parentId, session_type: 'package' };
+      if (parent.session_count && parent.session_count > 1) {
+        childUpdate.session_count = parent.session_count;
+      }
       const { error: updateError } = await supabaseAdmin
         .from('sessions')
-        .update({
-          package_group_id: parentId,
-          session_type: 'package',
-        })
+        .update(childUpdate)
         .eq('id', session.id);
 
       if (updateError) {
         throw new Error(updateError.message);
       }
 
-      // Ensure the parent is also marked as package type
+      // Ensure the parent is marked as package type AND carries its own group id, so the
+      // parent and its follow-ups all share one package_group_id (otherwise the parent stays
+      // null-grouped and finance/book-next treat it as a separate one-off).
       await supabaseAdmin
         .from('sessions')
-        .update({ session_type: 'package' })
+        .update({ session_type: 'package', package_group_id: parentId })
         .eq('id', parentId)
-        .neq('session_type', 'package');
+        .is('package_group_id', null);
 
       console.log(`${LOG_PREFIX} linked session ${session.id} → parent ${parentId}`);
       linked++;
