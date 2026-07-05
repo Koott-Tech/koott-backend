@@ -1157,7 +1157,10 @@ async function listWixBookings(req, res) {
             String(linkedSession.session_type || '').toLowerCase() === 'package' ||
             !!linkedSession.package_id ||
             (Number(linkedSession.session_count) > 1);
-          const resolvedType = sessionIsPackage ? 'package' : row.session_type;
+          // A COUPLE package must stay 'couple' (with its count) — forcing it to 'package'
+          // here made the display show "Package (1/3)" instead of "Couple Package (1/3)".
+          const linkedIsCouple = String(linkedSession.session_type || '').toLowerCase() === 'couple';
+          const resolvedType = linkedIsCouple ? 'couple' : (sessionIsPackage ? 'package' : row.session_type);
           const resolvedCount = sessionIsPackage
             ? (Number(linkedSession.session_count) > 1 ? linkedSession.session_count : (row.session_count ?? linkedSession.session_count ?? null))
             : (row.session_count ?? linkedSession.session_count ?? null);

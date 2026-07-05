@@ -3822,7 +3822,7 @@ const getCommissions = async (req, res) => {
     // This ensures: Completed + Pending = Total (always consistent)
     // ─────────────────────────────────────────────────────────────────────────
 
-    const sessionSelectFields = `id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, completion_date, ${commSessionsBcf} wix_payload, source, package_session_number`;
+    const sessionSelectFields = `id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, completion_date, ${commSessionsBcf} wix_payload, source, package_session_number, session_count`;
 
     // Derive view-month IST date boundaries
     let viewMonthStart = null;
@@ -4131,10 +4131,10 @@ const getCommissions = async (req, res) => {
             }
           }
           
-          // Derive session count from packageType (e.g. "package_3") or fallback to 1
+          // Derive session count from packageType (e.g. "package_3") or fallback to 3
           const countMatch = String(packageType).match(/\d+/);
-          const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 1;
-          const divisor = sessionCount > 0 ? sessionCount : 1;
+          const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 3;
+          const divisor = sessionCount > 0 ? sessionCount : 3;
 
           // Split doctor commission evenly across all sessions in the package.
           // Follow-up sessions have price=0 but still earn their share.
@@ -4808,6 +4808,7 @@ const getPendingPayouts = async (req, res) => {
         status,
         payment_id,
         price,
+        session_count,
         psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
       `)
       .eq('status', 'completed')
@@ -4832,6 +4833,7 @@ const getPendingPayouts = async (req, res) => {
           status,
           payment_id,
           price,
+          session_count,
           psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
@@ -4857,6 +4859,7 @@ const getPendingPayouts = async (req, res) => {
           status,
           payment_id,
           price,
+          session_count,
           psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
@@ -5051,24 +5054,32 @@ const getPendingPayouts = async (req, res) => {
       if (!commission && sessionPriceMap[session.id] !== undefined) {
         const sessionAmount = sessionPriceMap[session.id];
         const cfg = commissionConfigMap[psychId] || {};
-        const isPackage = !!session.package_id;
+        const isPackage = !!session.package_id || String(session.session_type || '').toLowerCase().includes('package');
         const isInitialPackageSession = isPackage && ((parseInt(session.package_session_number, 10) || 0) === 1);
+
+        // Derive divisor for package sessions
+        const packageType = session.session_count ? `package_${session.session_count}` : 'package';
+        const countMatch = String(packageType).match(/\d+/);
+        const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 3;
+        const divisor = sessionCount > 0 ? sessionCount : 3;
 
         // If exact first/follow-up cannot be determined for individual fallback, prefer first-session commission.
         let doctorCommission = 0;
         if (isPackage) {
-          doctorCommission = isInitialPackageSession
+          const totalDocPkg = isInitialPackageSession
             ? (parseFloat(cfg.doctor_commission_first_session_package || 0) || 0)
             : (parseFloat(cfg.doctor_commission_followup_package || 0) || 0);
+          doctorCommission = Math.round(totalDocPkg / divisor);
         } else {
           doctorCommission = parseFloat(cfg.doctor_commission_first_session || cfg.doctor_commission_followup || 0) || 0;
         }
 
         if (!doctorCommission || doctorCommission <= 0) {
           const amountConfig = cfg.commission_amounts && typeof cfg.commission_amounts === 'object' ? cfg.commission_amounts : null;
-          const companyCommissionFallback = isPackage
-            ? parseFloat(amountConfig?.package ?? cfg.commission_amount_package ?? 0) || 0
+          const companyCommissionFallbackTotal = isPackage
+            ? parseFloat(amountConfig?.[packageType] ?? amountConfig?.package ?? cfg.commission_amount_package ?? 0) || 0
             : parseFloat(amountConfig?.individual ?? cfg.commission_amount_individual ?? 0) || 0;
+          const companyCommissionFallback = isPackage ? Math.round(companyCommissionFallbackTotal / divisor) : companyCommissionFallbackTotal;
           doctorCommission = Math.max(0, sessionAmount - companyCommissionFallback);
         }
 
