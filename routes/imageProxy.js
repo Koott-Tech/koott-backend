@@ -15,6 +15,7 @@ const ALLOWED_BUCKETS = new Set([
   'profile-pictures',
   'manual-bookings',
   'static-files',
+  'session-attachments',
 ]);
 
 function contentTypeForFilename(filename) {
@@ -27,6 +28,10 @@ function contentTypeForFilename(filename) {
     '.gif': 'image/gif',
     '.svg': 'image/svg+xml',
     '.avif': 'image/avif',
+    '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.txt': 'text/plain',
   };
   return map[ext] || 'application/octet-stream';
 }

@@ -1062,7 +1062,7 @@ async function listWixBookings(req, res) {
       const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
       const { data: sessionsData } = await supabaseAdmin
         .from('sessions')
-        .select(`id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
+        .select(`id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time, report, session_notes${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
         .in('wix_booking_id', wixBookingIds);
 
       if (sessionsData) {
@@ -1168,6 +1168,8 @@ async function listWixBookings(req, res) {
             ...row,
             session_type: resolvedType,
             session_id: linkedSession.id || null,
+            report: linkedSession.report || null,
+            session_notes: linkedSession.session_notes || null,
             package_id: linkedSession.package_id || null,
             // Carry the linked session's package_group_id so the frontend's "Book Next"
             // gating uses the real group — not the fallback key that collides when a client
