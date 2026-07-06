@@ -1062,7 +1062,7 @@ async function listWixBookings(req, res) {
       const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
       const { data: sessionsData } = await supabaseAdmin
         .from('sessions')
-        .select(`id, wix_booking_id, package_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
+        .select(`id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
         .in('wix_booking_id', wixBookingIds);
 
       if (sessionsData) {
@@ -1169,6 +1169,10 @@ async function listWixBookings(req, res) {
             session_type: resolvedType,
             session_id: linkedSession.id || null,
             package_id: linkedSession.package_id || null,
+            // Carry the linked session's package_group_id so the frontend's "Book Next"
+            // gating uses the real group — not the fallback key that collides when a client
+            // has two packages of the same type from the same therapist.
+            package_group_id: linkedSession.package_group_id ?? row.package_group_id ?? null,
             client_id: linkedSession.client_id || null,
             psychologist_id: linkedSession.psychologist_id || null,
             package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
@@ -2204,7 +2208,7 @@ async function bookWixNextSession(req, res) {
     // ── 2. Fetch linked session for client_id / psychologist_id ─────────
     const { data: linkedSession, error: sessionError } = await supabaseAdmin
       .from('sessions')
-      .select('id, client_id, psychologist_id, session_type, package_group_id')
+      .select('id, client_id, psychologist_id, session_type, package_group_id, package_session_number')
       .eq('wix_booking_id', wixRow.wix_booking_id)
       .single();
 
@@ -2217,7 +2221,17 @@ async function bookWixNextSession(req, res) {
 
     // ── 3. Determine next package_session_number ─────────────────────────
     // Count existing non-deleted wix_booking rows for this package group.
-    const packageGroupId = linkedSession.package_group_id || wixRow.package_group_id || null;
+    // If the parent package session has NO group id yet (common for raw Wix package
+    // parents), ESTABLISH one now using the parent session's id — otherwise every
+    // follow-up inherits null and separate packages of the same type collide on the
+    // fallback key `cp:client:therapist:type`, hiding "Book Next" on later packages.
+    let packageGroupId = linkedSession.package_group_id || wixRow.package_group_id || null;
+    if (!packageGroupId) {
+      packageGroupId = linkedSession.id;
+      // Backfill the parent session + its wix mirror so the whole package shares this group.
+      await supabaseAdmin.from('sessions').update({ package_group_id: packageGroupId, package_session_number: linkedSession.package_session_number || 1 }).eq('id', linkedSession.id);
+      await supabaseAdmin.from('wix_bookings').update({ package_group_id: packageGroupId }).eq('wix_booking_id', wixRow.wix_booking_id);
+    }
     let nextSessionNumber = (wixRow.package_session_number || 1) + 1;
     if (packageGroupId) {
       const { data: existingRows } = await supabaseAdmin

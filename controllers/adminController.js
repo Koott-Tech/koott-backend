@@ -781,7 +781,7 @@ const createManualBooking = async (req, res) => {
     const manualSessionType = manualSelection.sessionType;
     const manualSessionStage = session_stage === 'follow_up' ? 'follow_up' : 'first';
     const manualSessionCount = manualSelection.sessionCount;
-    const manualPackageSessionNumber = manualSessionCount > 1 ? (manualSessionStage === 'follow_up' ? 2 : 1) : null;
+    const manualPackageSessionNumber = manualSessionCount > 1 ? 1 : null;
     // Optional admin-chosen duration override (e.g. 15 min for psychiatrist). Falls back
     // to the type/package-derived default when not provided.
     const requestedDurationMin = parseInt(req.body.duration_minutes, 10);
@@ -3657,6 +3657,18 @@ const updateSession = async (req, res) => {
       razorpay_order_id,
       razorpay_payment_id,
       notify_doctor,
+      // Package metadata fields
+      session_type,
+      session_count,
+      package_session_number,
+      package_group_id,
+      package_id,
+      // Notes, Summary, Report fields
+      notes,
+      summary,
+      session_notes,
+      session_summary,
+      report,
       // No-show reschedule fee (only present when rescheduling a no-show session).
       noshow_fee_amount,
       noshow_fee_method,
@@ -3929,9 +3941,27 @@ const updateSession = async (req, res) => {
     }
 
     if (psychologist_id) updateData.psychologist_id = psychologist_id;
-    if (client_id) updateData.client_id = client_id; // Keep original client (read-only on frontend)
+    if (client_id) updateData.client_id = client_id;
     if (scheduled_date) updateData.scheduled_date = scheduled_date;
     if (scheduled_time) updateData.scheduled_time = scheduled_time;
+    if (session_type !== undefined) updateData.session_type = session_type || null;
+    if (session_count !== undefined) {
+      updateData.session_count = (session_count === null || session_count === '') ? null : parseInt(session_count, 10);
+    }
+    if (package_session_number !== undefined) {
+      updateData.package_session_number = (package_session_number === null || package_session_number === '') ? null : parseInt(package_session_number, 10);
+    }
+    if (package_group_id !== undefined) {
+      updateData.package_group_id = package_group_id || null;
+    }
+    if (package_id !== undefined) {
+      updateData.package_id = package_id || null;
+    }
+    if (notes !== undefined) updateData.notes = notes || null;
+    if (summary !== undefined) updateData.summary = summary || null;
+    if (session_notes !== undefined) updateData.session_notes = session_notes || null;
+    if (session_summary !== undefined) updateData.session_summary = session_summary || null;
+    if (report !== undefined) updateData.report = report || null;
     if (scheduleChanged) {
       updateData.status = 'rescheduled';
       updateData.reminder_sent = false;
@@ -4029,6 +4059,22 @@ const updateSession = async (req, res) => {
         wixMirrorUpdates.status = nextWixStatus;
       }
 
+      if (session_type !== undefined) {
+        wixMirrorUpdates.session_type = session_type;
+      }
+      if (session_count !== undefined) {
+        wixMirrorUpdates.session_count = (session_count === null || session_count === '') ? null : parseInt(session_count, 10);
+      }
+      if (package_session_number !== undefined) {
+        wixMirrorUpdates.package_session_number = (package_session_number === null || package_session_number === '') ? null : parseInt(package_session_number, 10);
+      }
+      if (package_group_id !== undefined) {
+        wixMirrorUpdates.package_group_id = package_group_id || null;
+      }
+      if (notes !== undefined) {
+        wixMirrorUpdates.notes = notes || null;
+      }
+
       if (scheduleChanged || scheduled_date || scheduled_time) {
         const mirrorDate = updatedSession.scheduled_date || effectiveDate;
         const mirrorTime = updatedSession.scheduled_time || effectiveTime;
@@ -4061,6 +4107,21 @@ const updateSession = async (req, res) => {
           if (wixMirrorUpdates.status) {
             existingPayload.status = wixMirrorUpdates.status;
             existingPayload.bookingStatus = wixMirrorUpdates.status;
+          }
+          if (session_type !== undefined) {
+            existingPayload.bookingType = session_type;
+          }
+          if (session_count !== undefined) {
+            existingPayload.creditsAvailable = (session_count === null || session_count === '') ? null : parseInt(session_count, 10);
+          }
+          if (package_session_number !== undefined) {
+            existingPayload.planSessionNumber = (package_session_number === null || package_session_number === '') ? null : parseInt(package_session_number, 10);
+          }
+          if (package_id !== undefined) {
+            existingPayload.packageId = package_id || null;
+          }
+          if (notes !== undefined) {
+            existingPayload.notes = notes || null;
           }
 
           wixMirrorUpdates.payload = existingPayload;
