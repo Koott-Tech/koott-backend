@@ -71,7 +71,7 @@ class MeetLinkService {
   }
 
   // Helper: Build normalized return object
-  createResult(success, meetLink, method, eventId = null, eventLink = null, error = null, note = null) {
+  createResult(success, meetLink, method, eventId = null, eventLink = null, error = null, note = null, calendarId = null) {
     return {
       success,
       meetLink: meetLink || null, // Return null when no valid link available
@@ -79,7 +79,8 @@ class MeetLinkService {
       eventId,
       eventLink,
       error,
-      note: note || null
+      note: note || null,
+      calendarId: calendarId || null
     };
   }
 
@@ -474,12 +475,17 @@ class MeetLinkService {
       const meetLink = createdEvent.data.conferenceData?.entryPoints?.[0]?.uri;
       log('Meet Link:', meetLink);
       
+      const eventCalendarId = createdEvent.data.organizer?.email || createdEvent.data.creator?.email || 'primary';
+      
       const result = this.createResult(
         true,
         meetLink,
         'oauth_calendar',
         createdEvent.data.id,
-        createdEvent.data.htmlLink
+        createdEvent.data.htmlLink,
+        null,
+        null,
+        eventCalendarId
       );
       
       // Add refreshed tokens to result if they were refreshed

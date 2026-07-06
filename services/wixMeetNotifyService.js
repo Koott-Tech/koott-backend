@@ -240,15 +240,16 @@ async function processOneSession(session, tempPassword = null) {
     finalMeetLink = meetResult.meetLink || session.google_meet_link || masterFallback;
 
     // Try full update first; fall back to just google_meet_link if extra columns don't exist
-    let { error: updateError } = await supabaseAdmin
-      .from('sessions')
-      .update({
-        google_meet_link: finalMeetLink,
-        google_meet_join_url: finalMeetLink,
-        google_meet_start_url: finalMeetLink,
-        google_calendar_event_id: meetResult.eventId || null,
-      })
-      .eq('id', session.id);
+      let { error: updateError } = await supabaseAdmin
+        .from('sessions')
+        .update({
+          google_meet_link: finalMeetLink,
+          google_meet_join_url: finalMeetLink,
+          google_meet_start_url: finalMeetLink,
+          google_calendar_event_id: meetResult.eventId || null,
+          google_calendar_id: meetResult.calendarId || null,
+        })
+        .eq('id', session.id);
 
     if (updateError && updateError.message && updateError.message.includes('column')) {
       ({ error: updateError } = await supabaseAdmin

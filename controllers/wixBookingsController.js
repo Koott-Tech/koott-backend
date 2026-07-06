@@ -2761,9 +2761,9 @@ async function rescheduleWixBooking(req, res) {
       let meetResult = null;
       if (primaryEventId) {
         const upd = await meetLinkService.updateCalendarEvent(primaryEventId, meetSessionData, userAuth);
-        if (upd?.success && upd.meetLink) {
-          meetResult = { meetLink: upd.meetLink, eventId: upd.eventId };
-          console.log('✅ [rescheduleWixBooking] event moved to new time; Meet link preserved:', upd.meetLink);
+        if (upd?.success) {
+          meetResult = { meetLink: upd.meetLink || null, eventId: upd.eventId };
+          console.log('✅ [rescheduleWixBooking] event moved to new time', upd.meetLink ? '; Meet link preserved' : '; No meet link found');
         } else {
           console.warn('⚠️ [rescheduleWixBooking] updateCalendarEvent failed, will delete + recreate:', upd?.error);
           // Old event couldn't be patched — remove it so it doesn't linger on the
@@ -2788,10 +2788,16 @@ async function rescheduleWixBooking(req, res) {
         }
       }
 
+      let dbEventId = undefined; // track explicitly if we should update DB
       if (meetResult) {
         newMeetData.eventId = meetResult.eventId || null;
         newMeetData.meetLink = meetResult.meetLink || null;
         newMeetData.calendarLink = meetResult.calendarLink || null;
+        dbEventId = newMeetData.eventId;
+      } else {
+        // Fix: If we deleted the old event and couldn't create a new one, 
+        // we MUST clear the ID from the DB so it doesn't point to a cancelled event.
+        dbEventId = null;
       }
     } catch (meetErr) {
       console.error('[rescheduleWixBooking] calendar move/create failed (non-fatal):', meetErr.message || meetErr);
@@ -2857,16 +2863,41 @@ async function rescheduleWixBooking(req, res) {
       // Details can show "was X, now Y" — never overwrite once already set.
       if (!linkedSession.original_scheduled_date) sessionUpdates.original_scheduled_date = linkedSession.scheduled_date;
       if (!linkedSession.original_scheduled_time) sessionUpdates.original_scheduled_time = linkedSession.scheduled_time;
-      // Only overwrite meet/calendar fields if we successfully created a new event;
-      // otherwise keep the existing ones so the session isn't left without a link.
-      if (newMeetData.eventId) sessionUpdates.google_calendar_event_id = newMeetData.eventId;
-      if (newMeetData.meetLink) {
-        sessionUpdates.google_meet_link = newMeetData.meetLink;
-        sessionUpdates.google_meet_join_url = newMeetData.meetLink;
-        sessionUpdates.google_meet_start_url = newMeetData.meetLink;
+      // Only overwrite meet/calendar fields if we successfully created/patched an event;
+      // otherwise keep the existing ones so the session isn't left without a link...
+      // WAIT! If dbEventId is explicitly null (we lost the event), we must clear the meet link too.
+      if (typeof dbEventId !== 'undefined') {
+        sessionUpdates.google_calendar_event_id = dbEventId;
       }
-      if (newMeetData.calendarLink) sessionUpdates.google_calendar_link = newMeetData.calendarLink;
-      await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
+      
+      if (newMeetData.eventId) {
+        if (newMeetData.meetLink) {
+          sessionUpdates.google_meet_link = newMeetData.meetLink;
+          sessionUpdates.google_meet_join_url = newMeetData.meetLink;
+          sessionUpdates.google_meet_start_url = newMeetData.meetLink;
+        }
+        if (newMeetData.calendarLink) {
+          sessionUpdates.google_calendar_link = newMeetData.calendarLink;
+        }
+        if (meetResult && meetResult.calendarId) {
+          sessionUpdates.google_calendar_id = meetResult.calendarId;
+        }
+      } else if (dbEventId === null) {
+        // We explicitly deleted the event and couldn't create a new one.
+        sessionUpdates.google_meet_link = null;
+        sessionUpdates.google_meet_join_url = null;
+        sessionUpdates.google_meet_start_url = null;
+        sessionUpdates.google_calendar_id = null;
+      }
+      const { error: sessionUpdateErr } = await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
+      if (sessionUpdateErr) {
+        if (sessionUpdateErr.message && sessionUpdateErr.message.includes('column')) {
+          delete sessionUpdates.google_calendar_id;
+          await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
+        } else {
+          console.warn('[rescheduleWixBooking] session update error (non-fatal):', sessionUpdateErr.message);
+        }
+      }
     }
     console.log('✅ [rescheduleWixBooking] booking + session updated:', booking.id);
 
