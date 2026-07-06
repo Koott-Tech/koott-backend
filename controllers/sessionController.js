@@ -2578,7 +2578,9 @@ async function transferSession(req, res) {
 
       // Resolve duration
       let durationMinutes = 50;
-      if (session.package_id) {
+      if (req.body.new_duration) {
+        durationMinutes = parseInt(req.body.new_duration, 10);
+      } else if (session.package_id) {
         const { data: pkg } = await supabaseAdmin
           .from('packages')
           .select('package_type')

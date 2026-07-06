@@ -2509,7 +2509,9 @@ async function transferWixBooking(req, res) {
 
       // Match the calendar event length to the booking's real slot length so Wix
       // blocks the correct duration (50 / 60 / 80 / 90 / 120 min).
-      const durationMinutes = getWixBookingDurationMin(booking);
+      const durationMinutes = req.body.new_duration 
+        ? parseInt(req.body.new_duration, 10) 
+        : getWixBookingDurationMin(booking);
       const addMins = (t, m) => {
         const [h, min] = t.split(':').map(Number);
         const total = h * 60 + min + m;
@@ -2547,7 +2549,9 @@ async function transferWixBooking(req, res) {
     //    mark locally_modified so the next Wix sync doesn't overwrite the transfer.
     const newPsychName = `${newPsych.first_name || ''} ${newPsych.last_name || ''}`.trim();
     const timeChanged = newStartTimeIso !== booking.start_time;
-    const durationMin = getWixBookingDurationMin(booking);
+    const durationMin = req.body.new_duration 
+      ? parseInt(req.body.new_duration, 10) 
+      : getWixBookingDurationMin(booking);
     const wbUpdates = {
       therapist_name: newPsychName,
       locally_modified: true,
