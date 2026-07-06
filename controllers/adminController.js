@@ -241,6 +241,7 @@ async function createOneManualPackageSession({
   sessionType, sessionCount, sessionNumber,
   scheduledDate, scheduledTime, durationMinutes,
   price, therapistCommission, notes,
+  packageId
 }) {
   const meetLinkService = require('../utils/meetLinkService');
   const { addMinutesToTime } = require('../utils/helpers');
@@ -272,7 +273,7 @@ async function createOneManualPackageSession({
   const sessionRow = {
     client_id: client.id,
     psychologist_id: psychologist.id,
-    package_id: null,
+    package_id: packageId || null,
     session_type: sessionType,
     session_count: sessionCount,
     package_group_id: packageGroupId,
@@ -305,7 +306,7 @@ async function createOneManualPackageSession({
       therapistName: `${psychologist.first_name || ''} ${psychologist.last_name || ''}`.trim(),
       therapistEmail: psychologist.email || null, therapistPhone: psychologist.phone || null,
       psychologistId: psychologist.id, client, amount: price, currency: 'INR',
-      packageId: null, sessionId: session.id,
+      packageId: packageId || null, sessionId: session.id,
       title: `${psychologist.first_name || ''} ${psychologist.last_name || ''}`.trim() || 'Manual booking', notes: notes || null,
     });
     wixMirrorRow.package_session_number = sessionNumber;
@@ -387,11 +388,30 @@ const createManualPackageBooking = async (req, res) => {
     const { data: psychologist } = await supabaseAdmin.from('psychologists').select('id, first_name, last_name, email, phone, google_calendar_credentials').eq('id', psychologist_id).single();
     if (!psychologist) return res.status(404).json(errorResponse('Psychologist not found'));
 
+    // Resolve package catalog ID for this psychologist and session_type
+    let resolvedPackageId = null;
+    try {
+      const { data: pkgCatalog } = await supabaseAdmin
+        .from('packages')
+        .select('id')
+        .eq('psychologist_id', psychologist_id)
+        .eq('package_type', session_type)
+        .eq('is_active', true)
+        .maybeSingle();
+      if (pkgCatalog) {
+        resolvedPackageId = pkgCatalog.id;
+        console.log(`✅ [createManualPackageBooking] Automatically resolved package catalog ID: ${resolvedPackageId}`);
+      }
+    } catch (e) {
+      console.warn('[createManualPackageBooking] package catalog resolve failed (non-fatal):', e.message);
+    }
+
     // ONE payment for the whole package. Some optional columns (e.g. session_type) may
     // not exist in every deployment's payments schema — strip & retry on PGRST204.
     const transactionId = `MANUAL-PKG-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     let paymentInsert = {
-      transaction_id: transactionId, session_id: null, psychologist_id, client_id: client.id, package_id: null,
+      transaction_id: transactionId, session_id: null, psychologist_id, client_id: client.id,
+      package_id: resolvedPackageId || null,
       amount, session_type: selection.sessionType, status: 'success',
       payment_method: (payment_method || 'cash').toLowerCase(),
       receipt_url: (typeof receipt_url === 'string' && receipt_url.trim()) || null,
@@ -431,6 +451,7 @@ const createManualPackageBooking = async (req, res) => {
           price: i === 0 ? amount : 0,
           therapistCommission: therapist_commission ? parseFloat(therapist_commission) : 0,
           notes,
+          packageId: resolvedPackageId,
         });
         created.push({ id: sess.id, session_number: i + 1, scheduled_date: sess.scheduled_date, scheduled_time: sess.scheduled_time });
       }
@@ -635,7 +656,7 @@ const createManualBooking = async (req, res) => {
     const { 
       client_id, 
       psychologist_id, 
-      package_id, 
+      package_id: inputPackageId, 
       session_type,
       session_stage,
       scheduled_date, 
@@ -648,6 +669,8 @@ const createManualBooking = async (req, res) => {
       payment_screenshot_url,
       notes 
     } = req.body;
+
+    let package_id = inputPackageId;
 
     console.log('📝 [MANUAL BOOKING] Starting manual booking process:', {
       client_id,
@@ -758,10 +781,25 @@ const createManualBooking = async (req, res) => {
     }
 
     // ============================================
-    // STEP 4: VALIDATE PACKAGE (if provided)
+    // STEP 4: VALIDATE PACKAGE (if provided or implicit)
     // ============================================
     let packageData = null;
-    if (package_id) {
+    const initialSelection = normalizeManualSessionSelection(session_type, null);
+    if (!package_id && initialSelection.isPackage) {
+      // Find package in catalog for this psychologist by package_type matching session_type
+      const { data: pkgCatalog } = await supabaseAdmin
+        .from('packages')
+        .select('*')
+        .eq('psychologist_id', psychologist_id)
+        .eq('package_type', session_type)
+        .eq('is_active', true)
+        .maybeSingle();
+      if (pkgCatalog) {
+        packageData = pkgCatalog;
+        package_id = pkgCatalog.id;
+        console.log(`✅ [MANUAL BOOKING] Automatically resolved catalog package ID: ${package_id} for type ${session_type}`);
+      }
+    } else if (package_id) {
       const { data: pkg, error: packageError } = await supabaseAdmin
         .from('packages')
         .select('*')
@@ -4852,16 +4890,8 @@ const bookPackageNextSession = async (req, res) => {
       );
     }
 
-    const isAvailable = await availabilityService.isTimeSlotAvailable(
-      psychologistId,
-      scheduled_date,
-      scheduled_time
-    );
-    if (!isAvailable) {
-      return res.status(400).json(
-        errorResponse('This time slot is not available. Please select another time.')
-      );
-    }
+    // Skip availability check for admin package bookings (mirrors createManualBooking override behaviour)
+    console.log('ℹ️ [bookPackageNextSession] Skipping slot availability check for admin booking');
 
     const formattedDate = formatDate(scheduled_date);
     const formattedTime = formatTime(scheduled_time);

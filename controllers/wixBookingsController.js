@@ -1768,12 +1768,31 @@ async function editWixBooking(req, res) {
     // NOT exposed for silent editing here — those require moving the Google Calendar
     // event too, which only the dedicated Transfer / Reschedule actions do correctly.
     const allowed = [
-      'status', 'title', 'price', 'currency',
+      'status', 'title', 'price', 'currency', 'session_type', 'session_count',
       'client_full_name', 'client_first_name', 'client_last_name', 'client_email', 'client_phone',
     ];
     const safeUpdates = {};
     for (const key of allowed) {
       if (updates[key] !== undefined) safeUpdates[key] = updates[key];
+    }
+    // Direct date/time edit: caller sends scheduled_date + scheduled_time (IST). Build the
+    // UTC start_time (and a matching end_time from the existing duration) for the wix mirror.
+    // NOTE: this is a plain data edit — it does NOT move the Google Calendar event. For an
+    // active booking that needs the calendar moved, use the dedicated Reschedule action.
+    if (updates.scheduled_date && updates.scheduled_time) {
+      const t = String(updates.scheduled_time).trim();
+      const timeHms = t.length === 5 ? `${t}:00` : t;
+      const startLocal = new Date(`${updates.scheduled_date}T${timeHms}+05:30`);
+      if (!isNaN(startLocal.getTime())) {
+        safeUpdates.start_time = startLocal.toISOString();
+        const { data: existing } = await supabaseAdmin.from('wix_bookings').select('start_time, end_time').eq('id', id).maybeSingle();
+        let durMin = 50;
+        if (existing?.start_time && existing?.end_time) {
+          const d = Math.round((new Date(existing.end_time) - new Date(existing.start_time)) / 60000);
+          if (d > 0) durMin = d;
+        }
+        safeUpdates.end_time = new Date(startLocal.getTime() + durMin * 60000).toISOString();
+      }
     }
     safeUpdates.locally_modified = true;
     safeUpdates.synced_at = new Date().toISOString();
