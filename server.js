@@ -72,6 +72,7 @@ app.use(requestIdMiddleware);
 // Use same ALLOWED_ORIGINS as CSRF middleware: set in production (e.g. Render) as comma-separated list
 const DEFAULT_ORIGINS = [
   'https://kutikkal-one.vercel.app',
+  'https://koott-frontend-keth.vercel.app',
   'https://www.koott.in',
   'https://koott.in',
   'https://www.koott.com',
