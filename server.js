@@ -76,6 +76,8 @@ const DEFAULT_ORIGINS = [
   'https://koott.in',
   'https://www.koott.com',
   'https://koott.com',
+  'https://mykoott.com',
+  'https://www.mykoott.com',
   'http://localhost:3000',
   'http://localhost:3001'
 ];
