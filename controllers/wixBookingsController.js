@@ -2903,6 +2903,17 @@ async function rescheduleWixBooking(req, res) {
         }
       }
     }
+
+    // 8a. GUARANTEED sync — the wix_bookings mirror was moved to the new time above, so force
+    //     the linked session(s) to the SAME date/time keyed by wix_booking_id. This is a
+    //     belt-and-suspenders net: it covers any case where the primary lookup above was
+    //     skipped (linkedSession null, or >1 session sharing the booking id), which is exactly
+    //     what left a handful of sessions stuck on their old date while the mirror advanced.
+    if (booking.wix_booking_id) {
+      await supabaseAdmin.from('sessions')
+        .update({ scheduled_date: new_date, scheduled_time: timeHms, status: 'rescheduled', locally_modified: true, updated_at: new Date().toISOString() })
+        .eq('wix_booking_id', booking.wix_booking_id);
+    }
     console.log('✅ [rescheduleWixBooking] booking + session updated:', booking.id);
 
     // 8b. If this was a NO-SHOW reschedule, record the additional payment collected.
