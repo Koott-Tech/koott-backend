@@ -2736,6 +2736,7 @@ async function rescheduleWixBooking(req, res) {
     //    one and create a fresh event. Everything here is awaited — no fire-and-forget
     //    cleanup that could race the create and delete the new event.
     let newMeetData = { meetLink: null, eventId: null, calendarLink: null };
+    let meetResult = null;
     const addMins = (t, m) => {
       const [h, min] = t.split(':').map(Number);
       const total = h * 60 + min + m;
@@ -2762,7 +2763,7 @@ async function rescheduleWixBooking(req, res) {
         ? String(linkedSession.google_calendar_event_id).split(',').map(e => e.trim()).filter(Boolean)[0]
         : null;
 
-      let meetResult = null;
+      meetResult = null;
       if (primaryEventId) {
         const upd = await meetLinkService.updateCalendarEvent(primaryEventId, meetSessionData, userAuth);
         if (upd?.success) {
