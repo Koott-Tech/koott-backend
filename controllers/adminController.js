@@ -2449,7 +2449,8 @@ const createPsychologist = async (req, res) => {
       psychiatrist_30min_price,
       specialist_category,
       child_specialist_pricing,
-      better_parent_pricing
+      better_parent_pricing,
+      wix_staff_id
     } = req.body;
 
     // Keep email as-is (don't normalize dots away)
@@ -2522,6 +2523,7 @@ const createPsychologist = async (req, res) => {
       designation: designation?.trim() || null,
       experience_years: experience_years || 0,
       cover_image_url: cover_image_url || null,
+      wix_staff_id: wix_staff_id || null,
     };
     // child_specialist_pricing exists on the table — include it only when provided.
     if (child_specialist_pricing != null) {

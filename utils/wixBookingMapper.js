@@ -150,6 +150,14 @@ function therapistNameFromBooking(b) {
   return null;
 }
 
+function therapistStaffIdFromBooking(b) {
+  if (!b) return null;
+  if (b.therapist && b.therapist.staffId) return b.therapist.staffId;
+  if (b.staff && b.staff.staffId) return b.staff.staffId;
+  if (b.staffId) return String(b.staffId);
+  return null;
+}
+
 function discoverRowToDb(booking) {
   const b = booking;
   if (!b || b.id == null || b.id === '' || b.id === 'null' || b.id === 'undefined') {
@@ -221,6 +229,7 @@ function discoverRowToDb(booking) {
     package_session_number: b.planSessionNumber != null ? Number(b.planSessionNumber) : null,
     package_group_id: b.subscriptionId || null,
     therapist_name: therapistNameFromBooking(b),
+    wix_staff_id: therapistStaffIdFromBooking(b),
     tags: Array.isArray(b.tags) ? b.tags : b.tags != null ? b.tags : null,
     start_time: b.startTime || null,
     end_time: b.endTime || null,
@@ -367,6 +376,7 @@ module.exports = {
   discoverRowToSessionDb,
   normalizeWixStatusToSessionStatus,
   therapistNameFromBooking,
+  therapistStaffIdFromBooking,
   sessionTypeFromBooking,
   sessionCountFromBooking,
   wixBookingCreatedIso,

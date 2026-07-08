@@ -970,6 +970,9 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
   // Start Audit Logs Cleanup Job (deletes logs older than 1 week, runs weekly)
   const { startAuditLogsCleanupScheduler } = require('./jobs/auditLogsCleanupJob');
   startAuditLogsCleanupScheduler(7); // Run every 7 days (weekly)
+
+  const { startDailyCrawlerScheduler } = require('./jobs/dailyCrawlerJob');
+  startDailyCrawlerScheduler();
   
   // Start Slot Lock Cleanup Job (releases expired slots and cleans up abandoned payments, runs every 10 minutes)
   const { releaseExpiredSlots, cleanupAbandonedPendingPayments } = require('./services/slotLockService');

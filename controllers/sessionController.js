@@ -2499,7 +2499,14 @@ const getRescheduleRequests = async (req, res) => {
 async function transferSession(req, res) {
   try {
     const { sessionId } = req.params;
-    const { new_psychologist_id, new_date, new_time } = req.body;
+    const { 
+      new_psychologist_id, 
+      new_date, 
+      new_time,
+      transfer_fee_amount,
+      transfer_fee_method,
+      transfer_fee_receipt_url
+    } = req.body;
 
     if (!new_psychologist_id) {
       return res.status(400).json(errorResponse('new_psychologist_id is required'));
@@ -2648,6 +2655,19 @@ async function transferSession(req, res) {
       updates.original_psychologist_id = session.psychologist_id;
     }
 
+    // Record optional differential payment (transfer fee) if provided
+    if (transfer_fee_amount) {
+      const { recordNoShowRescheduleFee } = require('../utils/noShowRescheduleFee');
+      await recordNoShowRescheduleFee({
+        sessionId,
+        clientId: session.client_id,
+        psychologistId: new_psychologist_id,
+        amount: transfer_fee_amount,
+        method: transfer_fee_method,
+        receiptUrl: transfer_fee_receipt_url,
+      });
+    }
+
     const { data: updatedSession, error: updateErr } = await supabaseAdmin
       .from('sessions')
       .update(updates)
@@ -2661,6 +2681,111 @@ async function transferSession(req, res) {
     }
 
     console.log('✅ [transferSession] Session transferred to psychologist:', new_psychologist_id);
+
+    // ── 7. Recalculate Commission (Financials) ───────────────────────────────
+    // This removes the old therapist's commission and calculates the new one
+    // if the session happens to be completed.
+    try {
+      const { recalculateCommission } = require('../services/commissionCalculationService');
+      await recalculateCommission(sessionId);
+    } catch (commErr) {
+      console.warn('⚠️ [transferSession] Failed to recalculate commission:', commErr.message);
+    }
+
+    // ── 8. Send Notifications ────────────────────────────────────────────────
+    (async () => {
+      try {
+        const emailService = require('../utils/emailService');
+        const interaktService = require('../utils/interaktService');
+        
+        const client = Array.isArray(session.client) ? session.client[0] : session.client;
+        const clientEmail = client?.user && (Array.isArray(client.user) ? client.user[0]?.email : client.user.email);
+        const clientName = getClientDisplayName(client, 'Client');
+        const psychologistName = getPsychologistDisplayName(newPsych);
+        const meetLink = newMeetData.meetLink;
+
+        // Fetch payment info for email receipt/pricing details
+        const { data: paymentRow } = await supabaseAdmin
+          .from('payments')
+          .select('amount, package_id')
+          .eq('session_id', sessionId)
+          .maybeSingle();
+
+        let packageInfo = null;
+        if (paymentRow?.package_id) {
+          const { data: pkg } = await supabaseAdmin.from('packages').select('package_type, session_count').eq('id', paymentRow.package_id).single();
+          if (pkg) {
+            const { data: pkgSessions } = await supabaseAdmin
+              .from('sessions')
+              .select('id')
+              .eq('package_id', paymentRow.package_id)
+              .eq('client_id', session.client_id)
+              .eq('status', 'completed');
+            const completed = (pkgSessions || []).length;
+            packageInfo = {
+              totalSessions: pkg.session_count || 0,
+              completedSessions: completed,
+              remainingSessions: Math.max((pkg.session_count || 0) - completed, 0),
+              packageType: pkg.package_type || 'Package'
+            };
+          }
+        }
+
+        // Send Email to Client, New Therapist, and Admin
+        await emailService.sendSessionConfirmation({
+          clientName,
+          psychologistName,
+          clientEmail: clientEmail || 'client@placeholder.com',
+          psychologistEmail: newPsych.email || 'psychologist@placeholder.com',
+          scheduledDate: formatDate(finalDate),
+          scheduledTime: formatTime(finalTime),
+          sessionDate: formatDate(finalDate),
+          sessionTime: formatTime(finalTime),
+          googleMeetLink: meetLink,
+          meetLink,
+          googleCalendarEventId: newMeetData.eventId,
+          sessionId: session.id,
+          price: paymentRow?.amount ?? 0,
+          amount: paymentRow?.amount ?? 0,
+          status: session.status || 'booked',
+          psychologistId: new_psychologist_id,
+          clientId: session.client_id,
+          packageInfo,
+          durationMinutes: getMeetEventDurationMinutes(packageInfo?.packageType),
+          receiptId: null,
+          receiptNumber: null,
+          receiptPdfBuffer: null
+        });
+        console.log('✅ [transferSession] Session confirmation emails sent');
+
+        // Send WhatsApp to Client
+        if (client?.phone_number && meetLink) {
+          const res = await interaktService.sendBookingConfirmation(client.phone_number, {
+            clientName, psychologistName,
+            date: formatDate(finalDate),
+            time: formatTime(finalTime),
+            meetLink,
+          });
+          if (res?.success) console.log('✅ [transferSession] booking_confirmation_v1 sent to client');
+          else console.warn('⚠️ [transferSession] booking_confirmation_v1 failed:', res?.error || res?.reason);
+        }
+
+        // Send WhatsApp to New Therapist
+        if (newPsych.phone && meetLink) {
+          const res = await interaktService.sendSessionNotificationPsychologist(newPsych.phone, {
+            therapistName: psychologistName,
+            clientName,
+            date: formatDate(finalDate),
+            time: formatTime(finalTime),
+            meetLink,
+          });
+          if (res?.success) console.log('✅ [transferSession] therapistconfirmation sent to new therapist');
+          else console.warn('⚠️ [transferSession] therapistconfirmation failed:', res?.error || res?.reason);
+        }
+      } catch (notifErr) {
+        console.error('❌ [transferSession] Notification error:', notifErr.message || notifErr);
+      }
+    })();
 
     return res.json(successResponse({
       session: updatedSession,

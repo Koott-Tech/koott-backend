@@ -49,13 +49,14 @@ function therapistFromBooking(booking) {
     return { name: booking?.title || null, email: null, phone: null, image: null };
   }
   if (typeof t === 'string') {
-    return { name: t, email: null, phone: null, image: null };
+    return { name: t, email: null, phone: null, image: null, staffId: null };
   }
   return {
     name: t.name || t.displayName || t.fullName || booking?.title || null,
     email: t.email || null,
     phone: t.phone || null,
     image: t.image || null,
+    staffId: t.staffId || booking?.staffId || booking?.staff?.staffId || null,
   };
 }
 
@@ -81,7 +82,17 @@ async function resolveOrCreateWixPsychologist(booking) {
 
   if (!rawName && !rawEmail) return { psychologistId: null, isNew: false };
 
-  // 1. Try resolving by email (most unique)
+  // 1. Try resolving by Wix Staff ID (100% unique & reliable)
+  if (therapist.staffId) {
+    const { data: existingByStaffId } = await supabaseAdmin
+      .from('psychologists')
+      .select('id')
+      .eq('wix_staff_id', therapist.staffId)
+      .limit(1);
+    if (existingByStaffId?.[0]?.id) return { psychologistId: existingByStaffId[0].id, isNew: false };
+  }
+
+  // 1.5. Try resolving by email (most unique fallback)
   if (rawEmail) {
     const { data: existingByEmail } = await supabaseAdmin
       .from('psychologists')
@@ -126,6 +137,7 @@ async function resolveOrCreateWixPsychologist(booking) {
 
   const insertPayload = {
     email: rawEmail || null,
+    wix_staff_id: therapist.staffId || null,
     first_name: firstName,
     last_name: lastName || null,
     phone: rawPhone || null,
