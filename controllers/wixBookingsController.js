@@ -1822,6 +1822,9 @@ async function editWixBooking(req, res) {
         sessionUpdates.notes = safeUpdates.title;
       }
       if (safeUpdates.session_type) sessionUpdates.session_type = safeUpdates.session_type;
+      if (safeUpdates.session_count !== undefined && safeUpdates.session_count !== null && safeUpdates.session_count !== '') {
+        sessionUpdates.session_count = Number(safeUpdates.session_count);
+      }
       if (safeUpdates.price) {
         sessionUpdates.price = safeUpdates.price;
         sessionUpdates.amount = safeUpdates.price;
@@ -1833,6 +1836,25 @@ async function editWixBooking(req, res) {
         sessionUpdates.scheduled_time = startIST.slice(11, 19);
       }
       await supabaseAdmin.from('sessions').update(sessionUpdates).eq('wix_booking_id', data.wix_booking_id);
+
+      // A package's size lives on every session of the group — if the admin changed the
+      // count, propagate it to the siblings (and their wix mirrors) so "N/M" stays consistent.
+      if (sessionUpdates.session_count != null) {
+        const { data: edited } = await supabaseAdmin
+          .from('sessions').select('package_group_id').eq('wix_booking_id', data.wix_booking_id).maybeSingle();
+        if (edited?.package_group_id) {
+          await supabaseAdmin.from('sessions')
+            .update({ session_count: sessionUpdates.session_count, locally_modified: true })
+            .eq('package_group_id', edited.package_group_id);
+          const { data: sibs } = await supabaseAdmin
+            .from('sessions').select('wix_booking_id').eq('package_group_id', edited.package_group_id);
+          const ids = (sibs || []).map(s => s.wix_booking_id).filter(Boolean);
+          if (ids.length) {
+            await supabaseAdmin.from('wix_bookings')
+              .update({ session_count: sessionUpdates.session_count, locally_modified: true }).in('wix_booking_id', ids);
+          }
+        }
+      }
     }
 
     return res.json({ success: true, message: 'Wix booking updated', data: { booking: data } });
