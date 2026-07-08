@@ -4,7 +4,6 @@ let timer = null;
 let isRunning = false;
 let runStartedAt = 0;
 let blockedTickCount = 0;
-let serviceStartedAtIso = null;
 
 function getIntervalMs() {
   const sec = Number.parseInt(String(process.env.WIX_SYNC_INTERVAL_SECONDS || '600'), 10);
@@ -43,8 +42,10 @@ async function runOnce(source = 'interval') {
   runStartedAt = Date.now();
   blockedTickCount = 0;
   try {
+    // Use a 4-hour rolling window to catch any bookings missed during server restarts or API downtime
+    const rollingLookbackIso = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const result = await performWixSync({
-      createdAfter: process.env.WIX_SYNC_CREATED_AFTER || process.env.WIX_SYNC_OLDEST_DATE || serviceStartedAtIso,
+      createdAfter: process.env.WIX_SYNC_CREATED_AFTER || process.env.WIX_SYNC_OLDEST_DATE || rollingLookbackIso,
     });
     const tookMs = Date.now() - runStartedAt;
     console.log(
@@ -71,8 +72,7 @@ function start() {
   if (timer) return;
 
   const intervalMs = getIntervalMs();
-  serviceStartedAtIso = new Date().toISOString();
-  console.log(`[wixRealtimeSyncService] started (interval ${intervalMs / 1000}s)`);
+  console.log(`[wixRealtimeSyncService] started (interval ${intervalMs / 1000}s, rolling lookback 4h)`);
   runOnce('startup').catch(() => {});
   timer = setInterval(() => {
     runOnce('interval').catch(() => {});

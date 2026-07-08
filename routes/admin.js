@@ -125,6 +125,11 @@ router.post('/bookings/book-package-next-session', adminController.bookPackageNe
 // Packages with remaining sessions (admin only - for Packages tab)
 router.get('/bookings/packages-with-remaining', adminController.getPackagesWithRemainingSessions);
 
+// Stable A/B/C labels for clients with multiple packages from the same therapist.
+// Computed over ALL package sessions (not a paginated page) so labels are consistent
+// regardless of the current filter/page.
+router.get('/bookings/package-labels', adminController.getPackageLabels);
+
 // Reschedule request handling
 router.get('/reschedule-requests', adminController.getRescheduleRequests);
 

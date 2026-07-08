@@ -4808,7 +4808,10 @@ const bookPackageNextSession = async (req, res) => {
       const totalCheck = deriveSessionCount(pkgRow);
       const remainingCheck = Math.max(totalCheck - completedCheck - bookedCheck, 0);
 
-      if (remainingCheck <= 0 || completedCheck === 0) {
+      // Allow booking the next session as long as the package has at least one live
+      // session (booked OR completed) and sessions remain. Requiring a *completed*
+      // session blocked booking ahead when the first session is still upcoming.
+      if (remainingCheck <= 0 || (completedCheck + bookedCheck) === 0) {
         return res.status(404).json(
           errorResponse('No active package found for this client and package')
         );
@@ -4875,7 +4878,19 @@ const bookPackageNextSession = async (req, res) => {
       .eq('client_id', client_id);
 
     // Inherit the package group id from any existing session in this package.
-    const inheritedGroupId = (packageSessions || []).find(s => s.package_group_id)?.package_group_id || null;
+    let inheritedGroupId = (packageSessions || []).find(s => s.package_group_id)?.package_group_id || null;
+    // Legacy/admin-created packages may have NO group id on any session. Establish one now
+    // (anchored on an existing session's id) and backfill every session in the package, so the
+    // new session joins a real group instead of falling back to a colliding group key — which
+    // would break "Book Next" gating on the package.
+    if (!inheritedGroupId && Array.isArray(packageSessions) && packageSessions.length > 0) {
+      inheritedGroupId = packageSessions[0].id;
+      await supabaseAdmin
+        .from('sessions')
+        .update({ package_group_id: inheritedGroupId })
+        .in('id', packageSessions.map(s => s.id))
+        .is('package_group_id', null);
+    }
 
     let completedCount = 0;
     let bookedCount = 0;
@@ -5275,6 +5290,70 @@ const getPackagesWithRemainingSessions = async (req, res) => {
   }
 };
 
+/**
+ * Returns stable A/B/C labels for clients who have MORE THAN ONE package with the same
+ * therapist. Computed over ALL package sessions (not a paginated page), so the label for a
+ * given package never changes based on the current filter, search, or page in the UI.
+ *
+ * Response shape:
+ *   { labels: { "<clientId>|<psychId>": { "<package_group_id>": "A", "<group2>": "B" } } }
+ * Only pairs with >1 distinct package group are included (a lone package needs no label).
+ * Ordering is by each group's earliest session date, then group id as a deterministic tie-break.
+ */
+const getPackageLabels = async (req, res) => {
+  try {
+    // Pull all package-ish sessions (paginate to avoid the default row cap).
+    let all = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await supabaseAdmin
+        .from('sessions')
+        .select('client_id, psychologist_id, package_group_id, scheduled_date, session_type, session_count')
+        .or('session_type.eq.package,session_count.gt.1')
+        .range(from, from + 999);
+      if (error) throw error;
+      if (!data || !data.length) break;
+      all = all.concat(data);
+      if (data.length < 1000) break;
+      from += 1000;
+    }
+
+    // pair -> { groupId: earliestDate }
+    const pairs = {};
+    for (const s of all) {
+      if (!s.client_id || !s.psychologist_id || !s.package_group_id) continue;
+      const isPkg = s.session_type === 'package' || Number(s.session_count) > 1;
+      if (!isPkg) continue;
+      const pair = `${s.client_id}|${s.psychologist_id}`;
+      const d = s.scheduled_date || '9999-12-31';
+      pairs[pair] = pairs[pair] || {};
+      if (!pairs[pair][s.package_group_id] || d < pairs[pair][s.package_group_id]) {
+        pairs[pair][s.package_group_id] = d;
+      }
+    }
+
+    const labels = {};
+    for (const pair of Object.keys(pairs)) {
+      const groups = Object.entries(pairs[pair]).sort(
+        (a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0])
+      );
+      if (groups.length > 1) {
+        labels[pair] = {};
+        groups.forEach(([gid], i) => {
+          labels[pair][gid] = String.fromCharCode(65 + i); // A, B, C, …
+        });
+      }
+    }
+
+    return res.json(successResponse({ labels }));
+  } catch (error) {
+    console.error('getPackageLabels error:', error);
+    return res.status(500).json(
+      errorResponse(error.message || 'Failed to compute package labels')
+    );
+  }
+};
+
 const getEventRegistrations = async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -5437,6 +5516,7 @@ module.exports = {
   createRecordOnlyPackage,
   bookPackageNextSession,
   getPackagesWithRemainingSessions,
+  getPackageLabels,
   getRescheduleRequests,
   getPsychologistCalendarEvents
 };
