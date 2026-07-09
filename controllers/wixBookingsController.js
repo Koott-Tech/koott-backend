@@ -1089,7 +1089,57 @@ async function listWixBookings(req, res) {
       }
     }
 
-    const allVisibleRows = dedupeBookings((bookingsData || []).map((row) => ({
+    const enrichedBookingsData = (bookingsData || []).map((row) => {
+      const linkedSession = sessionMap.get(row.wix_booking_id) || null;
+      if (!linkedSession) return row;
+
+      const sessionIsPackage =
+        String(linkedSession.session_type || '').toLowerCase() === 'package' ||
+        !!linkedSession.package_id ||
+        (Number(linkedSession.session_count) > 1);
+      const linkedIsCouple = String(linkedSession.session_type || '').toLowerCase() === 'couple';
+      const resolvedType = linkedIsCouple ? 'couple' : (sessionIsPackage ? 'package' : row.session_type);
+      const resolvedCount = sessionIsPackage
+        ? (Number(linkedSession.session_count) > 1 ? linkedSession.session_count : (row.session_count ?? linkedSession.session_count ?? null))
+        : (row.session_count ?? linkedSession.session_count ?? null);
+
+      return {
+        ...row,
+        session_type: resolvedType,
+        session_id: linkedSession.id || null,
+        report: linkedSession.report || null,
+        session_notes: linkedSession.session_notes || null,
+        package_id: linkedSession.package_id || null,
+        package_group_id: linkedSession.package_group_id ?? row.package_group_id ?? null,
+        client_id: linkedSession.client_id || null,
+        psychologist_id: linkedSession.psychologist_id || null,
+        package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
+        session_count: resolvedCount,
+        session_status: linkedSession.status || null,
+        google_calendar_event_id: linkedSession.google_calendar_event_id || null,
+        notified_at: linkedSession.notified_at || null,
+        email_sent_at: linkedSession.email_sent_at || null,
+        whatsapp_sent_at: linkedSession.whatsapp_sent_at || null,
+        google_meet_link: linkedSession.google_meet_link || null,
+        google_meet_join_url: linkedSession.google_meet_join_url || null,
+        google_meet_start_url: linkedSession.google_meet_start_url || null,
+        google_calendar_link: linkedSession.google_calendar_link || null,
+        original_scheduled_date: linkedSession.original_scheduled_date || null,
+        original_scheduled_time: linkedSession.original_scheduled_time || null,
+        original_psychologist_id: (linkedSession.original_psychologist_id && linkedSession.original_psychologist_id !== linkedSession.psychologist_id)
+          ? linkedSession.original_psychologist_id : null,
+        original_therapist_name: (linkedSession.original_psychologist_id && linkedSession.original_psychologist_id !== linkedSession.psychologist_id)
+          ? (origPsychNameMap.get(linkedSession.original_psychologist_id) || null) : null,
+      };
+    });
+
+    const enrichedBookingMap = new Map(
+      (enrichedBookingsData || [])
+        .filter((row) => row?.wix_booking_id)
+        .map((row) => [row.wix_booking_id, row])
+    );
+
+    const allVisibleRows = dedupeBookings((enrichedBookingsData || []).map((row) => ({
       id: row.wix_booking_id,
       status: row.status,
       createdDate: row.payload?.createdDate || row.created_at,
@@ -1146,64 +1196,68 @@ async function listWixBookings(req, res) {
       }
     } catch { /* fall back to count */ }
 
+    const visibleBookingIds = dedupedData.map((row) => row?.wix_booking_id).filter(Boolean);
+    let finalSessionMap = sessionMap;
+    if (visibleBookingIds.length > 0) {
+      const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
+      const hasMarkers = await hasNotificationMarkerColumns(supabaseAdmin);
+      const { data: finalSessionsData } = await supabaseAdmin
+        .from('sessions')
+        .select(`id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, google_calendar_event_id, notified_at, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time, report, session_notes${hasOrigPsychCol ? ', original_psychologist_id' : ''}${hasMarkers ? ', email_sent_at, whatsapp_sent_at' : ''}`)
+        .in('wix_booking_id', visibleBookingIds);
+      if (Array.isArray(finalSessionsData) && finalSessionsData.length) {
+        finalSessionMap = new Map(finalSessionsData.map((session) => [session.wix_booking_id, session]));
+      }
+    }
+
+    const bookingsOut = dedupedData.map((row) => {
+      const linkedSession = finalSessionMap.get(row?.wix_booking_id) || null;
+      if (!linkedSession) return row;
+
+      const sessionIsPackage =
+        String(linkedSession.session_type || '').toLowerCase() === 'package' ||
+        !!linkedSession.package_id ||
+        (Number(linkedSession.session_count) > 1);
+      const linkedIsCouple = String(linkedSession.session_type || '').toLowerCase() === 'couple';
+      const resolvedType = linkedIsCouple ? 'couple' : (sessionIsPackage ? 'package' : row.session_type);
+      const resolvedCount = sessionIsPackage
+        ? (Number(linkedSession.session_count) > 1 ? linkedSession.session_count : (row.session_count ?? linkedSession.session_count ?? null))
+        : (row.session_count ?? linkedSession.session_count ?? null);
+
+      return {
+        ...row,
+        session_type: resolvedType,
+        session_id: linkedSession.id || null,
+        report: linkedSession.report || null,
+        session_notes: linkedSession.session_notes || null,
+        package_id: linkedSession.package_id || null,
+        package_group_id: linkedSession.package_group_id ?? row.package_group_id ?? null,
+        client_id: linkedSession.client_id || null,
+        psychologist_id: linkedSession.psychologist_id || null,
+        package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
+        session_count: resolvedCount,
+        session_status: linkedSession.status || null,
+        google_calendar_event_id: linkedSession.google_calendar_event_id || null,
+        notified_at: linkedSession.notified_at || null,
+        email_sent_at: linkedSession.email_sent_at || null,
+        whatsapp_sent_at: linkedSession.whatsapp_sent_at || null,
+        google_meet_link: linkedSession.google_meet_link || null,
+        google_meet_join_url: linkedSession.google_meet_join_url || null,
+        google_meet_start_url: linkedSession.google_meet_start_url || null,
+        google_calendar_link: linkedSession.google_calendar_link || null,
+        original_scheduled_date: linkedSession.original_scheduled_date || null,
+        original_scheduled_time: linkedSession.original_scheduled_time || null,
+        original_psychologist_id: (linkedSession.original_psychologist_id && linkedSession.original_psychologist_id !== linkedSession.psychologist_id)
+          ? linkedSession.original_psychologist_id : null,
+        original_therapist_name: (linkedSession.original_psychologist_id && linkedSession.original_psychologist_id !== linkedSession.psychologist_id)
+          ? (origPsychNameMap.get(linkedSession.original_psychologist_id) || null) : null,
+      };
+    });
+
     return res.json({
       success: true,
       data: {
-        bookings: dedupedData.map((row) => {
-          const linkedSession = sessionMap.get(row.wix_booking_id) || null;
-          if (!linkedSession) return row;
-          // The linked session is the source of truth for package-ness. Wix mirrors a package
-          // session as a raw "INDIVIDUAL" booking, so prefer the session's package info when it
-          // indicates a package — otherwise the row shows "Individual" and the package/book-next
-          // logic (which keys on session_type) never fires.
-          const sessionIsPackage =
-            String(linkedSession.session_type || '').toLowerCase() === 'package' ||
-            !!linkedSession.package_id ||
-            (Number(linkedSession.session_count) > 1);
-          // A COUPLE package must stay 'couple' (with its count) — forcing it to 'package'
-          // here made the display show "Package (1/3)" instead of "Couple Package (1/3)".
-          const linkedIsCouple = String(linkedSession.session_type || '').toLowerCase() === 'couple';
-          const resolvedType = linkedIsCouple ? 'couple' : (sessionIsPackage ? 'package' : row.session_type);
-          const resolvedCount = sessionIsPackage
-            ? (Number(linkedSession.session_count) > 1 ? linkedSession.session_count : (row.session_count ?? linkedSession.session_count ?? null))
-            : (row.session_count ?? linkedSession.session_count ?? null);
-          return {
-            ...row,
-            session_type: resolvedType,
-            session_id: linkedSession.id || null,
-            report: linkedSession.report || null,
-            session_notes: linkedSession.session_notes || null,
-            package_id: linkedSession.package_id || null,
-            // Carry the linked session's package_group_id so the frontend's "Book Next"
-            // gating uses the real group — not the fallback key that collides when a client
-            // has two packages of the same type from the same therapist.
-            package_group_id: linkedSession.package_group_id ?? row.package_group_id ?? null,
-            client_id: linkedSession.client_id || null,
-            psychologist_id: linkedSession.psychologist_id || null,
-            package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
-            session_count: resolvedCount,
-            session_status: linkedSession.status || null,
-            // Delivery status for the 3-dot indicator: calendar event, email, WhatsApp.
-            google_calendar_event_id: linkedSession.google_calendar_event_id || null,
-            notified_at: linkedSession.notified_at || null,
-            email_sent_at: linkedSession.email_sent_at || null,
-            whatsapp_sent_at: linkedSession.whatsapp_sent_at || null,
-            google_meet_link: linkedSession.google_meet_link || null,
-            google_meet_join_url: linkedSession.google_meet_join_url || null,
-            google_meet_start_url: linkedSession.google_meet_start_url || null,
-            google_calendar_link: linkedSession.google_calendar_link || null,
-            // Original (pre-reschedule) date/time, so View Details can show "was X, now Y".
-            // Only meaningful if it differs from the current scheduled date/time.
-            original_scheduled_date: linkedSession.original_scheduled_date || null,
-            original_scheduled_time: linkedSession.original_scheduled_time || null,
-            // Original (pre-transfer) therapist, so View Details can show
-            // "Transferred From Dr. X To Dr. Y". Only set when it differs from current.
-            original_psychologist_id: (linkedSession.original_psychologist_id && linkedSession.original_psychologist_id !== linkedSession.psychologist_id)
-              ? linkedSession.original_psychologist_id : null,
-            original_therapist_name: (linkedSession.original_psychologist_id && linkedSession.original_psychologist_id !== linkedSession.psychologist_id)
-              ? (origPsychNameMap.get(linkedSession.original_psychologist_id) || null) : null,
-          };
-        }),
+        bookings: bookingsOut,
         pagination: {
           page,
           limit,

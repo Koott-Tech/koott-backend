@@ -338,7 +338,7 @@ const getAllSessions = async (req, res) => {
     const { supabaseAdmin } = require('../config/supabase');
     const adminBookingTimeCol = await getBookingTimeColumnKey(supabaseAdmin);
 
-    const { page = 1, limit = 10, status, session_type, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc', search = '' } = req.query;
+    const { page = 1, limit = 10, status, session_type, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc', search = '', wix_booking_id } = req.query;
 
     // ?status=booked&status=rescheduled OR ?status=booked,rescheduled OR ?status=booked
     const normalizeStatusList = (raw) => {
@@ -348,8 +348,16 @@ const getAllSessions = async (req, res) => {
         : String(raw).split(',');
       return parts.map((s) => s.trim()).filter(Boolean);
     };
+    const normalizeTextList = (raw) => {
+      if (raw == null || raw === '') return [];
+      const parts = Array.isArray(raw)
+        ? raw.flatMap((x) => String(x).split(','))
+        : String(raw).split(',');
+      return parts.map((s) => s.trim()).filter(Boolean);
+    };
 
     let statusList = normalizeStatusList(status);
+    const wixBookingIds = normalizeTextList(wix_booking_id);
     const isPendingFilter = statusList.length === 1 && statusList[0].toLowerCase() === 'pending';
 
     // Admin Booked tab: include rescheduled (comma may be stripped by proxies; some clients send only booked)
@@ -398,6 +406,11 @@ const getAllSessions = async (req, res) => {
     }
     if (client_id) {
       countQuery = countQuery.eq('client_id', client_id);
+    }
+    if (wixBookingIds.length === 1) {
+      countQuery = countQuery.eq('wix_booking_id', wixBookingIds[0]);
+    } else if (wixBookingIds.length > 1) {
+      countQuery = countQuery.in('wix_booking_id', wixBookingIds);
     }
     if (date) {
       countQuery = countQuery.eq('scheduled_date', date);
@@ -468,6 +481,11 @@ const getAllSessions = async (req, res) => {
     }
     if (client_id) {
       query = query.eq('client_id', client_id);
+    }
+    if (wixBookingIds.length === 1) {
+      query = query.eq('wix_booking_id', wixBookingIds[0]);
+    } else if (wixBookingIds.length > 1) {
+      query = query.in('wix_booking_id', wixBookingIds);
     }
     if (date) {
       query = query.eq('scheduled_date', date);
