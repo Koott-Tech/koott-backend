@@ -1961,23 +1961,35 @@ async function completeWixBooking(req, res) {
           [data.client_first_name, data.client_last_name].filter(Boolean).join(' ').trim(),
           data.client_first_name,
         ) || 'there';
-        const therapistName = data.therapist_name || 'your therapist';
-
         // Pull therapist note + completion timestamp from the linked sessions row
         // (in case it was completed via the regular flow with a summary)
         let therapistNote = '';
         let completedAt = data.updated_at || new Date().toISOString();
+        let therapistName = data.therapist_name || '';
         if (data.wix_booking_id) {
           const { data: linkedSess } = await supabaseAdmin
             .from('sessions')
-            .select('summary, summary_notes, completion_date, updated_at')
+            .select(`
+              summary,
+              summary_notes,
+              completion_date,
+              updated_at,
+              psychologist:psychologists!sessions_psychologist_id_fkey(first_name, last_name)
+            `)
             .eq('wix_booking_id', data.wix_booking_id)
             .maybeSingle();
           if (linkedSess) {
             therapistNote = (linkedSess.summary && String(linkedSess.summary).trim()) || '';
             completedAt = linkedSess.completion_date || linkedSess.updated_at || completedAt;
+            if (!therapistName) {
+              const psychologistRow = Array.isArray(linkedSess.psychologist)
+                ? linkedSess.psychologist[0]
+                : linkedSess.psychologist;
+              therapistName = `${psychologistRow?.first_name || ''} ${psychologistRow?.last_name || ''}`.trim();
+            }
           }
         }
+        if (!therapistName) therapistName = 'your therapist';
 
         const result = await interaktService.sendSessionFollowUp(clientPhone, {
           clientName, psychologistName: therapistName, completedAt, therapistNote,

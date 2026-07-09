@@ -1487,6 +1487,11 @@ const completeSession = async (req, res) => {
           user_id,
           phone_number,
           user:users(email)
+        ),
+        psychologist:psychologists!sessions_psychologist_id_fkey(
+          id,
+          first_name,
+          last_name
         )
       `)
       .eq('id', sessionId)
@@ -1575,9 +1580,28 @@ const completeSession = async (req, res) => {
           const interaktService = require('../utils/interaktService');
           const clientPhone = client?.phone_number || null;
           if (clientPhone) {
-            const psychologistName = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim() || 'your therapist';
+            let psychologistName = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim();
+            if (!psychologistName) {
+              const psychologistRow = Array.isArray(regularSession?.psychologist)
+                ? regularSession.psychologist[0]
+                : regularSession?.psychologist;
+              psychologistName = `${psychologistRow?.first_name || ''} ${psychologistRow?.last_name || ''}`.trim();
+            }
+            if (!psychologistName) {
+              const { data: psychologist } = await supabaseAdmin
+                .from('psychologists')
+                .select('first_name, last_name')
+                .eq('id', regularSession?.psychologist_id || psychologistId)
+                .maybeSingle();
+              psychologistName = `${psychologist?.first_name || ''} ${psychologist?.last_name || ''}`.trim();
+            }
+            if (!psychologistName) psychologistName = 'your therapist';
             const clientName = getClientDisplayName(client, 'there');
-            const therapistNote = (updatedSession?.summary && String(updatedSession.summary).trim()) || '';
+            const therapistNote = (
+              (updatedSession?.summary && String(updatedSession.summary).trim()) ||
+              (updatedSession?.session_summary && String(updatedSession.session_summary).trim()) ||
+              ''
+            );
             const completedAt = updatedSession?.completion_date || updatedSession?.updated_at || new Date().toISOString();
 
             const result = await interaktService.sendSessionFollowUp(clientPhone, {

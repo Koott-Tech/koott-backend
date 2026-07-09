@@ -20,6 +20,21 @@ const {
   getPsychologistDisplayName,
 } = require('../utils/sessionTitleFormatter');
 
+async function writeSessionDeliveryMarkers(sessionId, fields) {
+  if (!sessionId || !fields || Object.keys(fields).length === 0) return;
+  try {
+    const { error } = await supabaseAdmin
+      .from('sessions')
+      .update(fields)
+      .eq('id', sessionId);
+    if (!error) return;
+    if (/column .*email_sent_at.* does not exist/i.test(error.message || '')) return;
+    console.warn('[admin delivery markers] update failed:', error.message || error);
+  } catch (err) {
+    console.warn('[admin delivery markers] unexpected error:', err?.message || err);
+  }
+}
+
 const buildAdminManualWixMirror = ({
   syntheticWixBookingId,
   scheduledDate,
@@ -331,18 +346,24 @@ async function createOneManualPackageSession({
     const packageInfo = { totalSessions: sessionCount, completedSessions: sessionNumber - 1, remainingSessions: sessionCount - sessionNumber, packageType: sessionType === 'couple' ? `couple_package_${sessionCount}` : `package_${sessionCount}` };
     try {
       const emailService = require('../utils/emailService');
-      await emailService.sendSessionConfirmation({
+      const emailResult = await emailService.sendSessionConfirmation({
         clientName, psychologistName, sessionDate: scheduledDate, sessionTime: scheduledTime,
         sessionDuration: `${durationMinutes} minutes`, clientEmail: clientEmailResolved,
         psychologistEmail: psychologist.email, googleMeetLink: meetData.meetLink, meetLink: meetData.meetLink,
         googleCalendarEventId: meetData.eventId, sessionId: session.id, amount: price, price,
         status: 'booked', psychologistId: psychologist.id, clientId: client.id, packageInfo,
       });
+      if (emailResult?.clientEmailSent === true) {
+        await writeSessionDeliveryMarkers(session.id, { email_sent_at: new Date().toISOString() });
+      }
     } catch (e) { console.error('[manualPackage] email failed:', e.message); }
     try {
       const interaktService = require('../utils/interaktService');
       const meetOrNull = meetData.meetLink || null;
-      if (client.phone_number) await interaktService.sendBookingConfirmation(client.phone_number, { clientName, psychologistName, date: scheduledDate, time: scheduledTime, meetLink: meetOrNull });
+      if (client.phone_number) {
+        const res = await interaktService.sendBookingConfirmation(client.phone_number, { clientName, psychologistName, date: scheduledDate, time: scheduledTime, meetLink: meetOrNull });
+        if (res?.success) await writeSessionDeliveryMarkers(session.id, { whatsapp_sent_at: new Date().toISOString() });
+      }
       if (psychologist.phone) await interaktService.sendSessionNotificationPsychologist(psychologist.phone, { therapistName: psychologistName, clientName, date: scheduledDate, time: scheduledTime, meetLink: meetOrNull });
     } catch (e) { console.error('[manualPackage] whatsapp failed:', e.message); }
     try { require('../services/sessionReminderService').checkAndSendReminderForSessionId(session.id).catch(() => {}); } catch {}
@@ -1297,7 +1318,7 @@ const createManualBooking = async (req, res) => {
       const emailClientName = `${client.first_name || ''} ${client.last_name || ''}`.trim() || 'Client';
       const psychologistName = `${psychologist.first_name} ${psychologist.last_name}`.trim();
 
-      await emailService.sendSessionConfirmation({
+      const emailResult = await emailService.sendSessionConfirmation({
         clientName: emailClientName,
         psychologistName: psychologistName,
         sessionDate: scheduled_date,
@@ -1317,6 +1338,9 @@ const createManualBooking = async (req, res) => {
         clientId: client.id,
         packageInfo: packageInfoForNotification
       });
+      if (emailResult?.clientEmailSent === true) {
+        await writeSessionDeliveryMarkers(session.id, { email_sent_at: new Date().toISOString() });
+      }
         console.log('✅ [MANUAL BOOKING] Email notifications sent');
     } catch (emailError) {
         console.error('❌ [MANUAL BOOKING] Email notification failed:', emailError);
@@ -1343,6 +1367,7 @@ const createManualBooking = async (req, res) => {
           meetLink: meetLinkOrPending,
         });
         if (res?.success) {
+          await writeSessionDeliveryMarkers(session.id, { whatsapp_sent_at: new Date().toISOString() });
           console.log('✅ [MANUAL BOOKING] booking_confirmation_v1 sent to client');
         } else {
           console.warn('⚠️ [MANUAL BOOKING] booking_confirmation_v1 to client failed:', res?.error || res?.reason);
@@ -5073,7 +5098,7 @@ const bookPackageNextSession = async (req, res) => {
         // Notifications: email + WhatsApp to BOTH client and therapist (same as manual booking).
         // Only send the real Meet link — never the fallback placeholder.
         try {
-          await emailService.sendSessionConfirmation({
+          const emailResult = await emailService.sendSessionConfirmation({
             clientName, psychologistName,
             sessionDate: scheduled_date, sessionTime: scheduled_time,
             sessionDuration: `${nextPkgMeetMinutes} minutes`,
@@ -5084,13 +5109,17 @@ const bookPackageNextSession = async (req, res) => {
             sessionId: session.id, amount: 0, price: 0,
             status: 'booked', psychologistId, clientId: client_id, packageInfo,
           });
+          if (emailResult?.clientEmailSent === true) {
+            await writeSessionDeliveryMarkers(session.id, { email_sent_at: new Date().toISOString() });
+          }
         } catch (e) { console.error('[BOOK PACKAGE NEXT] email failed:', e.message); }
 
         try {
           if (clientDetails?.phone_number) {
-            await interaktService.sendBookingConfirmation(clientDetails.phone_number, {
+            const res = await interaktService.sendBookingConfirmation(clientDetails.phone_number, {
               clientName, psychologistName, date: scheduled_date, time: scheduled_time, meetLink: effectiveMeetLink,
             });
+            if (res?.success) await writeSessionDeliveryMarkers(session.id, { whatsapp_sent_at: new Date().toISOString() });
           }
           if (psychologistDetails?.phone) {
             await interaktService.sendSessionNotificationPsychologist(psychologistDetails.phone, {
