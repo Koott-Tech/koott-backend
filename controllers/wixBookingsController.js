@@ -1,5 +1,5 @@
 const { supabaseAdmin } = require('../config/supabase');
-const { getBookingTimeColumnKey, hasOriginalPsychologistColumn } = require('../utils/sessionsBookingTimeColumn');
+const { getBookingTimeColumnKey, hasOriginalPsychologistColumn, hasNotificationMarkerColumns } = require('../utils/sessionsBookingTimeColumn');
 const meetLinkService = require('../utils/meetLinkService');
 const googleCalendarService = require('../utils/googleCalendarService');
 const { fetchWixDiscover, extractBookingsList } = require('../utils/wixDiscoverClient');
@@ -1060,9 +1060,12 @@ async function listWixBookings(req, res) {
     let origPsychNameMap = new Map();
     if (wixBookingIds.length > 0) {
       const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
+      const hasMarkers = await hasNotificationMarkerColumns(supabaseAdmin);
+      // google_calendar_event_id + notified_at exist already; email/whatsapp markers are
+      // added only when the migration is applied so the query never 42703s pre-migration.
       const { data: sessionsData } = await supabaseAdmin
         .from('sessions')
-        .select(`id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time, report, session_notes${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
+        .select(`id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, google_calendar_event_id, notified_at, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time, report, session_notes${hasOrigPsychCol ? ', original_psychologist_id' : ''}${hasMarkers ? ', email_sent_at, whatsapp_sent_at' : ''}`)
         .in('wix_booking_id', wixBookingIds);
 
       if (sessionsData) {
@@ -1180,6 +1183,11 @@ async function listWixBookings(req, res) {
             package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
             session_count: resolvedCount,
             session_status: linkedSession.status || null,
+            // Delivery status for the 3-dot indicator: calendar event, email, WhatsApp.
+            google_calendar_event_id: linkedSession.google_calendar_event_id || null,
+            notified_at: linkedSession.notified_at || null,
+            email_sent_at: linkedSession.email_sent_at || null,
+            whatsapp_sent_at: linkedSession.whatsapp_sent_at || null,
             google_meet_link: linkedSession.google_meet_link || null,
             google_meet_join_url: linkedSession.google_meet_join_url || null,
             google_meet_start_url: linkedSession.google_meet_start_url || null,

@@ -26,6 +26,62 @@ const {
 
 const LOG_PREFIX = '[wixMeetNotify]';
 
+// Where delivery-failure alerts are sent.
+const NOTIFY_FAILURE_ALERT_EMAIL = process.env.NOTIFY_FAILURE_ALERT_EMAIL || 'abhishekravi063@gmail.com';
+
+// The per-channel marker columns (email_sent_at / whatsapp_sent_at / *_error /
+// notification_alert_sent) are added by migration 20260709_notification_channel_markers.sql.
+// Until that migration runs, gracefully no-op the marker writes so notifications still work.
+// Cached after the first probe so we don't check every call.
+let _markersAvailable = null;
+async function markersAvailable() {
+  if (_markersAvailable !== null) return _markersAvailable;
+  const { error } = await supabaseAdmin.from('sessions').select('email_sent_at').limit(1);
+  _markersAvailable = !(error && /column .*email_sent_at.* does not exist/i.test(error.message || ''));
+  if (!_markersAvailable) {
+    console.warn(`${LOG_PREFIX} notification marker columns not found — run migration 20260709_notification_channel_markers.sql to enable per-channel tracking + failure alerts`);
+  }
+  return _markersAvailable;
+}
+
+// Best-effort write of a delivery marker; never throws into the notify flow.
+async function writeMarker(sessionId, updates) {
+  if (!(await markersAvailable())) return;
+  const { error } = await supabaseAdmin.from('sessions').update(updates).eq('id', sessionId);
+  if (error) console.warn(`${LOG_PREFIX} marker write failed for ${sessionId}:`, error.message);
+}
+
+// Emails a delivery-failure alert to the ops address — once per session (guarded by
+// notification_alert_sent so retries don't spam). channel = 'Email' | 'WhatsApp'.
+async function alertDeliveryFailure(channel, session, recipient, errorMsg, ctx = {}) {
+  try {
+    if (!(await markersAvailable())) return; // dedup needs the column; skip until migrated
+    const { data: cur } = await supabaseAdmin
+      .from('sessions').select('notification_alert_sent').eq('id', session.id).maybeSingle();
+    if (cur?.notification_alert_sent) return; // already alerted for this session
+
+    const subject = `⚠️ Koott: ${channel} confirmation FAILED — ${ctx.clientName || 'client'}`;
+    const html = `
+      <h2>${channel} confirmation did not send</h2>
+      <table cellpadding="6" style="border-collapse:collapse">
+        <tr><td><b>Channel</b></td><td>${channel}</td></tr>
+        <tr><td><b>Recipient</b></td><td>${recipient || '(none on record — wrong/missing contact)'}</td></tr>
+        <tr><td><b>Reason</b></td><td>${errorMsg || 'unknown'}</td></tr>
+        <tr><td><b>Client</b></td><td>${ctx.clientName || '-'}</td></tr>
+        <tr><td><b>Therapist</b></td><td>${ctx.psychologistName || '-'}</td></tr>
+        <tr><td><b>Session</b></td><td>${session.scheduled_date} ${session.scheduled_time}</td></tr>
+        <tr><td><b>Session ID</b></td><td>${session.id}</td></tr>
+        <tr><td><b>Wix booking</b></td><td>${session.wix_booking_id || '-'}</td></tr>
+      </table>
+      <p>Fix the client's ${channel === 'WhatsApp' ? 'phone number' : 'email'} and it will retry automatically on the next sync.</p>`;
+    await emailService.sendEmail({ to: NOTIFY_FAILURE_ALERT_EMAIL, subject, html });
+    await supabaseAdmin.from('sessions').update({ notification_alert_sent: true }).eq('id', session.id);
+    console.log(`${LOG_PREFIX} 📨 ${channel} failure alert sent to ${NOTIFY_FAILURE_ALERT_EMAIL} for session ${session.id}`);
+  } catch (e) {
+    console.error(`${LOG_PREFIX} could not send ${channel} failure alert for ${session.id}:`, e.message || e);
+  }
+}
+
 /**
  * Process newly upserted Wix sessions that don't yet have a Google Meet link.
  *
@@ -107,6 +163,7 @@ async function processOneSession(session, tempPassword = null) {
     .from('clients')
     .select(`
       id,
+      email,
       first_name,
       last_name,
       child_name,
@@ -141,8 +198,12 @@ async function processOneSession(session, tempPassword = null) {
   const clientUserData = Array.isArray(clientDetails.user)
     ? clientDetails.user?.[0]
     : clientDetails.user;
-  const clientEmail = clientUserData?.email;
-  const clientPhone = clientDetails.phone_number;
+  // Recipient resolution with fallbacks. The linked user email is preferred, but for
+  // Wix-only clients it can be missing — fall back to the clients row and finally to the
+  // contact info Wix sent on the booking payload, so a confirmation always has a target.
+  const wixClient = (session.wix_payload && session.wix_payload.client) || {};
+  const clientEmail = clientUserData?.email || clientDetails.email || wixClient.email || null;
+  const clientPhone = clientDetails.phone_number || wixClient.phone || null;
 
   // ── Duration ──────────────────────────────────────────────────────────
   // 1. Compute from actual Wix start/end times — ground truth for every session type.
@@ -289,24 +350,41 @@ async function processOneSession(session, tempPassword = null) {
       tempPassword: tempPassword,
     };
 
-    // Send the combined confirmation email
-    await emailService.sendSessionConfirmation(emailData);
-    console.log(`${LOG_PREFIX} ✅ Combined confirmation email sent to ${clientEmail}`);
+    // Send the combined confirmation email and HONOUR its delivery result.
+    const emailResult = await emailService.sendSessionConfirmation(emailData);
+    const clientEmailDelivered = emailResult?.clientEmailSent === true;
+    const hadRecipient = !!clientEmail;
 
-    // ── Mark fully processed — interval sync will skip this session from now on ──
-    // Stamped immediately after email succeeds. WhatsApp is fire-and-forget below.
-    const { error: flagErr } = await supabaseAdmin
-      .from('sessions')
-      .update({ notified_at: new Date().toISOString() })
-      .eq('id', session.id);
-
-    if (flagErr) {
-      console.warn(`${LOG_PREFIX} ⚠️ could not set notified_at for session ${session.id}:`, flagErr.message);
+    // ── Mark notified ONLY when the client confirmation actually went out ──
+    // Previously notified_at was stamped unconditionally, so a swallowed send failure
+    // marked the session "done" with nothing delivered. Now: stamp only on real delivery
+    // (or when there's genuinely no recipient, to avoid an infinite retry loop). If we had
+    // a recipient but the send failed, leave notified_at NULL so a later run retries — the
+    // Meet is guarded by google_calendar_event_id, so the retry reuses the existing event.
+    if (clientEmailDelivered) {
+      await writeMarker(session.id, { email_sent_at: new Date().toISOString(), email_error: null });
+      const { error: flagErr } = await supabaseAdmin
+        .from('sessions')
+        .update({ notified_at: new Date().toISOString() })
+        .eq('id', session.id);
+      if (flagErr) console.warn(`${LOG_PREFIX} ⚠️ could not set notified_at for session ${session.id}:`, flagErr.message);
+      else console.log(`${LOG_PREFIX} ✅ client email delivered → notified_at stamped for ${session.id} (${clientEmail})`);
+    } else if (!hadRecipient) {
+      // Nothing to send to — record why, alert ops, and stamp notified to avoid infinite retry.
+      await writeMarker(session.id, { email_error: 'no-recipient (no email on user/clients/Wix)' });
+      await alertDeliveryFailure('Email', session, null, 'No client email on record (user/clients/Wix all empty)', { clientName, psychologistName });
+      await supabaseAdmin.from('sessions').update({ notified_at: new Date().toISOString() }).eq('id', session.id);
+      console.warn(`${LOG_PREFIX} ⚠️ session ${session.id}: NO client email even after Wix fallback — alerted + stamped notified`);
     } else {
-      console.log(`${LOG_PREFIX} ✅ notified_at stamped for session ${session.id}`);
+      // Had a recipient but the send failed: record error, alert ops, leave UNNOTIFIED to retry.
+      await writeMarker(session.id, { email_error: emailResult?.clientEmailError || 'send failed' });
+      await alertDeliveryFailure('Email', session, clientEmail, emailResult?.clientEmailError, { clientName, psychologistName });
+      await supabaseAdmin.from('sessions').update({ notified_at: null }).eq('id', session.id);
+      console.error(`${LOG_PREFIX} ❌ session ${session.id}: client email NOT delivered to ${clientEmail} (${emailResult?.clientEmailError || 'unknown'}) — left UNNOTIFIED for retry`);
     }
 
-    // Send WhatsApp confirmation — best-effort, never blocks notified_at
+    // Send WhatsApp confirmation — best-effort, never blocks notified_at. Marks whatsapp_sent_at
+    // only on real success; on failure records the error and alerts ops.
     if (clientPhone) {
       interaktService.sendBookingConfirmation(clientPhone, {
         clientName: clientName,
@@ -314,11 +392,19 @@ async function processOneSession(session, tempPassword = null) {
         date: session.scheduled_date,
         time: session.scheduled_time,
         meetLink: meetLink,
-      }).then(() => {
+      }).then(async () => {
+        await writeMarker(session.id, { whatsapp_sent_at: new Date().toISOString(), whatsapp_error: null });
         console.log(`${LOG_PREFIX} ✅ WhatsApp booking_confirmation_v1 sent to client ${clientPhone.slice(0, 6)}****`);
-      }).catch(err => {
-        console.warn(`${LOG_PREFIX} ⚠️ Client WhatsApp failed for session ${session.id} (non-blocking):`, err.message || err);
+      }).catch(async err => {
+        const msg = err?.message || String(err);
+        await writeMarker(session.id, { whatsapp_error: msg });
+        await alertDeliveryFailure('WhatsApp', session, clientPhone, msg, { clientName, psychologistName });
+        console.warn(`${LOG_PREFIX} ⚠️ Client WhatsApp failed for session ${session.id} (non-blocking):`, msg);
       });
+    } else {
+      await writeMarker(session.id, { whatsapp_error: 'no-recipient (no phone on clients/Wix)' });
+      await alertDeliveryFailure('WhatsApp', session, null, 'No client phone on record (clients/Wix empty)', { clientName, psychologistName });
+      console.warn(`${LOG_PREFIX} ⚠️ session ${session.id}: NO client phone — alerted, WhatsApp skipped`);
     }
 
     // Send WhatsApp notification to therapist — best-effort
@@ -351,4 +437,51 @@ async function processOneSession(session, tempPassword = null) {
   return 'processed';
 }
 
-module.exports = { processNewWixSessions, processOneSession };
+/**
+ * Retry sweep for notifications that never completed — independent of the Wix sync's
+ * createdAfter window. Without this, a session whose email/WhatsApp failed would only be
+ * retried while its booking stays inside the rolling sync window (~hours), then be stuck
+ * forever with notified_at NULL and nothing delivered. This re-attempts any still-pending
+ * confirmation, bounded so it never rescans history:
+ *   - status 'booked'      (confirmed, not pending/cancelled)
+ *   - notified_at IS NULL  (not yet delivered)
+ *   - future sessions only (no point notifying past ones)
+ *   - created in the last 14 days (cap the backlog)
+ * processOneSession's atomic claim + google_calendar_event_id guard make this safe to run
+ * alongside the normal sync (no duplicate meets, no double emails).
+ */
+async function processPendingNotifications() {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const sinceIso = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
+  const { data: sessions, error } = await supabaseAdmin
+    .from('sessions')
+    .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, google_calendar_event_id, notified_at, wix_payload, source, price, amount')
+    .is('notified_at', null)
+    .eq('status', 'booked')
+    .eq('source', 'wix')
+    .gte('scheduled_date', todayIso)
+    .gte('created_at', sinceIso)
+    .limit(50);
+
+  if (error) {
+    console.error(`${LOG_PREFIX} pending-notification sweep fetch failed:`, error.message || error);
+    return { processed: 0, errors: 1 };
+  }
+  if (!sessions?.length) return { processed: 0, errors: 0 };
+
+  console.log(`${LOG_PREFIX} retrying ${sessions.length} pending notification(s)`);
+  let processed = 0;
+  let errors = 0;
+  for (const session of sessions) {
+    try {
+      await processOneSession(session);
+      processed++;
+    } catch (err) {
+      errors++;
+      console.error(`${LOG_PREFIX} pending retry error for session ${session.id}:`, err.message || err);
+    }
+  }
+  return { processed, errors };
+}
+
+module.exports = { processNewWixSessions, processOneSession, processPendingNotifications };

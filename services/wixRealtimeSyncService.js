@@ -1,4 +1,5 @@
 const { performWixSync } = require('../controllers/wixBookingsController');
+const { processPendingNotifications } = require('./wixMeetNotifyService');
 
 let timer = null;
 let isRunning = false;
@@ -51,6 +52,18 @@ async function runOnce(source = 'interval') {
     console.log(
       `[wixRealtimeSyncService] ${source}: synced ${result.upserted} booking(s) in ${tookMs}ms`
     );
+    // Retry any confirmations that never delivered (email/WhatsApp failed) — this is
+    // independent of the sync's createdAfter window, so a failed notification is retried
+    // every cycle until it succeeds instead of getting stuck. Safe: atomic-claimed + the
+    // Meet is guarded by google_calendar_event_id (no duplicate invites).
+    try {
+      const pending = await processPendingNotifications();
+      if (pending.processed || pending.errors) {
+        console.log(`[wixRealtimeSyncService] ${source}: pending-notification retry — processed ${pending.processed}, errors ${pending.errors}`);
+      }
+    } catch (notifyErr) {
+      console.error('[wixRealtimeSyncService] pending-notification retry failed:', notifyErr.message || notifyErr);
+    }
   } catch (e) {
     if (e.code === 'WIX_CONFIG_MISSING') {
       console.warn('[wixRealtimeSyncService] skipped: Wix env not configured');

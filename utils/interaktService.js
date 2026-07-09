@@ -127,11 +127,14 @@ async function sendTemplateMessage(toPhone, templateName, languageCode = 'en', o
         res.on('end', () => {
           try {
             const json = JSON.parse(data || '{}');
-            if (res.statusCode >= 200 && res.statusCode < 300) {
-              console.log(`${LOG_PREFIX} ✅ template "${templateName}" sent successfully`);
+            // Interakt can return HTTP 2xx while result:false (number not on WhatsApp,
+            // template paused, etc.). Require BOTH a 2xx status AND result === true — and note
+            // that even this only means "queued", NOT delivered (delivery arrives via webhook).
+            if (res.statusCode >= 200 && res.statusCode < 300 && json?.result === true) {
+              console.log(`${LOG_PREFIX} ✅ template "${templateName}" queued (id: ${json.id || 'n/a'}) — awaiting webhook for delivery`);
               resolve({ success: true, data: json });
             } else {
-              console.error(`${LOG_PREFIX} ❌ API error (${res.statusCode}):`, json);
+              console.error(`${LOG_PREFIX} ❌ send rejected (HTTP ${res.statusCode}):`, JSON.stringify(json));
               resolve({ success: false, error: json });
             }
           } catch (parseErr) {

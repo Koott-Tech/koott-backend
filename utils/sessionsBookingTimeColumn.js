@@ -48,8 +48,30 @@ async function hasOriginalPsychologistColumn(supabaseAdmin) {
   return cachedHasOriginalPsych;
 }
 
+/**
+ * Whether the per-channel notification marker columns exist (post-migration
+ * 20260709_notification_channel_markers.sql: email_sent_at, whatsapp_sent_at, …).
+ * Probed once and cached.
+ */
+let cachedHasNotificationMarkers = null;
+
+async function hasNotificationMarkerColumns(supabaseAdmin) {
+  if (cachedHasNotificationMarkers != null) return cachedHasNotificationMarkers;
+  const { error } = await supabaseAdmin.from('sessions').select('email_sent_at').limit(1);
+  if (error?.code === '42703' || String(error?.message || '').includes('does not exist')) {
+    cachedHasNotificationMarkers = false;
+    console.warn(
+      '[sessions] notification marker columns missing — delivery dots will show only calendar status. Apply migration 20260709_notification_channel_markers.sql.'
+    );
+    return cachedHasNotificationMarkers;
+  }
+  cachedHasNotificationMarkers = !error;
+  return cachedHasNotificationMarkers;
+}
+
 module.exports = {
   getBookingTimeColumnKey,
   appendBookingTimeSelectFragment,
   hasOriginalPsychologistColumn,
+  hasNotificationMarkerColumns,
 };

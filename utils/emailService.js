@@ -327,27 +327,38 @@ class EmailService {
         receiptFileName = `Receipt-${sessionData.receiptNumber}.pdf`;
       }
 
-      // Send email to client
+      // Send email to client — isolated in its own try/catch so a client-send failure is
+      // REPORTED back to the caller (not silently swallowed) and doesn't abort the
+      // psychologist/admin emails below.
+      let clientEmailSent = false;
+      let clientEmailError = null;
       if (clientEmail && !clientEmail.includes('placeholder')) {
-        console.log('📧 Sending email to client:', clientEmail);
-        await this.sendClientConfirmation({
-          to: clientEmail,
-          clientName,
-          psychologistName,
-          scheduledDate: formattedDateShort, // Use short format for email template
-          scheduledTime: formattedTime,
-          googleMeetLink: finalMeetLink,
-          calendarInvite: calendarInvites.client,
-          googleCalendarLink,
-          outlookCalendarLink,
-          price: finalPrice || 0,
-          receiptPdfBuffer: receiptPdfBuffer || null, // Receipt PDF buffer to attach (not used anymore)
-          receiptFileName: receiptFileName, // Receipt filename for attachment (not used anymore)
-          packageInfo: packageInfo || null, // Package information
-          durationMinutes,
-          tempPassword: tempPassword || null // Pass it through
-        });
+        try {
+          console.log('📧 Sending email to client:', clientEmail);
+          await this.sendClientConfirmation({
+            to: clientEmail,
+            clientName,
+            psychologistName,
+            scheduledDate: formattedDateShort, // Use short format for email template
+            scheduledTime: formattedTime,
+            googleMeetLink: finalMeetLink,
+            calendarInvite: calendarInvites.client,
+            googleCalendarLink,
+            outlookCalendarLink,
+            price: finalPrice || 0,
+            receiptPdfBuffer: receiptPdfBuffer || null, // Receipt PDF buffer to attach (not used anymore)
+            receiptFileName: receiptFileName, // Receipt filename for attachment (not used anymore)
+            packageInfo: packageInfo || null, // Package information
+            durationMinutes,
+            tempPassword: tempPassword || null // Pass it through
+          });
+          clientEmailSent = true;
+        } catch (e) {
+          clientEmailError = e?.message || String(e);
+          console.error('❌ Client confirmation email FAILED for', clientEmail, ':', clientEmailError);
+        }
       } else {
+        clientEmailError = 'no-recipient';
         console.log('⚠️ Skipping client email (placeholder or missing):', clientEmail);
       }
 
@@ -391,10 +402,10 @@ class EmailService {
         });
       }
 
-      return true;
+      return { success: true, clientEmailSent, clientEmailError };
     } catch (error) {
       console.error('Error sending session confirmation emails:', error);
-      return false;
+      return { success: false, clientEmailSent: false, clientEmailError: error?.message || String(error) };
     }
   }
 
