@@ -1427,11 +1427,16 @@ class EmailService {
     // Extract first name from name (empty string if unknown — greeting will just say "Hey,")
     const firstName = name ? name.split(' ')[0] : '';
 
-    // Format dates as "Mon, 12 Jan 2026"
+    // Format dates as "Mon, 12 Jan 2026".
+    // IDEMPOTENT: sendRescheduleNotification already formats these before calling us, so a
+    // second pass fed "Sun, 12 Jul 2026" into `new Date(...T00:00:00+05:30)` → "Invalid Date"
+    // in the email. Only parse raw ISO dates (YYYY-MM-DD); pass anything else through.
     const formatDateShort = (dateStr) => {
       if (!dateStr) return '';
+      if (!/^\d{4}-\d{2}-\d{2}/.test(String(dateStr))) return String(dateStr);
       try {
         const d = new Date(`${dateStr}T00:00:00+05:30`);
+        if (Number.isNaN(d.getTime())) return String(dateStr);
         return d.toLocaleDateString('en-IN', {
           weekday: 'short',
           day: '2-digit',
@@ -1444,11 +1449,14 @@ class EmailService {
       }
     };
 
-    // Format time to 12-hour format with IST
+    // Format time to 12-hour format with IST.
+    // IDEMPOTENT for the same reason: re-parsing an already-formatted "2:00 PM (IST)" split on
+    // ':' produced hours=2 → "2:00 AM", silently flipping PM to AM. Only parse raw HH:MM[:SS].
     const formatTimeForEmail = (timeStr) => {
       if (!timeStr) return '';
+      if (!/^\d{1,2}:\d{2}(:\d{2})?$/.test(String(timeStr).trim())) return String(timeStr);
       try {
-        const [h, m] = timeStr.split(':');
+        const [h, m] = String(timeStr).trim().split(':');
         const hours = parseInt(h, 10);
         const minutes = parseInt(m || '0', 10);
         const period = hours >= 12 ? 'PM' : 'AM';

@@ -992,14 +992,23 @@ async function listWixBookings(req, res) {
       const startMs = getStartTimeMs(row);
       const now = Date.now();
       const activeStatuses = new Set(['booked', 'scheduled', 'rescheduled', 'reschedule_requested', 'confirmed']);
+      const isActive = activeStatuses.has(effective);
+      // An active session whose start time has passed reads as "pending" (awaiting completion).
+      // Keep the tabs consistent with that badge: past-due active rows belong ONLY to Pending,
+      // so Upcoming and Rescheduled must exclude them — otherwise a past-due rescheduled session
+      // shows in BOTH the Rescheduled tab and the Pending tab.
+      const isPastDue = startMs > 0 && startMs < now;
 
-      if (normalizedStatus === 'booked') {
-        // Upcoming = all booked/active sessions regardless of whether start time is past or future
-        return activeStatuses.has(effective);
-      }
       if (normalizedStatus === 'pending') {
-        // Pending = booked sessions whose start time has already passed (past-due)
-        return activeStatuses.has(effective) && startMs > 0 && startMs < now;
+        return isActive && isPastDue;
+      }
+      if (normalizedStatus === 'booked') {
+        // Upcoming = active & still upcoming (past-due active ones are Pending, not Upcoming)
+        return isActive && !isPastDue;
+      }
+      if (normalizedStatus === 'rescheduled') {
+        // Rescheduled = rescheduled & still upcoming (past-due rescheduled read as Pending)
+        return effective === 'rescheduled' && !isPastDue;
       }
       if (normalizedStatus === 'no_show') {
         return effective === 'no_show' || effective === 'noshow';
@@ -1063,16 +1072,25 @@ async function listWixBookings(req, res) {
       const hasMarkers = await hasNotificationMarkerColumns(supabaseAdmin);
       // google_calendar_event_id + notified_at exist already; email/whatsapp markers are
       // added only when the migration is applied so the query never 42703s pre-migration.
-      const { data: sessionsData } = await supabaseAdmin
-        .from('sessions')
-        .select(`id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, google_calendar_event_id, notified_at, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time, report, session_notes${hasOrigPsychCol ? ', original_psychologist_id' : ''}${hasMarkers ? ', email_sent_at, whatsapp_sent_at' : ''}`)
-        .in('wix_booking_id', wixBookingIds);
-
-      if (sessionsData) {
-        sessionsData.forEach(s => {
-          sessionMap.set(s.wix_booking_id, s);
-        });
+      const sessionSelect = `id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, google_calendar_event_id, notified_at, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time, report, session_notes${hasOrigPsychCol ? ', original_psychologist_id' : ''}${hasMarkers ? ', email_sent_at, whatsapp_sent_at' : ''}`;
+      // Batch the id list — a single .in() with hundreds of ids overflows the PostgREST
+      // GET URL and returns NULL, leaving session_status unattached. That made the status
+      // filters fall back to the (often stale) wix_bookings.status, so e.g. completed
+      // sessions whose mirror still said "booked" wrongly showed under the Pending tab.
+      const sessionsData = [];
+      for (let i = 0; i < wixBookingIds.length; i += 100) {
+        const chunk = wixBookingIds.slice(i, i + 100);
+        const { data: part, error: partErr } = await supabaseAdmin
+          .from('sessions')
+          .select(sessionSelect)
+          .in('wix_booking_id', chunk);
+        if (partErr) { console.warn('[listWixBookings] session batch fetch failed:', partErr.message); continue; }
+        if (part) sessionsData.push(...part);
       }
+
+      sessionsData.forEach(s => {
+        sessionMap.set(s.wix_booking_id, s);
+      });
 
       // Resolve original_psychologist_id -> name for sessions that were transferred.
       const origPsychIds = Array.from(new Set(
