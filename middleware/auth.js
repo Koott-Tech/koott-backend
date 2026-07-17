@@ -439,6 +439,7 @@ const requirePsychologist = requireRole(['psychologist', 'superadmin']); // Supe
 const requireAdmin = requireRole(['admin', 'superadmin']);
 const requireSuperAdmin = requireRole(['superadmin']);
 const requireFinance = requireRole(['finance', 'admin', 'superadmin']); // Finance can access finance routes, admins can too
+const requireEventOrganizer = requireRole(['event_organizer', 'admin', 'superadmin']); // Event organizer can access event routes
 
 module.exports = {
   authenticateToken,
@@ -447,5 +448,6 @@ module.exports = {
   requirePsychologist,
   requireAdmin,
   requireSuperAdmin,
-  requireFinance
+  requireFinance,
+  requireEventOrganizer
 };

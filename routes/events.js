@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const emailService = require('../utils/emailService');
+const whatsappTemplateService = require('../utils/whatsappTemplateService');
 
 /** Normalize a phone number string. Accepts "+91 9876 543210", "9876543210" → "+919876543210". */
 function normalizePhoneNumber(input) {
@@ -123,10 +124,19 @@ router.post('/workshop-register', async (req, res) => {
           .filter(Boolean)
           .join('\n');
 
-        // Workshop registration WhatsApp notifications disabled — confirmation email below
-        // covers the registrant. Internal team notification needs a dedicated Interakt template
-        // (or use email/Slack instead).
-        void recipients; void internalMsg; void registrantWhatsApp;
+        // Workshop registration WhatsApp notifications enabled for training programs/events
+        if (registrantWhatsApp) {
+          try {
+            await whatsappTemplateService.sendBookingConfirmationTemplate(registrantWhatsApp, {
+              clientName: fullName,
+              date: eventTitle,
+              time: 'TBA',
+              meetLink: sessionJoinUrl || 'TBA',
+            });
+          } catch (waErr) {
+            console.warn('[events/workshop-register] WhatsApp notification failed:', waErr?.message || waErr);
+          }
+        }
 
         try {
           await emailService.sendEventRegistrationConfirmation({

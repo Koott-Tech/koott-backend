@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authenticateToken, requireAdmin } = require('../middleware/auth');
+const { authenticateToken, requireEventOrganizer } = require('../middleware/auth');
 const validateCSRF = require('../middleware/csrf');
 const {
   getPublicBySlug,
@@ -24,7 +24,7 @@ const adminLimiter = require('express-rate-limit')({
 router.use(adminLimiter);
 router.use(validateCSRF);
 router.use(authenticateToken);
-router.use(requireAdmin);
+router.use(requireEventOrganizer);
 
 router.get('/admin', listAdmin);
 router.get('/admin/:id', getByIdAdmin);

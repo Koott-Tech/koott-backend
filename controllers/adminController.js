@@ -5450,6 +5450,12 @@ const updateEventRegistration = async (req, res) => {
     if (body.phone !== undefined) patch.phone = String(body.phone || '').trim();
     if (body.event_slug !== undefined) patch.event_slug = String(body.event_slug || '').trim();
     if (body.event_title !== undefined) patch.event_title = String(body.event_title || '').trim();
+    if (body.attendance_status !== undefined) {
+      const status = String(body.attendance_status || '').trim().toLowerCase();
+      if (['pending', 'present', 'absent'].includes(status)) {
+        patch.attendance_status = status;
+      }
+    }
 
     if (patch.full_name !== undefined && patch.full_name.length < 2) {
       return res.status(400).json(errorResponse('Please provide a valid full name.'));
@@ -5476,7 +5482,7 @@ const updateEventRegistration = async (req, res) => {
       .update(patch)
       .eq('id', registrationId)
       .select(
-        'id, event_slug, event_title, full_name, email, country_code, phone, whatsapp_e164, session_join_url, created_at'
+        'id, event_slug, event_title, full_name, email, country_code, phone, whatsapp_e164, session_join_url, attendance_status, created_at'
       )
       .single();
 

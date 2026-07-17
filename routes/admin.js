@@ -76,9 +76,7 @@ router.get('/wix/therapists', wixBookingsController.listWixTherapists);
 router.post('/wix/backfill-clients', wixBookingsController.backfillWixClients);
 
 // Workshop / marketing event registrations (Supabase table event_registrations)
-router.get('/event-registrations', adminController.getEventRegistrations);
-router.put('/event-registrations/:registrationId', adminController.updateEventRegistration);
-router.delete('/event-registrations/:registrationId', adminController.deleteEventRegistration);
+// Moved to eventRegistrationsAdmin.js to allow event_organizer access
 
 // Psychologist management
 router.get('/psychologists', adminController.getAllPsychologists);
