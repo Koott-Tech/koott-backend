@@ -524,14 +524,27 @@ async function processPendingNotifications() {
       .is('notified_at', null)
       .is('email_sent_at', null)
       .eq('status', 'booked')
+      // Only sessions this sweep actually retries. Admin-booked rows (source NULL, incl. the
+      // deliberately-silent record-only flow) are never processed here, so escalating them
+      // produced false "still undelivered after repeated retries" alerts for sessions that
+      // were never attempted at all.
+      .eq('source', 'wix')
+      // Only escalate a REAL failed attempt — email_error is set when a send was tried and
+      // failed. NULL means nothing was ever sent, which is not a delivery failure.
+      .not('email_error', 'is', null)
       .eq('notification_alert_sent', false)
       .lt('created_at', oneHourAgo)
       .gte('scheduled_date', new Date().toISOString().slice(0, 10))
       .limit(20);
     for (const s of (stuck || [])) {
-      const { data: c } = await supabaseAdmin.from('clients').select('first_name, last_name').eq('id', s.client_id).maybeSingle();
+      const { data: c } = await supabaseAdmin
+        .from('clients').select('first_name, last_name, email, user:users(email)').eq('id', s.client_id).maybeSingle();
       const { data: p } = await supabaseAdmin.from('psychologists').select('first_name, last_name').eq('id', s.psychologist_id).maybeSingle();
-      await alertDeliveryFailure('Email', s, null, s.email_error || 'still undelivered after repeated retries', {
+      // Report the ACTUAL recipient — passing null made every escalation claim
+      // "(none on record — wrong/missing contact)" even when the client had a valid email.
+      const cu = Array.isArray(c?.user) ? c.user[0] : c?.user;
+      const recipient = cu?.email || c?.email || null;
+      await alertDeliveryFailure('Email', s, recipient, s.email_error, {
         clientName: `${c?.first_name || ''} ${c?.last_name || ''}`.trim() || 'client',
         psychologistName: `${p?.first_name || ''} ${p?.last_name || ''}`.trim() || '-',
         escalated: true,

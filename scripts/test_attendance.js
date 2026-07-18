@@ -8,6 +8,7 @@ async function test() {
     event_title: "Test Event",
     full_name: "Test Therapist",
     email: "therapist@koott.com",
+    country_code: "+91",
     phone: "9999999999",
     attendance_status: "pending"
   };
@@ -23,7 +24,8 @@ async function test() {
     return;
   }
   
-  console.log("Registration inserted successfully:", insertData.id);
+  console.log("Registration inserted successfully with ID:", insertData.id);
+  console.log("Current attendance:", insertData.attendance_status);
   
   console.log("Updating attendance to 'present'...");
   const { data: updateData, error: updateErr } = await supabaseAdmin

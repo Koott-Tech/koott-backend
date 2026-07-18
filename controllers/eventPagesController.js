@@ -1,13 +1,25 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { successResponse, errorResponse } = require('../utils/helpers');
 
+const mapRowToBackend = (row) => ({
+  id: row.id,
+  slug: row.slug,
+  status: row.is_published ? 'published' : 'draft',
+  seo_title: row.content?.seo_title || row.title || null,
+  seo_description: row.content?.seo_description || null,
+  canonical_url: row.content?.canonical_url || null,
+  cms_data: row.content?.cms_data || {},
+  created_at: row.created_at,
+  updated_at: row.updated_at,
+});
+
 const getPublicBySlug = async (req, res) => {
   try {
     const { slug } = req.params;
     const { preview } = req.query;
 
     let q = supabaseAdmin.from('event_pages').select('*').eq('slug', slug);
-    if (!preview) q = q.eq('status', 'published');
+    if (!preview) q = q.eq('is_published', true);
 
     const { data: row, error } = await q.single();
 
@@ -25,7 +37,7 @@ const getPublicBySlug = async (req, res) => {
     }
 
     res.set('Cache-Control', 'public, max-age=60, s-maxage=120');
-    res.json(successResponse(row, 'OK'));
+    res.json(successResponse(mapRowToBackend(row), 'OK'));
   } catch (e) {
     console.error('getPublicBySlug', e);
     res.status(500).json(errorResponse('Failed to load event page', e.message));
@@ -40,7 +52,7 @@ const listPublic = async (req, res) => {
     const { data, error } = await supabaseAdmin
       .from('event_pages')
       .select('*')
-      .eq('status', 'published')
+      .eq('is_published', true)
       .order('updated_at', { ascending: false })
       .limit(lim);
 
@@ -55,7 +67,7 @@ const listPublic = async (req, res) => {
     }
 
     res.set('Cache-Control', 'public, max-age=60, s-maxage=120');
-    res.json(successResponse(data || [], 'OK'));
+    res.json(successResponse((data || []).map(mapRowToBackend), 'OK'));
   } catch (e) {
     console.error('listPublic event_pages', e);
     res.status(500).json(errorResponse('Failed to list event pages', e.message));
@@ -74,7 +86,7 @@ const listAdmin = async (req, res) => {
       .order('updated_at', { ascending: false });
 
     if (search) {
-      q = q.or(`slug.ilike.%${search}%,seo_title.ilike.%${search}%`);
+      q = q.or(`slug.ilike.%${search}%,title.ilike.%${search}%`);
     }
 
     const { data, error, count } = await q.range(offset, offset + lim - 1);
@@ -86,7 +98,7 @@ const listAdmin = async (req, res) => {
 
     res.json(
       successResponse({
-        pages: data || [],
+        pages: (data || []).map(mapRowToBackend),
         pagination: {
           page: parseInt(page, 10),
           limit: lim,
@@ -112,7 +124,7 @@ const getByIdAdmin = async (req, res) => {
       }
       return res.status(500).json(errorResponse('Failed to load event page', error.message));
     }
-    res.json(successResponse(data));
+    res.json(successResponse(mapRowToBackend(data)));
   } catch (e) {
     res.status(500).json(errorResponse('Failed to load event page', e.message));
   }
@@ -151,11 +163,14 @@ const createPage = async (req, res) => {
       .from('event_pages')
       .insert({
         slug,
-        status,
-        seo_title: seo_title || null,
-        seo_description: seo_description || null,
-        canonical_url: canonical_url || null,
-        cms_data: typeof cms_data === 'object' && cms_data !== null ? cms_data : {},
+        title: seo_title || null,
+        is_published: status === 'published',
+        content: {
+          seo_title: seo_title || null,
+          seo_description: seo_description || null,
+          canonical_url: canonical_url || null,
+          cms_data: typeof cms_data === 'object' && cms_data !== null ? cms_data : {},
+        },
         updated_at: now,
       })
       .select('*')
@@ -166,7 +181,7 @@ const createPage = async (req, res) => {
       return res.status(500).json(errorResponse('Failed to create event page', error.message));
     }
 
-    res.status(201).json(successResponse(data, 'Created'));
+    res.status(201).json(successResponse(mapRowToBackend(data), 'Created'));
   } catch (e) {
     res.status(500).json(errorResponse('Failed to create event page', e.message));
   }
@@ -182,21 +197,29 @@ const updatePage = async (req, res) => {
       return res.status(404).json(errorResponse('Event page not found'));
     }
 
+    const currentContent = existing.content || {};
     const update = { updated_at: new Date().toISOString() };
-    if (status !== undefined) update.status = status;
-    if (seo_title !== undefined) update.seo_title = seo_title;
-    if (seo_description !== undefined) update.seo_description = seo_description;
-    if (canonical_url !== undefined) update.canonical_url = canonical_url;
-    if (cms_data !== undefined) {
-      update.cms_data = typeof cms_data === 'object' && cms_data !== null ? cms_data : {};
+    const contentUpdate = { ...currentContent };
+
+    if (status !== undefined) update.is_published = status === 'published';
+    if (seo_title !== undefined) {
+      update.title = seo_title;
+      contentUpdate.seo_title = seo_title;
     }
+    if (seo_description !== undefined) contentUpdate.seo_description = seo_description;
+    if (canonical_url !== undefined) contentUpdate.canonical_url = canonical_url;
+    if (cms_data !== undefined) {
+      contentUpdate.cms_data = typeof cms_data === 'object' && cms_data !== null ? cms_data : {};
+    }
+    
+    update.content = contentUpdate;
 
     const { data, error } = await supabaseAdmin.from('event_pages').update(update).eq('id', id).select('*').single();
 
     if (error) {
       return res.status(500).json(errorResponse('Failed to update event page', error.message));
     }
-    res.json(successResponse(data, 'Updated'));
+    res.json(successResponse(mapRowToBackend(data), 'Updated'));
   } catch (e) {
     res.status(500).json(errorResponse('Failed to update event page', e.message));
   }

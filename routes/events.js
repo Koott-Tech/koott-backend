@@ -69,23 +69,19 @@ router.post('/workshop-register', async (req, res) => {
 
     const insertPayload = {
       event_slug: eventSlug,
-      event_title: eventTitle,
-      full_name: fullName,
+      name: fullName,
       email,
-      country_code: countryCode,
       phone,
-      whatsapp_e164: registrantWhatsApp,
-      session_join_url: sessionJoinUrl,
+      status: 'active',
+      metadata: {
+        event_title: eventTitle,
+        country_code: countryCode,
+        whatsapp_e164: registrantWhatsApp,
+        session_join_url: sessionJoinUrl,
+      },
     };
 
     let { error: dbError } = await supabaseAdmin.from('event_registrations').insert(insertPayload);
-    if (dbError && String(dbError.message || '').includes('session_join_url')) {
-      // Backward compatibility if column wasn't migrated yet.
-      const fallback = { ...insertPayload };
-      delete fallback.session_join_url;
-      const retry = await supabaseAdmin.from('event_registrations').insert(fallback);
-      dbError = retry.error || null;
-    }
 
     if (dbError) {
       const code = dbError.code || '';

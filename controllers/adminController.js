@@ -5385,11 +5385,9 @@ const getPackageLabels = async (req, res) => {
 
 const getEventRegistrations = async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
+    const { data: rawEvents, error } = await supabaseAdmin
       .from('event_registrations')
-      .select(
-        'id, event_slug, event_title, full_name, email, country_code, phone, whatsapp_e164, session_join_url, created_at'
-      )
+      .select('id, event_slug, name, email, phone, metadata, attendance_status, created_at')
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -5405,27 +5403,31 @@ const getEventRegistrations = async (req, res) => {
     }
 
     const bySlug = new Map();
-    for (const row of data || []) {
+    for (const row of rawEvents || []) {
       const slug = row.event_slug || 'unknown';
+      const meta = row.metadata || {};
+      const eventTitle = meta.event_title || slug.replace(/-/g, ' ');
+
       if (!bySlug.has(slug)) {
         bySlug.set(slug, {
           event_slug: slug,
-          event_title: row.event_title || slug.replace(/-/g, ' '),
+          event_title: eventTitle,
           registrations: [],
         });
       }
       const ev = bySlug.get(slug);
-      if (row.event_title && row.event_title.length > (ev.event_title?.length || 0)) {
-        ev.event_title = row.event_title;
+      if (eventTitle.length > (ev.event_title?.length || 0)) {
+        ev.event_title = eventTitle;
       }
       ev.registrations.push({
         id: row.id,
-        full_name: row.full_name,
+        full_name: row.name,
         email: row.email,
-        country_code: row.country_code,
+        country_code: meta.country_code,
         phone: row.phone,
-        whatsapp_e164: row.whatsapp_e164,
-        session_join_url: row.session_join_url || null,
+        whatsapp_e164: meta.whatsapp_e164,
+        session_join_url: meta.session_join_url || null,
+        attendance_status: row.attendance_status,
         created_at: row.created_at,
       });
     }
@@ -5444,20 +5446,37 @@ const updateEventRegistration = async (req, res) => {
     const body = req.body || {};
     const patch = {};
 
-    if (body.full_name !== undefined) patch.full_name = String(body.full_name || '').trim();
+    if (body.full_name !== undefined) patch.name = String(body.full_name || '').trim();
     if (body.email !== undefined) patch.email = String(body.email || '').trim().toLowerCase();
-    if (body.country_code !== undefined) patch.country_code = String(body.country_code || '').trim();
     if (body.phone !== undefined) patch.phone = String(body.phone || '').trim();
     if (body.event_slug !== undefined) patch.event_slug = String(body.event_slug || '').trim();
-    if (body.event_title !== undefined) patch.event_title = String(body.event_title || '').trim();
-    if (body.attendance_status !== undefined) {
-      const status = String(body.attendance_status || '').trim().toLowerCase();
-      if (['pending', 'present', 'absent'].includes(status)) {
-        patch.attendance_status = status;
-      }
+    if (body.attendance_status !== undefined) patch.attendance_status = String(body.attendance_status || '').trim();
+
+    // If metadata fields are being updated, we need to merge them
+    const hasMetaUpdates =
+      body.country_code !== undefined ||
+      body.whatsapp_e164 !== undefined ||
+      body.session_join_url !== undefined ||
+      body.event_title !== undefined;
+
+    if (hasMetaUpdates) {
+      // Fetch existing metadata first
+      const { data: existing } = await supabaseAdmin
+        .from('event_registrations')
+        .select('metadata')
+        .eq('id', registrationId)
+        .single();
+      
+      const currentMeta = existing?.metadata || {};
+      patch.metadata = { ...currentMeta };
+
+      if (body.country_code !== undefined) patch.metadata.country_code = String(body.country_code || '').trim();
+      if (body.whatsapp_e164 !== undefined) patch.metadata.whatsapp_e164 = String(body.whatsapp_e164 || '').trim();
+      if (body.session_join_url !== undefined) patch.metadata.session_join_url = body.session_join_url ? String(body.session_join_url).trim() : null;
+      if (body.event_title !== undefined) patch.metadata.event_title = String(body.event_title || '').trim();
     }
 
-    if (patch.full_name !== undefined && patch.full_name.length < 2) {
+    if (patch.name !== undefined && patch.name.length < 2) {
       return res.status(400).json(errorResponse('Please provide a valid full name.'));
     }
     if (patch.email !== undefined) {
