@@ -53,13 +53,42 @@ async function writeMarker(sessionId, updates) {
 
 // Emails a delivery-failure alert to the ops address — once per session (guarded by
 // notification_alert_sent so retries don't spam). channel = 'Email' | 'WhatsApp'.
+/**
+ * Is this a TRANSIENT provider failure that our retry sweep will heal on its own?
+ * e.g. Gmail "421-4.3.0 Temporary System Problem", 4.x.x soft-bounces, timeouts, rate limits.
+ * These are NOT the client's contact details being wrong, so they shouldn't raise an alert
+ * telling ops to "fix the client's email" — the next sync retries and normally succeeds.
+ */
+function isTransientDeliveryError(errorMsg) {
+  const m = String(errorMsg || '').toLowerCase();
+  if (!m) return false;
+  return (
+    /\b4\d\d[-\s]?4?\.?\d?\.?\d?\b/.test(m) && /temporar|try again|timeout|rate|busy|unavailable|deferred/.test(m)
+      || /temporary system problem/.test(m)
+      || /try again later/.test(m)
+      || /\b421\b|\b45[0-9]\b|\b4\.\d\.\d\b/.test(m)
+      || /etimedout|econnreset|econnrefused|esockettimedout|socket hang up|network/.test(m)
+      || /too many|rate limit|throttl/.test(m)
+  );
+}
+
 async function alertDeliveryFailure(channel, session, recipient, errorMsg, ctx = {}) {
   try {
     if (!(await markersAvailable())) return; // dedup needs the column; skip until migrated
+
+    // Transient provider hiccups (Gmail 421-4.3.0, timeouts, rate limits) self-heal on the
+    // next retry sweep — alerting on them cries wolf AND wrongly blames the client's contact
+    // details. Skip the alert unless it's escalated (i.e. still failing after retries).
+    if (!ctx.escalated && isTransientDeliveryError(errorMsg)) {
+      console.warn(`${LOG_PREFIX} ⏳ ${channel} transient failure for session ${session.id} (${errorMsg}) — will retry, not alerting`);
+      return;
+    }
+
     const { data: cur } = await supabaseAdmin
       .from('sessions').select('notification_alert_sent').eq('id', session.id).maybeSingle();
     if (cur?.notification_alert_sent) return; // already alerted for this session
 
+    const transient = isTransientDeliveryError(errorMsg);
     const subject = `⚠️ Koott: ${channel} confirmation FAILED — ${ctx.clientName || 'client'}`;
     const html = `
       <h2>${channel} confirmation did not send</h2>
@@ -73,7 +102,9 @@ async function alertDeliveryFailure(channel, session, recipient, errorMsg, ctx =
         <tr><td><b>Session ID</b></td><td>${session.id}</td></tr>
         <tr><td><b>Wix booking</b></td><td>${session.wix_booking_id || '-'}</td></tr>
       </table>
-      <p>Fix the client's ${channel === 'WhatsApp' ? 'phone number' : 'email'} and it will retry automatically on the next sync.</p>`;
+      <p>${transient
+        ? `<b>Provider-side issue, not a bad contact.</b> This kept failing across retries — the recipient's ${channel === 'WhatsApp' ? 'number' : 'address'} looks fine, so check the ${channel === 'WhatsApp' ? 'Interakt' : 'email/SMTP'} provider status. It will keep retrying automatically.`
+        : `Fix the client's ${channel === 'WhatsApp' ? 'phone number' : 'email'} and it will retry automatically on the next sync.`}</p>`;
     await emailService.sendEmail({ to: NOTIFY_FAILURE_ALERT_EMAIL, subject, html });
     await supabaseAdmin.from('sessions').update({ notification_alert_sent: true }).eq('id', session.id);
     console.log(`${LOG_PREFIX} 📨 ${channel} failure alert sent to ${NOTIFY_FAILURE_ALERT_EMAIL} for session ${session.id}`);
@@ -481,6 +512,33 @@ async function processPendingNotifications() {
       console.error(`${LOG_PREFIX} pending retry error for session ${session.id}:`, err.message || err);
     }
   }
+
+  // ESCALATION: a transient failure is not alerted on immediately (it usually self-heals on
+  // the next sweep). But if a session is STILL undelivered more than an hour after booking,
+  // the "transient" issue is no longer transient — raise the alert so it can't sit silently.
+  if (await markersAvailable()) {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { data: stuck } = await supabaseAdmin
+      .from('sessions')
+      .select('id, wix_booking_id, scheduled_date, scheduled_time, client_id, psychologist_id, email_error, notification_alert_sent, created_at')
+      .is('notified_at', null)
+      .is('email_sent_at', null)
+      .eq('status', 'booked')
+      .eq('notification_alert_sent', false)
+      .lt('created_at', oneHourAgo)
+      .gte('scheduled_date', new Date().toISOString().slice(0, 10))
+      .limit(20);
+    for (const s of (stuck || [])) {
+      const { data: c } = await supabaseAdmin.from('clients').select('first_name, last_name').eq('id', s.client_id).maybeSingle();
+      const { data: p } = await supabaseAdmin.from('psychologists').select('first_name, last_name').eq('id', s.psychologist_id).maybeSingle();
+      await alertDeliveryFailure('Email', s, null, s.email_error || 'still undelivered after repeated retries', {
+        clientName: `${c?.first_name || ''} ${c?.last_name || ''}`.trim() || 'client',
+        psychologistName: `${p?.first_name || ''} ${p?.last_name || ''}`.trim() || '-',
+        escalated: true,
+      });
+    }
+  }
+
   return { processed, errors };
 }
 
