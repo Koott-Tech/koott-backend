@@ -640,8 +640,37 @@ async function performWixSync(options = {}) {
         `${filterStats.bookings.length}/${bookings.length} kept`
     );
   }
-  // Drop unpaid bookings at the raw level — Wix UNDEFINED status = payment not completed
-  const filteredBookings = filterStats.bookings.filter(b => {
+
+  // RESCUE PASS — the createdAfter window keys on CREATION time, so a booking whose state
+  // changes later is lost forever. Real case: payment declined at booking time (Wix status
+  // UNDEFINED → dropped as unpaid), then the order was marked Paid 6h later — by which point
+  // the booking was outside the 4h window and never looked at again.
+  // The discover payload is already capped (WIX_DISCOVER_BOOKING_LIMIT), so it is safe to also
+  // keep any booking we have NEVER stored, regardless of how old it is. Upsert dedupes, so
+  // re-seeing an old booking is harmless.
+  let rescuedBookings = [];
+  try {
+    const windowIds = new Set(filterStats.bookings.map(b => b?.id).filter(Boolean));
+    const olderIds = bookings.map(b => b?.id).filter(id => id && !windowIds.has(id));
+    if (olderIds.length) {
+      const known = new Set();
+      for (let i = 0; i < olderIds.length; i += 100) {
+        const { data: rows } = await supabaseAdmin
+          .from('wix_bookings').select('wix_booking_id').in('wix_booking_id', olderIds.slice(i, i + 100));
+        (rows || []).forEach(r => known.add(r.wix_booking_id));
+      }
+      rescuedBookings = bookings.filter(b => b?.id && !windowIds.has(b.id) && !known.has(b.id));
+      if (rescuedBookings.length) {
+        console.log(`[performWixSync] rescued ${rescuedBookings.length} booking(s) outside the createdAfter window that were never stored (e.g. paid late)`);
+      }
+    }
+  } catch (e) {
+    console.warn('[performWixSync] rescue pass failed (non-blocking):', e.message || e);
+  }
+
+  // Drop unpaid bookings at the raw level — Wix UNDEFINED status = payment not completed.
+  // A rescued booking still has to be paid now to come in, so a genuinely unpaid one stays out.
+  const filteredBookings = [...filterStats.bookings, ...rescuedBookings].filter(b => {
     const s = String(b?.status || '').trim().toUpperCase();
     return s !== 'UNDEFINED' && s !== '';
   });
