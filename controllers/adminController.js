@@ -147,6 +147,20 @@ const normalizeManualSessionSelection = (rawType, packageData = null) => {
     return { sessionType: 'couple', sessionCount: 3, isPackage: true, isCouplePackage: true };
   }
 
+  // Generic package_N / couple_package_N so an admin can book a custom size (e.g. package_5).
+  // Without this, anything other than the hardcoded 3/6/9 fell through to "individual" and the
+  // package silently became a single session.
+  const couplePkg = /^couple_package_(\d+)$/.exec(input);
+  if (couplePkg) {
+    const n = parseInt(couplePkg[1], 10);
+    if (n > 0) return { sessionType: 'couple', sessionCount: n, isPackage: n > 1, isCouplePackage: n > 1 };
+  }
+  const pkg = /^package_(\d+)$/.exec(input);
+  if (pkg) {
+    const n = parseInt(pkg[1], 10);
+    if (n > 0) return { sessionType: 'package', sessionCount: n, isPackage: n > 1, isCouplePackage: false };
+  }
+
   return { sessionType: 'individual', sessionCount: 1, isPackage: false, isCouplePackage: false };
 };
 
