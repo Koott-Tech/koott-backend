@@ -2965,6 +2965,118 @@ The Koott Team
     const finalMailOptions = this.addEmailHeaders(mailOptions);
     return this.transporter.sendMail(finalMailOptions);
   }
+
+  /**
+   * Send Certificate of Participation
+   */
+  async sendEventCertificate({ to, fullName, eventTitle, pdfBuffer, materials = [] }) {
+    if (!this.transporter) {
+      console.error('📧 Email Service - Transporter not initialized (sendEventCertificate)');
+      throw new Error('Email service not properly initialized');
+    }
+    
+    let materialsHtml = '';
+    const attachments = [{
+      filename: 'Certificate_of_Participation.pdf',
+      content: pdfBuffer,
+      contentType: 'application/pdf',
+      contentDisposition: 'attachment'
+    }];
+
+    const frontendUrl = process.env.Frontend_Base_URL || process.env.FRONTEND_URL || 'https://www.koott.in';
+
+    if (materials && materials.length > 0) {
+      // We don't list out the materials as links since they are directly attached to the email
+      materialsHtml = `
+        <div style="margin: 20px 0; padding: 15px; background-color: #f7fcfb; border-radius: 8px; border-left: 4px solid #025545;">
+          <p style="margin: 0; color: #025545; font-size: 15px;">
+            <strong>Note:</strong> We have also attached the event materials and resources to this email for your reference.
+          </p>
+        </div>
+      `;
+
+      // Download each material and add as attachment
+      try {
+        const { supabaseAdmin } = require('../config/supabase');
+        for (const m of materials) {
+          if (m.url && m.url.includes('/api/images/')) {
+            // Extract bucket and key from /api/images/bucketName/fileKey
+            const parts = m.url.split('/api/images/');
+            if (parts.length === 2) {
+              const pathParts = parts[1].split('/');
+              const bucket = pathParts[0];
+              const key = pathParts.slice(1).join('/');
+              
+              if (bucket && key) {
+                const { data, error } = await supabaseAdmin.storage.from(bucket).download(key);
+                if (!error && data) {
+                  const buffer = Buffer.from(await data.arrayBuffer());
+                  attachments.push({
+                    filename: m.name || key,
+                    content: buffer,
+                    contentDisposition: 'attachment'
+                  });
+                } else {
+                  console.warn('Failed to download material for attachment:', error?.message);
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Error attaching materials to email:', err);
+      }
+    }
+
+    const mailOptions = {
+      from: {
+        name: process.env.EMAIL_FROM_NAME || 'Koott',
+        address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in',
+      },
+      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
+      to,
+      subject: `Certificate of Participation - ${eventTitle}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333333; line-height: 1.6;">
+          <div style="text-align: center; padding: 20px 0; border-bottom: 1px solid #eeeeee;">
+            <h2 style="color: #025545; margin: 0; font-size: 24px;">Certificate of Participation</h2>
+          </div>
+          
+          <div style="padding: 30px 20px;">
+            <p style="font-size: 16px;">Dear <strong>${fullName}</strong>,</p>
+            
+            <p style="font-size: 16px; margin-bottom: 20px;">
+              Thank you for participating in the event <strong>"${eventTitle}"</strong>. We greatly appreciate your engagement and hope you found the session valuable and insightful.
+            </p>
+            
+            <p style="font-size: 16px; margin-bottom: 25px;">
+              Please find your official Certificate of Participation attached to this email.
+            </p>
+
+            ${materialsHtml}
+            
+            <p style="font-size: 16px;">
+              We look forward to welcoming you to our future events.
+            </p>
+            
+            <p style="font-size: 16px; margin-top: 30px; margin-bottom: 0;">
+              Warm regards,<br/>
+              <strong>Team Koott</strong>
+            </p>
+          </div>
+          
+          <div style="background-color: #f9f9f9; padding: 20px; text-align: center; font-size: 12px; color: #777777; border-top: 1px solid #eeeeee;">
+            <p style="margin: 0;">Koott Care Pvt. Ltd.</p>
+            <p style="margin: 5px 0 0 0;">If you have any questions, please contact us at care@koott.in</p>
+          </div>
+        </div>
+      `,
+      attachments
+    };
+    
+    const finalMailOptions = this.addEmailHeaders(mailOptions);
+    return this.transporter.sendMail(finalMailOptions);
+  }
 }
 
 module.exports = new EmailService();

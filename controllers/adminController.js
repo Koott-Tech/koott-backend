@@ -19,6 +19,8 @@ const {
   getClientDisplayName,
   getPsychologistDisplayName,
 } = require('../utils/sessionTitleFormatter');
+const emailService = require('../utils/emailService');
+const { generateCertificate } = require('../utils/certificateService');
 
 async function writeSessionDeliveryMarkers(sessionId, fields) {
   if (!sessionId || !fields || Object.keys(fields).length === 0) return;
@@ -5417,6 +5419,46 @@ const getEventRegistrations = async (req, res) => {
     }
 
     const bySlug = new Map();
+
+    // Fetch all defined events from event_pages
+    const { data: pageEvents } = await supabaseAdmin
+      .from('event_pages')
+      .select('slug, title, content');
+
+    if (pageEvents) {
+      for (const pEvent of pageEvents) {
+        const slug = pEvent.slug;
+        const title = pEvent.title || pEvent.content?.cms_data?.title || pEvent.content?.cms_data?.hero?.title || slug.replace(/-/g, ' ');
+        if (!bySlug.has(slug)) {
+          bySlug.set(slug, {
+            event_slug: slug,
+            event_title: title,
+            registrations: [],
+          });
+        }
+      }
+    }
+
+    // Fetch legacy events from CMS
+    const { data: cmsEvents } = await supabaseAdmin
+      .from('cms')
+      .select('key, data')
+      .like('key', 'event_%');
+
+    if (cmsEvents) {
+      for (const cmsEvent of cmsEvents) {
+        const slug = cmsEvent.key.startsWith('event_') ? cmsEvent.key.substring(6) : cmsEvent.key;
+        if (!bySlug.has(slug)) {
+          const title = cmsEvent.data?.title || slug.replace(/-/g, ' ');
+          bySlug.set(slug, {
+            event_slug: slug,
+            event_title: title,
+            registrations: [],
+          });
+        }
+      }
+    }
+
     for (const row of rawEvents || []) {
       const slug = row.event_slug || 'unknown';
       const meta = row.metadata || {};
@@ -5454,6 +5496,72 @@ const getEventRegistrations = async (req, res) => {
   }
 };
 
+const createEventRegistration = async (req, res) => {
+  try {
+    const body = req.body || {};
+    
+    const event_slug = String(body.event_slug || '').trim();
+    const name = String(body.full_name || '').trim();
+    const email = String(body.email || '').trim().toLowerCase();
+    
+    if (!event_slug || !name || !email) {
+      return res.status(400).json(errorResponse('Event slug, full name, and email are required.'));
+    }
+
+    const newRegistration = {
+      event_slug,
+      name,
+      email,
+      attendance_status: 'pending',
+      metadata: {
+        event_title: String(body.event_title || '').trim(),
+      }
+    };
+
+    const { data, error } = await supabaseAdmin
+      .from('event_registrations')
+      .insert(newRegistration)
+      .select('id, event_slug, name, email, phone, metadata, attendance_status, created_at')
+      .single();
+
+    if (error) {
+      const msg = error.message || String(error);
+      if (error.code === '23505' || msg.includes('duplicate') || msg.includes('unique')) {
+        return res.status(409).json(errorResponse('This email is already registered for the selected event.'));
+      }
+      return res.status(500).json(errorResponse(msg));
+    }
+
+    // After successfully registering manually, send the invitation email.
+    try {
+      const { data: eventPage } = await supabaseAdmin
+        .from('event_pages')
+        .select('content')
+        .eq('slug', event_slug)
+        .single();
+
+      const cms = eventPage?.content?.cms_data || {};
+      const sessionJoinUrl = String(cms.sessionJoinUrl || '').trim();
+      const actualEventTitle = String(cms?.hero?.title || eventPage?.content?.seo_title || body.event_title || event_slug).trim();
+
+      await emailService.sendEventRegistrationConfirmation({
+        to: email,
+        fullName: name,
+        eventTitle: actualEventTitle,
+        sessionJoinUrl,
+      });
+      console.log(`Sent registration confirmation email to ${email} for event ${event_slug}`);
+    } catch (emailErr) {
+      console.warn('Failed to send registration confirmation email after manual registration:', emailErr);
+    }
+
+    return res.json(successResponse({ registration: data }, 'Registration created successfully'));
+  } catch (err) {
+    console.error('createEventRegistration:', err);
+    return res.status(500).json(errorResponse(err.message || 'Failed to create registration'));
+  }
+};
+
 const updateEventRegistration = async (req, res) => {
   try {
     const { registrationId } = req.params;
@@ -5473,14 +5581,18 @@ const updateEventRegistration = async (req, res) => {
       body.session_join_url !== undefined ||
       body.event_title !== undefined;
 
+    // Always fetch existing record to check for metadata updates and attendance changes
+    const { data: existing } = await supabaseAdmin
+      .from('event_registrations')
+      .select('metadata, attendance_status, event_slug, name, email')
+      .eq('id', registrationId)
+      .single();
+
+    if (!existing) {
+      return res.status(404).json(errorResponse('Registration not found.'));
+    }
+
     if (hasMetaUpdates) {
-      // Fetch existing metadata first
-      const { data: existing } = await supabaseAdmin
-        .from('event_registrations')
-        .select('metadata')
-        .eq('id', registrationId)
-        .single();
-      
       const currentMeta = existing?.metadata || {};
       patch.metadata = { ...currentMeta };
 
@@ -5515,7 +5627,7 @@ const updateEventRegistration = async (req, res) => {
       .update(patch)
       .eq('id', registrationId)
       .select(
-        'id, event_slug, event_title, full_name, email, country_code, phone, whatsapp_e164, session_join_url, attendance_status, created_at'
+        'id, event_slug, name, email, phone, metadata, attendance_status, created_at'
       )
       .single();
 
@@ -5528,6 +5640,59 @@ const updateEventRegistration = async (req, res) => {
         return res.status(404).json(errorResponse('Registration not found.'));
       }
       return res.status(500).json(errorResponse(msg));
+    }
+
+    // Trigger Certificate Generation if attendance_status changed to 'attended'
+    if (patch.attendance_status === 'attended' && existing.attendance_status !== 'attended') {
+      try {
+        const eventSlug = existing.event_slug;
+        const { data: eventPage } = await supabaseAdmin
+          .from('event_pages')
+          .select('cms_data, content')
+          .eq('slug', eventSlug)
+          .single();
+
+        if (eventPage) {
+          const content = eventPage.content || {};
+          const cms = content.cms_data || eventPage.cms_data || {};
+          
+          const eventTitle = String(cms?.hero?.title || content?.seo_title || eventSlug).trim();
+          const topic = String(cms?.topic || eventTitle).trim();
+          const speaker = String(cms?.speaker || 'Speaker').trim();
+          const date = String(cms?.date || '').trim();
+          const time = String(cms?.time || '').trim();
+          
+          const fullName = data.name || data.full_name || 'Participant';
+
+          const certificateTextTemplate = cms?.certificateText || null;
+          const certificateTemplateUrl = cms?.certificateTemplateUrl || null;
+
+          const pdfBuffer = await generateCertificate({
+            participantName: fullName,
+            eventTitle,
+            topic,
+            speaker,
+            date,
+            time,
+            certificateTextTemplate,
+            certificateTemplateUrl
+          });
+
+          const materials = cms?.materials || [];
+
+          await emailService.sendEventCertificate({
+            to: data.email,
+            fullName,
+            eventTitle,
+            pdfBuffer,
+            materials
+          });
+          console.log(`Certificate emailed to ${data.email} for ${eventTitle}`);
+        }
+      } catch (certError) {
+        console.error('Failed to generate or send certificate:', certError);
+        // We don't fail the API request if the certificate email fails
+      }
     }
 
     return res.json(successResponse({ registration: data }, 'Registration updated successfully'));
@@ -5566,6 +5731,7 @@ module.exports = {
   getRecentUsers,
   getRecentBookings,
   getEventRegistrations,
+  createEventRegistration,
   updateEventRegistration,
   deleteEventRegistration,
   getAllPsychologists,

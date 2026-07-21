@@ -40,7 +40,7 @@ router.post('/workshop-register', async (req, res) => {
 
     const { data: eventPage, error: pageError } = await supabaseAdmin
       .from('event_pages')
-      .select('slug, cms_data')
+      .select('slug, content')
       .eq('slug', eventSlug)
       .maybeSingle();
 
@@ -50,7 +50,7 @@ router.post('/workshop-register', async (req, res) => {
     }
     if (!eventPage) return fail(res, 'Event not found.', 404);
 
-    const cms = eventPage.cms_data || {};
+    const cms = eventPage.content?.cms_data || {};
     const sessionJoinUrl = String(cms.sessionJoinUrl || '').trim();
     if (!sessionJoinUrl) {
       return fail(

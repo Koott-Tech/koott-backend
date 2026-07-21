@@ -16,6 +16,7 @@ const ALLOWED_BUCKETS = new Set([
   'manual-bookings',
   'static-files',
   'session-attachments',
+  'event-materials',
 ]);
 
 function contentTypeForFilename(filename) {
@@ -31,6 +32,8 @@ function contentTypeForFilename(filename) {
     '.pdf': 'application/pdf',
     '.doc': 'application/msword',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.ppt': 'application/vnd.ms-powerpoint',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     '.txt': 'text/plain',
   };
   return map[ext] || 'application/octet-stream';
