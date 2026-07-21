@@ -88,6 +88,31 @@ async function processCandidates(candidates) {
         continue;
       }
 
+      // GUARD: never link into a package that is already full.
+      // Parent membership was inferred from (client + therapist + most recent paid package),
+      // with no knowledge of which Wix order actually paid for the package. When a client buys
+      // the same package twice, the OLDER package would otherwise swallow sessions belonging to
+      // the newer one — producing "3/3 complete" when only the first session of each had run.
+      const parentTotal = Number(parent.session_count) || 0;
+      if (parentTotal > 1) {
+        const { data: siblings } = await supabaseAdmin
+          .from('sessions')
+          .select('id, status')
+          .eq('package_group_id', parentId);
+        const used = (siblings || []).filter(
+          (s) => !['cancelled', 'deleted', 'refunded'].includes(String(s.status || '').toLowerCase())
+        ).length;
+        // +1 because the parent itself may not carry the group id yet (set below).
+        const consumed = Math.max(used, 1);
+        if (consumed >= parentTotal) {
+          console.warn(
+            `${LOG_PREFIX} SKIP session ${session.id}: parent ${parentId} is full (${consumed}/${parentTotal}). ` +
+            `This session likely belongs to a newer package — leaving it unlinked for review.`
+          );
+          continue;
+        }
+      }
+
       // Copy the parent's session_count onto the follow-up. This is CRITICAL: finance splits
       // the package doctor fee by session_count, so a NULL count on a follow-up defaults to 1
       // and massively over-credits it. Follow-ups must inherit the package total.

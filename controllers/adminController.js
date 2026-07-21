@@ -1072,6 +1072,36 @@ const createManualBooking = async (req, res) => {
     // ============================================
     // STEP 8: CREATE SESSION
     // ============================================
+    // DUPLICATE GUARD — refuse to create a second record for a session that already exists.
+    // Wix-synced sessions are already in the table, so manually "recording" one again produced
+    // a duplicate row AND a phantom package group, which then swallowed follow-up bookings
+    // (a real incident: the same 8pm session existed twice, splitting a client's package).
+    // A therapist cannot hold two sessions at the same instant, so this is always an error.
+    {
+      const { data: clash } = await supabaseAdmin
+        .from('sessions')
+        .select('id, status, source, wix_booking_id')
+        .eq('client_id', client.id)
+        .eq('psychologist_id', psychologist_id)
+        .eq('scheduled_date', scheduled_date)
+        .eq('scheduled_time', scheduledTimeNormalized)
+        .not('status', 'in', '("cancelled","deleted","refunded")');
+      if (clash && clash.length) {
+        const existing = clash[0];
+        if (paymentRecord) {
+          await supabaseAdmin.from('payments').delete().eq('id', paymentRecord.id);
+        }
+        console.warn(`[MANUAL BOOKING] duplicate blocked — session ${existing.id} already exists at ${scheduled_date} ${scheduledTimeNormalized}`);
+        return res.status(409).json(
+          errorResponse(
+            `A session already exists for this client with this therapist at ${scheduled_date} ${scheduledTimeNormalized} ` +
+            `(source: ${existing.source || 'admin'}). Edit that session instead of creating a duplicate.`,
+            { existing_session_id: existing.id }
+          )
+        );
+      }
+    }
+
     const sessionData = {
       client_id: client.id,
       psychologist_id: psychologist_id,

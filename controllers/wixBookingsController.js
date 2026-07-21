@@ -442,8 +442,35 @@ async function enrichBookingsFromOrders(wixBookingIds) {
   if (!infoMap.size) return;
 
   let updated = 0;
+
+  // A booking that took no payment is a PACKAGE CREDIT (session 2..N) — the package was paid
+  // for on session 1. Its order line still names the product ("Package- 3 Single Session,
+  // ₹2599"), so blindly copying that price onto the credit both breaks the "price only on
+  // session 1" rule and double-counts revenue. Only apply the order price to bookings that
+  // actually collected money.
+  const { data: payRows } = await supabaseAdmin
+    .from('wix_bookings')
+    .select('wix_booking_id, payload')
+    .in('wix_booking_id', [...infoMap.keys()]);
+  const tookPayment = new Map();
+  for (const r of (payRows || [])) {
+    const p = r.payload || {};
+    const vendors = p?.paymentDetails?.wixPayMultipleDetails;
+    const received = p?.amountReceived ?? p?.paymentDetails?.balance?.amountReceived;
+    // Paid when Wix recorded a payment vendor/txn or a received amount > 0.
+    const paid = (Array.isArray(vendors) && vendors.length > 0)
+      || (received != null && parseFloat(received) > 0);
+    tookPayment.set(r.wix_booking_id, paid);
+  }
+
   for (const [bookingId, info] of infoMap) {
     try {
+      const bookingTookPayment = tookPayment.get(bookingId) !== false; // unknown → allow (old behaviour)
+      const canApplyPrice = info.price && info.price > 0 && bookingTookPayment;
+      if (info.price > 0 && !bookingTookPayment) {
+        console.log(`[enrichBookingsFromOrders] ${bookingId}: no payment recorded — treating as package credit, NOT applying order price ₹${info.price}`);
+      }
+
       // Update wix_bookings with session type, count, and order ID
       const wbUpdate = {
         session_type: info.sessionType,
@@ -451,7 +478,7 @@ async function enrichBookingsFromOrders(wixBookingIds) {
       };
       if (info.orderId) wbUpdate.wix_order_id = info.orderId;
       if (info.orderNumber) wbUpdate.wix_order_number = info.orderNumber;
-      if (info.price && info.price > 0) {
+      if (canApplyPrice) {
         wbUpdate.price = info.price;
       }
 
@@ -470,7 +497,7 @@ async function enrichBookingsFromOrders(wixBookingIds) {
         session_type: info.sessionType,
         session_count: info.sessionCount,
       };
-      if (info.price && info.price > 0) {
+      if (canApplyPrice) {
         sessionUpdate.price = info.price;
         sessionUpdate.amount = info.price;
       }

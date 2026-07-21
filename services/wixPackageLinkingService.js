@@ -40,10 +40,28 @@ async function linkPackageSessions() {
 
   // 2. For each package, find ₹0 children and stamp them
   let childrenLinked = 0;
+  // Children are claimed on a first-come basis in start_time order. Because packages are
+  // processed OLDEST FIRST, an older package would otherwise greedily swallow ₹0 sessions that
+  // belong to a package the client bought later (Wix gives us no direct package linkage, so
+  // membership is inferred). Tracking what's already claimed stops one package stealing
+  // another's sessions — the cause of "3/3 complete" when only session 1 of each had run.
+  const claimedChildren = new Set();
+  // A ₹0 booking that sits AFTER the next package purchase almost certainly belongs to that
+  // newer package, so never let an older package reach past a later package's start.
+  const packageStarts = packages.map((p) => p.start_time).filter(Boolean).sort();
 
   for (const pkg of packages) {
     if (!pkg.client_email) continue;
     const cap = Math.max(0, (pkg.session_count || 1) - 1); // children = total - 1 (package row counts as #1)
+    // The next package purchase by ANY client acts as an upper bound only when it belongs to the
+    // same client+service; computed per-package below from this client's own later packages.
+    const nextPkgStart = packages
+      .filter((p) => p.wix_booking_id !== pkg.wix_booking_id
+        && String(p.client_email || '').toLowerCase() === String(pkg.client_email || '').toLowerCase()
+        && (!pkg.service_id || p.service_id === pkg.service_id)
+        && p.start_time && pkg.start_time && p.start_time > pkg.start_time)
+      .map((p) => p.start_time)
+      .sort()[0] || null;
 
     // Match by client_email (always present) + service_id (same therapist's service).
     // ₹0 child rows often have null contact_id, so contact_id can't be the primary key.
@@ -69,6 +87,10 @@ async function linkPackageSessions() {
       if (p.isPlanCreditBooking === false) return false;
       // If a coupon was applied and it's not a plan credit, skip it
       if (p.paymentDetails?.couponDetails?.couponId && !p.isPlanCreditBooking) return false;
+      // Already claimed by an earlier package in this same run — never double-assign.
+      if (claimedChildren.has(c.wix_booking_id)) return false;
+      // Don't reach past the client's NEXT package purchase; those sessions are its credits.
+      if (nextPkgStart && c.start_time && c.start_time >= nextPkgStart) return false;
       return true;
     }).slice(0, cap);
     if (childErr) {
@@ -90,6 +112,8 @@ async function linkPackageSessions() {
       package_parent_booking_id: pkg.wix_booking_id,
       session_index: i + 2, // 1 is the package row, children start at 2
     }));
+    // Reserve them so a later package in this run can't claim the same rows.
+    updates.forEach((u) => claimedChildren.add(u.wix_booking_id));
 
     for (const u of updates) {
       const { error: updErr } = await supabaseAdmin
