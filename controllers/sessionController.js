@@ -359,6 +359,82 @@ const getAllSessions = async (req, res) => {
     let statusList = normalizeStatusList(status);
     const wixBookingIds = normalizeTextList(wix_booking_id);
     const isPendingFilter = statusList.length === 1 && statusList[0].toLowerCase() === 'pending';
+    const searchTerm = String(search || '').trim();
+    const loweredSearchTerm = searchTerm.toLowerCase();
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    const applySearchCandidateFilter = (q, candidates) => {
+      const clauses = [];
+      if (candidates.clientIds.length) {
+        clauses.push(`client_id.in.(${candidates.clientIds.join(',')})`);
+      }
+      if (candidates.psychologistIds.length) {
+        clauses.push(`psychologist_id.in.(${candidates.psychologistIds.join(',')})`);
+      }
+      if (candidates.sessionId) {
+        clauses.push(`id.eq.${candidates.sessionId}`);
+      }
+      if (!clauses.length) {
+        return q.eq('id', '00000000-0000-0000-0000-000000000000');
+      }
+      if (clauses.length === 1) {
+        const [only] = clauses;
+        if (only.startsWith('client_id.in.')) return q.in('client_id', candidates.clientIds);
+        if (only.startsWith('psychologist_id.in.')) return q.in('psychologist_id', candidates.psychologistIds);
+        return q.eq('id', candidates.sessionId);
+      }
+      return q.or(clauses.join(','));
+    };
+
+    let searchCandidates = null;
+    if (searchTerm) {
+      const emailClientIds = new Set();
+      const nameClientIds = new Set();
+      const psychologistIds = new Set();
+
+      const [matchedUsersRes, matchedClientsRes, matchedPsychologistsRes] = await Promise.all([
+        supabaseAdmin
+          .from('users')
+          .select('id')
+          .ilike('email', `%${searchTerm}%`)
+          .limit(100),
+        supabaseAdmin
+          .from('clients')
+          .select('id')
+          .or(`first_name.ilike.%${searchTerm}%,last_name.ilike.%${searchTerm}%,child_name.ilike.%${searchTerm}%`)
+          .limit(100),
+        supabaseAdmin
+          .from('psychologists')
+          .select('id')
+          .or(`first_name.ilike.%${searchTerm}%,last_name.ilike.%${searchTerm}%`)
+          .limit(100),
+      ]);
+
+      const matchedUserIds = (matchedUsersRes.data || []).map((row) => row.id).filter(Boolean);
+      if (matchedUserIds.length) {
+        const { data: emailClients } = await supabaseAdmin
+          .from('clients')
+          .select('id')
+          .in('user_id', matchedUserIds)
+          .limit(100);
+        (emailClients || []).forEach((row) => {
+          if (row?.id) emailClientIds.add(row.id);
+        });
+      }
+
+      (matchedClientsRes.data || []).forEach((row) => {
+        if (row?.id) nameClientIds.add(row.id);
+      });
+      (matchedPsychologistsRes.data || []).forEach((row) => {
+        if (row?.id) psychologistIds.add(row.id);
+      });
+
+      searchCandidates = {
+        clientIds: [...new Set([...emailClientIds, ...nameClientIds])],
+        psychologistIds: [...psychologistIds],
+        sessionId: uuidPattern.test(searchTerm) ? searchTerm : null,
+      };
+    }
 
     // Admin Booked tab: include rescheduled (comma may be stripped by proxies; some clients send only booked)
     if (statusList.length === 1 && statusList[0].toLowerCase() === 'booked') {
@@ -414,6 +490,9 @@ const getAllSessions = async (req, res) => {
     }
     if (date) {
       countQuery = countQuery.eq('scheduled_date', date);
+    }
+    if (searchCandidates) {
+      countQuery = applySearchCandidateFilter(countQuery, searchCandidates);
     }
     // Date range filter:
     //   • Upcoming → match session date OR booking date (catch this-month-booked AND this-month-scheduled)
@@ -489,6 +568,9 @@ const getAllSessions = async (req, res) => {
     }
     if (date) {
       query = query.eq('scheduled_date', date);
+    }
+    if (searchCandidates) {
+      query = applySearchCandidateFilter(query, searchCandidates);
     }
     // Date filter — same rules as the count query above
     if (isUpcomingTab && dateFrom && dateTo) {
@@ -721,18 +803,17 @@ const getAllSessions = async (req, res) => {
       });
 
     // Apply search filtering after relation hydration to keep total count aligned with filters.
-    const searchTerm = String(search || '').trim().toLowerCase();
-    if (searchTerm) {
+    if (loweredSearchTerm) {
       allSessions = allSessions.filter((s) => {
         const sessionId = String(s?.id || '').toLowerCase();
         const clientName = `${s?.client?.first_name || ''} ${s?.client?.last_name || ''}`.toLowerCase();
         const clientEmail = String(s?.client?.user?.email || '').toLowerCase();
         const psychologistName = `${s?.psychologist?.first_name || ''} ${s?.psychologist?.last_name || ''}`.toLowerCase();
         return (
-          sessionId.includes(searchTerm) ||
-          clientName.includes(searchTerm) ||
-          clientEmail.includes(searchTerm) ||
-          psychologistName.includes(searchTerm)
+          sessionId.includes(loweredSearchTerm) ||
+          clientName.includes(loweredSearchTerm) ||
+          clientEmail.includes(loweredSearchTerm) ||
+          psychologistName.includes(loweredSearchTerm)
         );
       });
     }

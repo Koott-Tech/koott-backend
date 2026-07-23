@@ -29,6 +29,8 @@ router.get('/dashboard', financeController.getDashboard);
 // Sessions Management
 router.get('/sessions', financeController.getSessions);
 router.get('/doctors/:psychologistId/bookings', financeController.getDoctorBookings);
+// Full per-therapist financial profile (every session + commission split + payout state)
+router.get('/doctors/:psychologistId/profile', financeController.getDoctorFinanceProfile);
 router.get('/sessions/all', sessionController.getAllSessions); // Use same method as admin for consistency
 router.get('/sessions/:sessionId', financeController.getSessionDetails);
 router.put('/sessions/:sessionId', adminController.updateSession);

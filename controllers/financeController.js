@@ -2375,6 +2375,184 @@ const getSessions = async (req, res) => {
  * Get compact doctor booking list for Finance doctor card modal
  * GET /api/finance/doctors/:psychologistId/bookings
  */
+/**
+ * Full financial profile for ONE therapist.
+ * GET /api/finance/doctors/:psychologistId/profile?dateFrom=&dateTo=&dateBasis=
+ *
+ * Returns every session with its money broken out (session amount, doctor commission,
+ * company commission) plus payout status, and a summary. Uses computeSessionDoctorWallet —
+ * the same source of truth the rest of finance uses — so the numbers reconcile.
+ */
+const getDoctorFinanceProfile = async (req, res) => {
+  try {
+    const { psychologistId } = req.params;
+    if (!psychologistId) return res.status(400).json(errorResponse('psychologistId is required'));
+    const { dateFrom, dateTo, dateBasis = 'scheduled' } = req.query;
+
+    const { data: doctor, error: docErr } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, first_name, last_name, email, phone, area_of_expertise, designation, created_at')
+      .eq('id', psychologistId)
+      .maybeSingle();
+    if (docErr || !doctor) return res.status(404).json(errorResponse('Therapist not found'));
+
+    // Commission rates live in their own table (one active row per therapist).
+    const { data: dcRows } = await supabaseAdmin
+      .from('doctor_commissions')
+      .select('*')
+      .eq('psychologist_id', psychologistId)
+      .order('created_at', { ascending: false });
+    const activeDc = (dcRows || []).find((r) => r.is_active !== false) || (dcRows || [])[0] || null;
+
+    let q = supabaseAdmin
+      .from('sessions')
+      .select('id, scheduled_date, scheduled_time, status, session_type, session_count, package_id, package_group_id, package_session_number, price, amount, therapist_commission, client_id, source, wix_order_number, payment_id, completion_date, created_at, booking_created_at')
+      .eq('psychologist_id', psychologistId)
+      .neq('session_type', 'free_assessment');
+
+    const dateCol = String(dateBasis) === 'booked' ? 'booking_created_at' : 'scheduled_date';
+    if (dateFrom && dateTo) {
+      if (dateCol === 'scheduled_date') q = q.gte('scheduled_date', dateFrom).lte('scheduled_date', dateTo);
+      else q = q.gte('booking_created_at', `${dateFrom}T00:00:00+05:30`).lte('booking_created_at', `${dateTo}T23:59:59.999+05:30`);
+    }
+
+    const { data: sessions, error: sErr } = await q.order('scheduled_date', { ascending: false });
+    if (sErr) return res.status(500).json(errorResponse('Failed to fetch sessions'));
+
+    // Client names
+    const clientIds = [...new Set((sessions || []).map((s) => s.client_id).filter(Boolean))];
+    const clientById = new Map();
+    for (let i = 0; i < clientIds.length; i += 100) {
+      const { data: cs } = await supabaseAdmin
+        .from('clients').select('id, first_name, last_name, user_id').in('id', clientIds.slice(i, i + 100));
+      (cs || []).forEach((c) => clientById.set(c.id, c));
+    }
+
+    // Settled commission rows (authoritative for paid/pending)
+    const sessionIds = (sessions || []).map((s) => s.id);
+    const chBySession = new Map();
+    for (let i = 0; i < sessionIds.length; i += 100) {
+      const { data: chs } = await supabaseAdmin
+        .from('commission_history')
+        .select('session_id, commission_amount, session_amount, payment_status, created_at')
+        .in('session_id', sessionIds.slice(i, i + 100));
+      (chs || []).forEach((r) => chBySession.set(r.session_id, r));
+    }
+
+    const dc = activeDc;
+    const TERMINAL_UNPAID = ['cancelled', 'refunded', 'deleted'];
+
+    // A package is paid on its first session, but the therapist earns on every session of it.
+    // So the company's real profit on a package = package price − the therapist's commission
+    // for the WHOLE package. Attribute that net figure to the paying session and show ₹0 on the
+    // follow-ups (rather than a negative). Sibling sessions are pulled regardless of the date
+    // filter, so a package split across months still nets correctly.
+    const groupIds = [...new Set((sessions || []).map((s) => s.package_group_id).filter(Boolean))];
+    const groupDoctorTotal = new Map();
+    if (groupIds.length) {
+      const siblings = [];
+      for (let i = 0; i < groupIds.length; i += 100) {
+        const { data: sib } = await supabaseAdmin
+          .from('sessions')
+          .select('id, status, session_type, session_count, package_id, package_group_id, package_session_number, price, amount, therapist_commission')
+          .eq('psychologist_id', psychologistId)
+          .in('package_group_id', groupIds.slice(i, i + 100));
+        siblings.push(...(sib || []));
+      }
+      for (const sib of siblings) {
+        if (TERMINAL_UNPAID.includes(String(sib.status || '').toLowerCase())) continue;
+        const d = computeSessionDoctorWallet(sib, dc, chBySession.get(sib.id) || null) || 0;
+        groupDoctorTotal.set(sib.package_group_id, (groupDoctorTotal.get(sib.package_group_id) || 0) + d);
+      }
+    }
+
+    const rows = (sessions || []).map((s) => {
+      const ch = chBySession.get(s.id) || null;
+      const status = String(s.status || '').toLowerCase();
+      const counts = !TERMINAL_UNPAID.includes(status);
+      const sessionAmount = parseFloat(s.price ?? s.amount ?? 0) || 0;
+      // Doctor's share for this session (handles package splitting internally)
+      const doctorAmount = counts ? (computeSessionDoctorWallet(s, dc, ch) || 0) : 0;
+      // Company share. For a package, the paying session carries the WHOLE package's profit
+      // (price − therapist's commission across all its sessions) and follow-ups show ₹0 — so
+      // the first row reads as "what the company earned on this package" and no row goes
+      // negative. Non-package sessions are simply price − doctor.
+      let companyAmount = 0;
+      if (counts && sessionAmount > 0) {
+        // Only a session that actually collected money carries company profit. If it belongs to
+        // a package, deduct the therapist's commission for the WHOLE package so this one row
+        // shows the true profit on that package.
+        companyAmount = sessionAmount - (s.package_group_id
+          ? (groupDoctorTotal.get(s.package_group_id) ?? doctorAmount)
+          : doctorAmount);
+      }
+      // A ₹0 session (package credit / follow-up) shows ₹0 — never a negative. Its therapist
+      // cost is already netted against whichever session was paid.
+      const c = clientById.get(s.client_id);
+      const isCompleted = status === 'completed';
+      return {
+        session_id: s.id,
+        order_id: s.wix_order_number || s.payment_id || null,
+        session_date: s.scheduled_date,
+        session_time: s.scheduled_time,
+        booked_at: s.booking_created_at || s.created_at,
+        completion_date: s.completion_date,
+        client_name: c ? `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—' : '—',
+        client_id: s.client_id,
+        session_type: s.session_type,
+        package_label: Number(s.session_count) > 1 && s.package_session_number
+          ? `${s.session_type === 'couple' ? 'Couple ' : ''}Package ${s.package_session_number}/${s.session_count}`
+          : (s.session_type || '—'),
+        status: s.status,
+        source: s.source || 'admin',
+        session_amount: sessionAmount,
+        doctor_amount: doctorAmount,
+        company_amount: companyAmount,
+        // Payout: settled rows carry payment_status; otherwise a completed session is
+        // payable-but-pending, and anything not yet completed isn't earned yet.
+        payout_status: ch?.payment_status
+          ? String(ch.payment_status).toLowerCase()
+          : (isCompleted ? 'pending' : (counts ? 'not_due' : 'void')),
+        settled: !!ch,
+      };
+    });
+
+    const sum = (arr, k) => arr.reduce((t, r) => t + (Number(r[k]) || 0), 0);
+    const completed = rows.filter((r) => String(r.status).toLowerCase() === 'completed');
+    const paidRows = rows.filter((r) => r.payout_status === 'paid');
+    const pendingRows = rows.filter((r) => r.payout_status === 'pending');
+    const upcoming = rows.filter((r) => r.payout_status === 'not_due');
+
+    return res.json(successResponse({
+      doctor: {
+        id: doctor.id,
+        name: `${doctor.first_name || ''} ${doctor.last_name || ''}`.trim(),
+        email: doctor.email,
+        phone: doctor.phone,
+        area_of_expertise: doctor.area_of_expertise,
+        joined_at: doctor.created_at,
+      },
+      summary: {
+        total_sessions: rows.length,
+        completed_sessions: completed.length,
+        upcoming_sessions: upcoming.length,
+        cancelled_sessions: rows.filter((r) => r.payout_status === 'void').length,
+        gross_revenue: sum(rows, 'session_amount'),
+        doctor_earnings: sum(rows, 'doctor_amount'),
+        company_earnings: sum(rows, 'company_amount'),
+        payout_paid: sum(paidRows, 'doctor_amount'),
+        payout_pending: sum(pendingRows, 'doctor_amount'),
+        payout_not_due: sum(upcoming, 'doctor_amount'),
+      },
+      sessions: rows,
+      filters: { dateFrom: dateFrom || null, dateTo: dateTo || null, dateBasis },
+    }, 'Doctor finance profile fetched'));
+  } catch (error) {
+    console.error('getDoctorFinanceProfile error:', error);
+    return res.status(500).json(errorResponse('Internal server error while building doctor profile'));
+  }
+};
+
 const getDoctorBookings = async (req, res) => {
   try {
     const userRole = req.user.role;
@@ -6063,6 +6241,7 @@ module.exports = {
   getDashboard,
   getSessions,
   getDoctorBookings,
+  getDoctorFinanceProfile,
   getSessionDetails,
   getPsychologistOptions,
   getClientOptions,
@@ -6609,6 +6788,7 @@ module.exports = {
   getDashboard,
   getSessions,
   getDoctorBookings,
+  getDoctorFinanceProfile,
   getSessionDetails,
   getPsychologistOptions,
   getClientOptions,

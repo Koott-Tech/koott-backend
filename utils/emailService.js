@@ -1299,11 +1299,16 @@ class EmailService {
         durationMinutes: rescheduleDurationFromPayload
       } = sessionData;
 
-      // Format dates as "Mon, 12 Jan 2026" for email
+      // Format dates as "Mon, 12 Jan 2026" for email.
+      // IDEMPOTENT (defense-in-depth): this is a separate copy of the same formatter used in
+      // sendRescheduleEmail below — only parse raw ISO dates (YYYY-MM-DD); pass anything else
+      // (already-formatted text, or garbage) through unchanged instead of yielding "Invalid Date".
       const formatDateShort = (dateStr) => {
         if (!dateStr) return '';
+        if (!/^\d{4}-\d{2}-\d{2}/.test(String(dateStr))) return String(dateStr);
         try {
           const d = new Date(`${dateStr}T00:00:00+05:30`);
+          if (Number.isNaN(d.getTime())) return String(dateStr);
           return d.toLocaleDateString('en-IN', {
             weekday: 'short',
             day: '2-digit',
@@ -1318,12 +1323,13 @@ class EmailService {
 
       const formattedOldDate = formatDateShort(oldDate);
       const formattedNewDate = formatDateShort(scheduledDate);
-      
-      // Format time to 12-hour format with IST
+
+      // Format time to 12-hour format with IST. Same idempotent guard as above.
       const formatTimeForEmail = (timeStr) => {
         if (!timeStr) return '';
+        if (!/^\d{1,2}:\d{2}(:\d{2})?$/.test(String(timeStr).trim())) return String(timeStr);
         try {
-          const [h, m] = timeStr.split(':');
+          const [h, m] = String(timeStr).trim().split(':');
           const hours = parseInt(h, 10);
           const minutes = parseInt(m || '0', 10);
           const period = hours >= 12 ? 'PM' : 'AM';

@@ -1574,7 +1574,13 @@ const completeSession = async (req, res) => {
           console.log(`✅ In-app notification created successfully`);
         }
 
-        // ── RE-ENABLED: client follow-up WhatsApp on completion ──
+        // ── TEMPORARILY PAUSED: client follow-up WhatsApp on completion ──
+        // Flip to true to re-enable. Only pauses this therapist-marks-complete path;
+        // admin-side completion (wixBookingsController / sessionController) is untouched.
+        const DISABLE_CLIENT_FOLLOWUP_WHATSAPP_ON_COMPLETE = true;
+        if (DISABLE_CLIENT_FOLLOWUP_WHATSAPP_ON_COMPLETE) {
+          console.log(`⏸️ session_follow_up_v2 to client SKIPPED (temporarily paused) for session ${sessionId}`);
+        } else {
         console.log(`▶️ Sending session_follow_up_v2 to client (session ${sessionId})`);
         try {
           const interaktService = require('../utils/interaktService');
@@ -1614,6 +1620,7 @@ const completeSession = async (req, res) => {
           }
         } catch (waError) {
           console.error(`❌ Error sending session_follow_up_v2 for session ${sessionId}:`, waError.message);
+        }
         }
       } catch (notificationError) {
         console.error('Error sending completion notification:', notificationError);
