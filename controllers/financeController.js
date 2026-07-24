@@ -1854,14 +1854,27 @@ const getDoctorPayouts = async (req, res) => {
     // Get all sessions
     const allSessionsQuery = supabaseAdmin
       .from('sessions')
-      .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number')
+      .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count')
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment')
       .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'])
       .in('psychologist_id', allPsychIds);
     
     const { data: allSessions } = await allSessionsQuery.order('created_at', { ascending: true });
-    
+
+    // Client names for the session-level breakdown table.
+    const payoutClientIds = [...new Set((allSessions || []).map((s) => s.client_id).filter(Boolean))];
+    const payoutClientNameMap = {};
+    for (let i = 0; i < payoutClientIds.length; i += 100) {
+      const { data: cRows } = await supabaseAdmin
+        .from('clients')
+        .select('id, first_name, last_name')
+        .in('id', payoutClientIds.slice(i, i + 100));
+      (cRows || []).forEach((c) => {
+        payoutClientNameMap[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
+      });
+    }
+
     // Get commission settings
     const { data: commissions } = await supabaseAdmin
       .from('doctor_commissions')
@@ -1917,7 +1930,7 @@ const getDoctorPayouts = async (req, res) => {
     if (sessionIds.length > 0) {
       const { data: history } = await supabaseAdmin
         .from('commission_history')
-        .select('session_id, commission_amount, session_amount')
+        .select('session_id, commission_amount, session_amount, payment_status')
         .in('session_id', sessionIds);
       commissionHistory = history || [];
     }
@@ -2000,9 +2013,10 @@ const getDoctorPayouts = async (req, res) => {
           shouldInclude = true;
         }
       } else if (status === 'completed') {
-        // For completed: filter by completion_date if available, otherwise use original scheduled date
+        // Completed payouts must be both completed in-range and actually marked paid.
         const completionDate = s.completion_date || s.original_scheduled_date || s.scheduled_date;
-        if (isCompleted && completionDate && isInDateRange(completionDate)) {
+        const payoutStatus = String(historyRecord?.payment_status || '').toLowerCase();
+        if (isCompleted && payoutStatus === 'paid' && completionDate && isInDateRange(completionDate)) {
           shouldInclude = true;
         }
       } else {
@@ -2059,6 +2073,7 @@ const getDoctorPayouts = async (req, res) => {
       payoutsByDoctor[s.psychologist_id].session_details.push({
         session_id: s.id,
         session_date: s.scheduled_date,
+        client_name: payoutClientNameMap[s.client_id] || '—',
         session_type: sessionType,
         session_amount: sessionPrice,
         company_commission: commissionToCompany,
@@ -2439,8 +2454,30 @@ const getDoctorFinanceProfile = async (req, res) => {
       (chs || []).forEach((r) => chBySession.set(r.session_id, r));
     }
 
+    const paymentIds = [...new Set((sessions || []).map((s) => s.payment_id).filter(Boolean))];
+    const paymentById = new Map();
+    for (let i = 0; i < paymentIds.length; i += 100) {
+      const chunk = paymentIds.slice(i, i + 100);
+      let { data: pays, error: pErr } = await supabaseAdmin
+        .from('payments')
+        .select('id, status, receipt_url, razorpay_params')
+        .in('id', chunk);
+
+      if (pErr && String(pErr.message || '').includes("Could not find the 'razorpay_params' column")) {
+        ({ data: pays, error: pErr } = await supabaseAdmin
+          .from('payments')
+          .select('id, status, receipt_url')
+          .in('id', chunk));
+      }
+
+      if (!pErr) {
+        (pays || []).forEach((p) => paymentById.set(p.id, p));
+      }
+    }
+
     const dc = activeDc;
     const TERMINAL_UNPAID = ['cancelled', 'refunded', 'deleted'];
+    const NOT_DUE_PAYOUT_STATUSES = new Set(['booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
 
     // A package is paid on its first session, but the therapist earns on every session of it.
     // So the company's real profit on a package = package price − the therapist's commission
@@ -2490,6 +2527,15 @@ const getDoctorFinanceProfile = async (req, res) => {
       // cost is already netted against whichever session was paid.
       const c = clientById.get(s.client_id);
       const isCompleted = status === 'completed';
+      const payment = s.payment_id ? paymentById.get(s.payment_id) : null;
+      const paymentParams = typeof payment?.razorpay_params === 'string'
+        ? (() => { try { return JSON.parse(payment.razorpay_params); } catch { return null; } })()
+        : payment?.razorpay_params;
+      const isAdminPayment = String(s.source || '').toLowerCase().includes('admin') ||
+        !!payment?.receipt_url ||
+        !!paymentParams?.notes?.admin_created ||
+        !!paymentParams?.notes?.manual;
+      const paymentSource = isAdminPayment ? 'admin' : (s.source || 'razorpay');
       return {
         session_id: s.id,
         order_id: s.wix_order_number || s.payment_id || null,
@@ -2504,7 +2550,9 @@ const getDoctorFinanceProfile = async (req, res) => {
           ? `${s.session_type === 'couple' ? 'Couple ' : ''}Package ${s.package_session_number}/${s.session_count}`
           : (s.session_type || '—'),
         status: s.status,
-        source: s.source || 'admin',
+        source: paymentSource,
+        raw_source: s.source || null,
+        payment_proof_url: payment?.receipt_url || null,
         session_amount: sessionAmount,
         doctor_amount: doctorAmount,
         company_amount: companyAmount,
@@ -2512,7 +2560,7 @@ const getDoctorFinanceProfile = async (req, res) => {
         // payable-but-pending, and anything not yet completed isn't earned yet.
         payout_status: ch?.payment_status
           ? String(ch.payment_status).toLowerCase()
-          : (isCompleted ? 'pending' : (counts ? 'not_due' : 'void')),
+          : (isCompleted ? 'pending' : (counts && NOT_DUE_PAYOUT_STATUSES.has(status) ? 'not_due' : 'void')),
         settled: !!ch,
       };
     });
@@ -4963,10 +5011,57 @@ const getPendingPayouts = async (req, res) => {
     const monthStart = `${targetYear}-${monthStr}-01`;
     const monthEnd = new Date(targetYear, targetMonth, 0).toISOString().split('T')[0]; // Last day of month
 
-    // Get completed sessions by completion timestamp (updated_at) for payout month.
-    // This keeps pending payout aligned with "session marked complete" behavior.
-    const rangeStartTs = `${monthStart}${IST_DAY_START_SUFFIX}`;
-    const rangeEndTs = `${monthEnd}${IST_DAY_END_SUFFIX}`;
+    const getConfiguredPackageDoctorShare = (session, packageMeta, cfg) => {
+      const resolvedSessionCount = Math.max(
+        1,
+        parseInt(session.session_count || packageMeta?.session_count, 10) || 1
+      );
+      const packageType = packageMeta?.package_type || `package_${resolvedSessionCount}`;
+      const packageNumber = parseInt(session.package_session_number, 10) || 1;
+      const doctorPackages =
+        cfg?.doctor_commission_packages && typeof cfg.doctor_commission_packages === 'object'
+          ? cfg.doctor_commission_packages
+          : {};
+      const firstKey = `${packageType}_first_session`;
+      const followupKey = `${packageType}_followup`;
+      const configuredTotal =
+        packageNumber <= 1
+          ? (
+            doctorPackages[firstKey] ??
+            cfg?.doctor_commission_first_session_package ??
+            doctorPackages[followupKey] ??
+            cfg?.doctor_commission_followup_package ??
+            0
+          )
+          : (
+            doctorPackages[followupKey] ??
+            cfg?.doctor_commission_followup_package ??
+            doctorPackages[firstKey] ??
+            cfg?.doctor_commission_first_session_package ??
+            0
+          );
+
+      return Math.max(0, (parseFloat(configuredTotal) || 0) / resolvedSessionCount);
+    };
+
+    const getConfiguredCoupleDoctorShare = (cfg) => {
+      const doctorPackages =
+        cfg?.doctor_commission_packages && typeof cfg.doctor_commission_packages === 'object'
+          ? cfg.doctor_commission_packages
+          : {};
+      return Math.max(
+        0,
+        parseFloat(
+          doctorPackages.couple_session ??
+          doctorPackages.cpl_session ??
+          cfg?.doctor_commission_individual ??
+          0
+        ) || 0
+      );
+    };
+
+    // Pending payouts should follow the recorded completion date so they match
+    // the doctor breakdown and completed payout reconciliation.
 
     let completedSessions = null;
     let sessionsError = null;
@@ -4981,6 +5076,7 @@ const getPendingPayouts = async (req, res) => {
         package_id,
         package_session_number,
         scheduled_date,
+        completion_date,
         created_at,
         updated_at,
         status,
@@ -4990,8 +5086,8 @@ const getPendingPayouts = async (req, res) => {
         psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
       `)
       .eq('status', 'completed')
-      .gte('updated_at', rangeStartTs)
-      .lte('updated_at', rangeEndTs)
+      .gte('completion_date', monthStart)
+      .lte('completion_date', monthEnd)
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment'));
 
@@ -5006,6 +5102,7 @@ const getPendingPayouts = async (req, res) => {
           package_id,
           package_session_number,
           scheduled_date,
+          completion_date,
           created_at,
           updated_at,
           status,
@@ -5015,14 +5112,14 @@ const getPendingPayouts = async (req, res) => {
           psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
-        .gte('updated_at', rangeStartTs)
-        .lte('updated_at', rangeEndTs)
+        .gte('completion_date', monthStart)
+        .lte('completion_date', monthEnd)
         .not('psychologist_id', 'is', null)
         .neq('session_type', 'free_assessment'));
     }
 
-    // Older schemas may miss updated_at filtering guarantees; fallback to scheduled_date month filter.
-    if (sessionsError && String(sessionsError.message || '').includes('updated_at')) {
+    // Older schemas may miss completion_date; fallback to scheduled_date month filter.
+    if (sessionsError && String(sessionsError.message || '').includes('completion_date')) {
       ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
         .from('sessions')
         .select(`
@@ -5058,29 +5155,39 @@ const getPendingPayouts = async (req, res) => {
     const sessionIds = completedSessionsWithPayments.map(s => s.id);
     let commissionHistory = null;
     let commissionError = null;
-    ({ data: commissionHistory, error: commissionError } = await supabaseAdmin
-      .from('commission_history')
-      .select(`
-        session_id,
-        psychologist_id,
-        session_amount,
-        commission_amount,
-        session_type,
-        payment_status
-      `)
-      .in('session_id', sessionIds));
-
-    if (commissionError && String(commissionError.message || '').includes('session_amount')) {
-      ({ data: commissionHistory, error: commissionError } = await supabaseAdmin
+    commissionHistory = [];
+    for (let i = 0; i < sessionIds.length; i += 100) {
+      const chunk = sessionIds.slice(i, i + 100);
+      let historyChunk = [];
+      ({ data: historyChunk, error: commissionError } = await supabaseAdmin
         .from('commission_history')
         .select(`
           session_id,
           psychologist_id,
+          session_amount,
           commission_amount,
           session_type,
           payment_status
         `)
-        .in('session_id', sessionIds));
+        .in('session_id', chunk));
+
+      if (commissionError && (
+        String(commissionError.message || '').includes('session_amount') ||
+        String(commissionError.message || '').includes('session_type')
+      )) {
+        ({ data: historyChunk, error: commissionError } = await supabaseAdmin
+          .from('commission_history')
+          .select(`
+            session_id,
+            psychologist_id,
+            commission_amount,
+            payment_status
+          `)
+          .in('session_id', chunk));
+      }
+
+      if (commissionError) break;
+      commissionHistory.push(...(historyChunk || []));
     }
 
     if (commissionError) {
@@ -5154,6 +5261,19 @@ const getPendingPayouts = async (req, res) => {
       }, 'No completed sessions found for the selected month'));
     }
 
+    // Client names for the session-level breakdown table (View Details modal).
+    const pendingClientIds = [...new Set(unpaidSessions.map(s => s.client_id).filter(Boolean))];
+    const pendingClientNameMap = {};
+    for (let i = 0; i < pendingClientIds.length; i += 100) {
+      const { data: cRows } = await supabaseAdmin
+        .from('clients')
+        .select('id, first_name, last_name')
+        .in('id', pendingClientIds.slice(i, i + 100));
+      (cRows || []).forEach((c) => {
+        pendingClientNameMap[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
+      });
+    }
+
     // Get package types for package sessions
     const packageIds = [...new Set(unpaidSessions.map(s => s.package_id).filter(Boolean))];
     let packagesMap = {};
@@ -5195,7 +5315,7 @@ const getPendingPayouts = async (req, res) => {
       let commissionCfgError = null;
       ({ data: commissionCfgRows, error: commissionCfgError } = await supabaseAdmin
         .from('doctor_commissions')
-        .select('psychologist_id, commission_amount_individual, commission_amount_package, commission_amounts, doctor_commission_first_session, doctor_commission_followup, doctor_commission_first_session_package, doctor_commission_followup_package')
+        .select('psychologist_id, commission_amount_individual, commission_amount_package, commission_amounts, doctor_commission_first_session, doctor_commission_followup, doctor_commission_first_session_package, doctor_commission_followup_package, doctor_commission_packages')
         .eq('is_active', true)
         .in('psychologist_id', pendingPsychIds)
         .order('effective_from', { ascending: false }));
@@ -5203,12 +5323,12 @@ const getPendingPayouts = async (req, res) => {
       if (commissionCfgError && String(commissionCfgError.message || '').includes('is_active')) {
         ({ data: commissionCfgRows, error: commissionCfgError } = await supabaseAdmin
           .from('doctor_commissions')
-          .select('psychologist_id, commission_amount_individual, commission_amount_package, commission_amounts, doctor_commission_first_session, doctor_commission_followup, doctor_commission_first_session_package, doctor_commission_followup_package')
+          .select('psychologist_id, commission_amount_individual, commission_amount_package, commission_amounts, doctor_commission_first_session, doctor_commission_followup, doctor_commission_first_session_package, doctor_commission_followup_package, doctor_commission_packages')
           .in('psychologist_id', pendingPsychIds));
       } else if (commissionCfgError && String(commissionCfgError.message || '').includes('effective_from')) {
         ({ data: commissionCfgRows, error: commissionCfgError } = await supabaseAdmin
           .from('doctor_commissions')
-          .select('psychologist_id, commission_amount_individual, commission_amount_package, commission_amounts, doctor_commission_first_session, doctor_commission_followup, doctor_commission_first_session_package, doctor_commission_followup_package')
+          .select('psychologist_id, commission_amount_individual, commission_amount_package, commission_amounts, doctor_commission_first_session, doctor_commission_followup, doctor_commission_first_session_package, doctor_commission_followup_package, doctor_commission_packages')
           .eq('is_active', true)
           .in('psychologist_id', pendingPsychIds));
       }
@@ -5293,14 +5413,27 @@ const getPendingPayouts = async (req, res) => {
 
       // Determine session type for counting
       let sessionTypeForCount = 'individual';
-      if (session.package_id) {
+      const sessionCountForType = parseInt(session.session_count, 10) || 1;
+      if (session.package_id || sessionCountForType > 1 || String(session.session_type || '').toLowerCase().includes('package')) {
         const pkg = packagesMap[session.package_id];
         if (pkg) {
           sessionTypeForCount = pkg.package_type || `package_${pkg.session_count || 'unknown'}`;
+        } else if (sessionCountForType > 1) {
+          sessionTypeForCount = `package_${sessionCountForType}`;
         } else {
           sessionTypeForCount = 'package_unknown';
         }
       }
+      const packageSessionNumber = parseInt(session.package_session_number, 10) || null;
+      const sessionTypeLabel = sessionTypeForCount.startsWith('package_')
+        ? `Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('package_', '')}`
+        : sessionTypeForCount.startsWith('couple_package_')
+          ? `Couple Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('couple_package_', '')}`
+        : (sessionTypeForCount === 'package_unknown'
+          ? `Package${packageSessionNumber ? ` (${packageSessionNumber}/${sessionCountForType || '?'})` : ''}`
+          : (String(session.session_type || sessionTypeForCount || '').toLowerCase().includes('couple')
+            ? 'Couple'
+            : 'Individual'));
 
       // Update counts
       payoutsByDoctor[psychId].total_sessions += 1;
@@ -5309,10 +5442,69 @@ const getPendingPayouts = async (req, res) => {
       }
       payoutsByDoctor[psychId].session_counts_by_type[sessionTypeForCount] += 1;
 
-      // Calculate wallet and commission
-      const sessionAmount = parseFloat(commission.session_amount || session.price || 0);
-      const commissionAmount = parseFloat(commission.commission_amount || 0);
-      const doctorWallet = sessionAmount - commissionAmount;
+      // Calculate per-session financial split.
+      // Package follow-up rows often have price/session_amount = 0 in the DB, but
+      // payout math must still show their allocated share of the package totals.
+      const cfg = commissionConfigMap[psychId] || null;
+      const isPackageSession =
+        !!session.package_id ||
+        (parseInt(session.session_count, 10) || 1) > 1 ||
+        String(session.session_type || '').toLowerCase().includes('package');
+      const packageMeta = isPackageSession ? packagesMap[session.package_id] : null;
+      const resolvedSessionCount = Math.max(
+        1,
+        parseInt(session.session_count || packageMeta?.session_count, 10) || 1
+      );
+      const packageTypeForMoney = isPackageSession
+        ? (packageMeta?.package_type || `package_${resolvedSessionCount}`)
+        : null;
+
+      let sessionAmount = parseFloat(commission?.session_amount ?? session.price ?? 0) || 0;
+      let commissionAmount = parseFloat(commission?.commission_amount ?? 0) || 0;
+      const commissionForWallet =
+        isPackageSession && sessionAmount <= 0
+          ? null
+          : (commission || null);
+      let doctorWallet = computeSessionDoctorWallet(
+        { ...session, session_count: resolvedSessionCount },
+        cfg,
+        commissionForWallet
+      );
+
+      if (isPackageSession) {
+        const packageDoctorShare = getConfiguredPackageDoctorShare(session, packageMeta, cfg);
+        if (packageDoctorShare > 0) {
+          doctorWallet = packageDoctorShare;
+        }
+        if (sessionAmount > 0) {
+          commissionAmount = Math.max(0, sessionAmount - doctorWallet);
+        }
+      }
+
+      if (isPackageSession && sessionAmount <= 0) {
+        const amountConfig = cfg?.commission_amounts && typeof cfg.commission_amounts === 'object'
+          ? cfg.commission_amounts
+          : null;
+        const totalCompanyPackageCommission = parseFloat(
+          amountConfig?.[packageTypeForMoney] ??
+          amountConfig?.package ??
+          cfg?.commission_amount_package ??
+          0
+        ) || 0;
+        commissionAmount = totalCompanyPackageCommission / resolvedSessionCount;
+        sessionAmount = doctorWallet + commissionAmount;
+      } else if (!isPackageSession) {
+        const isCoupleSession = String(session.session_type || '').toLowerCase().includes('couple') ||
+          String(session.session_type || '').toLowerCase().includes('cpl');
+        doctorWallet = sessionAmount > 0
+          ? doctorWallet
+          : (isCoupleSession
+            ? getConfiguredCoupleDoctorShare(cfg)
+            : computeSessionDoctorWallet(session, cfg, commission || null));
+        commissionAmount = sessionAmount > 0
+          ? commissionAmount
+          : Math.max(0, sessionAmount - doctorWallet);
+      }
 
       payoutsByDoctor[psychId].total_doctor_wallet += doctorWallet;
       payoutsByDoctor[psychId].total_company_commission += commissionAmount;
@@ -5321,7 +5513,11 @@ const getPendingPayouts = async (req, res) => {
       payoutsByDoctor[psychId].sessions.push({
         session_id: session.id,
         session_date: session.scheduled_date,
+        client_name: pendingClientNameMap[session.client_id] || '—',
         session_type: sessionTypeForCount,
+        session_type_label: sessionTypeLabel,
+        package_session_number: packageSessionNumber,
+        session_count: sessionCountForType,
         session_amount: sessionAmount,
         doctor_wallet: doctorWallet,
         company_commission: commissionAmount
@@ -5495,7 +5691,7 @@ const markPayoutAsPaid = async (req, res) => {
       );
     }
 
-    const { psychologist_id, month, year, dateFrom, dateTo } = req.body;
+    const { psychologist_id, month, year, dateFrom, dateTo, sessionIds } = req.body;
 
     if (!psychologist_id) {
       return res.status(400).json(
@@ -5503,9 +5699,16 @@ const markPayoutAsPaid = async (req, res) => {
       );
     }
 
-    // Support both month/year and date range formats
+    const explicitSessionIds = Array.isArray(sessionIds)
+      ? [...new Set(sessionIds.filter(Boolean).map((id) => String(id)))]
+      : [];
+
+    // Support explicit session IDs, month/year, and date range formats.
     let monthStart, monthEnd;
-    if (dateFrom && dateTo) {
+    if (explicitSessionIds.length > 0) {
+      monthStart = dateFrom || null;
+      monthEnd = dateTo || null;
+    } else if (dateFrom && dateTo) {
       monthStart = dateFrom;
       monthEnd = dateTo;
     } else if (month && year) {
@@ -5514,51 +5717,79 @@ const markPayoutAsPaid = async (req, res) => {
       monthEnd = new Date(year, month, 0).toISOString().split('T')[0];
     } else {
       return res.status(400).json(
-        errorResponse('Either month/year or dateFrom/dateTo are required')
+        errorResponse('Either sessionIds, month/year, or dateFrom/dateTo are required')
       );
     }
 
-    // Get pending payout data for this psychologist and date range.
-    // Use updated_at (completion date) for filtering completed sessions.
+    // Get pending payout data for this psychologist and date range using
+    // completion_date so mark-paid matches the payout views exactly.
     let completedSessions = null;
     let sessionsError = null;
 
-    ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
+    let completedSessionsQuery = supabaseAdmin
       .from('sessions')
       .select(`
         id,
         psychologist_id,
         scheduled_date,
+        completion_date,
         updated_at,
         status,
         payment_id,
         price,
+        amount,
+        therapist_commission,
+        session_type,
+        session_count,
+        package_id,
+        package_group_id,
+        package_session_number,
         psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
       `)
       .eq('status', 'completed')
       .eq('psychologist_id', psychologist_id)
-      .gte('updated_at', `${monthStart}T00:00:00.000Z`)
-      .lte('updated_at', `${monthEnd}T23:59:59.999Z`)
-      .neq('session_type', 'free_assessment'));
+      .neq('session_type', 'free_assessment');
+
+    if (explicitSessionIds.length > 0) {
+      completedSessionsQuery = completedSessionsQuery.in('id', explicitSessionIds);
+    } else {
+      completedSessionsQuery = completedSessionsQuery.gte('completion_date', monthStart).lte('completion_date', monthEnd);
+    }
+
+    ({ data: completedSessions, error: sessionsError } = await completedSessionsQuery);
 
     if (sessionsError && String(sessionsError.message || '').includes('cover_image_url')) {
-      ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
+      let fallbackCompletedSessionsQuery = supabaseAdmin
         .from('sessions')
         .select(`
           id,
           psychologist_id,
           scheduled_date,
+          completion_date,
           updated_at,
           status,
           payment_id,
           price,
+          amount,
+          therapist_commission,
+          session_type,
+          session_count,
+          package_id,
+          package_group_id,
+          package_session_number,
           psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
         .eq('psychologist_id', psychologist_id)
-        .gte('updated_at', `${monthStart}T00:00:00.000Z`)
-        .lte('updated_at', `${monthEnd}T23:59:59.999Z`)
-        .neq('session_type', 'free_assessment'));
+        .neq('session_type', 'free_assessment');
+
+      if (explicitSessionIds.length > 0) {
+        fallbackCompletedSessionsQuery = fallbackCompletedSessionsQuery.in('id', explicitSessionIds);
+      } else {
+        fallbackCompletedSessionsQuery = fallbackCompletedSessionsQuery.gte('completion_date', monthStart).lte('completion_date', monthEnd);
+      }
+
+      ({ data: completedSessions, error: sessionsError } = await fallbackCompletedSessionsQuery);
     }
 
     if (sessionsError) {
@@ -5570,21 +5801,31 @@ const markPayoutAsPaid = async (req, res) => {
 
     if (completedSessionsInRange.length === 0) {
       return res.status(404).json(
-        errorResponse('No completed sessions found for this psychologist in the selected month')
+        errorResponse('No completed sessions found for this psychologist in the selected payout')
       );
     }
 
-    const sessionIds = completedSessionsInRange.map(s => s.id);
+    const payoutSessionIds = completedSessionsInRange.map(s => s.id);
+
+    const { data: dcRows } = await supabaseAdmin
+      .from('doctor_commissions')
+      .select('*')
+      .eq('psychologist_id', psychologist_id)
+      .order('created_at', { ascending: false });
+    const activeDc = (dcRows || []).find((r) => r.is_active !== false) || (dcRows || [])[0] || null;
+
     const { data: commissionHistory, error: commissionError } = await supabaseAdmin
       .from('commission_history')
       .select(`
+        id,
         session_id,
         psychologist_id,
+        payment_id,
         session_amount,
         commission_amount,
         payment_status
       `)
-      .in('session_id', sessionIds);
+      .in('session_id', payoutSessionIds);
 
     if (commissionError) {
       console.error('Error fetching commission history:', commissionError);
@@ -5604,12 +5845,11 @@ const markPayoutAsPaid = async (req, res) => {
       let commission = commissionMap[session.id];
       
       if (!commission) {
-        // Fallback: if history row is missing, treat full session amount as doctor payout.
-        // This avoids blocking mark-paid while keeping company commission conservative.
-        const sessionAmount = parseFloat(session.price || 0);
+        const sessionAmount = parseFloat(session.price ?? session.amount ?? 0) || 0;
+        const doctorWallet = computeSessionDoctorWallet(session, activeDc, null) || 0;
         commission = {
           session_amount: sessionAmount,
-          commission_amount: 0
+          commission_amount: sessionAmount - doctorWallet
         };
       }
 
@@ -5653,21 +5893,49 @@ const markPayoutAsPaid = async (req, res) => {
       throw payoutError;
     }
 
-    // Update commission history to mark as paid
-    // Update all commission history entries for sessions in this month that are still pending
+    const existingCommissionSessionIds = new Set((commissionHistory || []).map((ch) => ch.session_id));
+
+    // Existing rows may be pending/null. Mark every completed session row in this payout range
+    // as paid; upcoming/booked sessions are not in completedSessionsInRange, so they stay Not due.
     const { error: commissionUpdateError } = await supabaseAdmin
       .from('commission_history')
       .update({
         payment_status: 'paid',
         updated_at: new Date().toISOString()
       })
-      .in('session_id', sessionIds)
-      .eq('psychologist_id', psychologist_id)
-      .eq('payment_status', 'pending');
+      .in('session_id', payoutSessionIds)
+      .eq('psychologist_id', psychologist_id);
 
     if (commissionUpdateError) {
       console.error('Error updating commission history:', commissionUpdateError);
       // Don't throw - payout is already created, just log the error
+    }
+
+    const missingCommissionRows = completedSessionsInRange
+      .filter((session) => !existingCommissionSessionIds.has(session.id))
+      .map((session) => {
+        const sessionAmount = parseFloat(session.price ?? session.amount ?? 0) || 0;
+        const doctorWallet = computeSessionDoctorWallet(session, activeDc, null) || 0;
+        return {
+          psychologist_id,
+          session_id: session.id,
+          payment_id: session.payment_id || null,
+          session_amount: sessionAmount,
+          commission_amount: sessionAmount - doctorWallet,
+          payment_status: 'paid',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+      });
+
+    if (missingCommissionRows.length > 0) {
+      const { error: missingCommissionError } = await supabaseAdmin
+        .from('commission_history')
+        .insert(missingCommissionRows);
+
+      if (missingCommissionError) {
+        console.error('Error creating paid commission history rows:', missingCommissionError);
+      }
     }
 
     await auditLogger.logAction({
@@ -5679,7 +5947,7 @@ const markPayoutAsPaid = async (req, res) => {
       resourceId: payout.id,
       endpoint: '/api/finance/payouts/mark-paid',
       method: 'POST',
-      details: { psychologist_id, month, year, amount: totalDoctorWallet },
+      details: { psychologist_id, month, year, dateFrom, dateTo, session_count: completedSessionsInRange.length, amount: totalDoctorWallet },
       ip: req.ip,
       userAgent: req.headers['user-agent']
     }).catch(err => console.error('Audit log error:', err));

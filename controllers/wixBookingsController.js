@@ -3062,6 +3062,7 @@ async function rescheduleWixBooking(req, res) {
         sessionUpdates.google_meet_link = null;
         sessionUpdates.google_meet_join_url = null;
         sessionUpdates.google_meet_start_url = null;
+        sessionUpdates.google_calendar_link = null;
         sessionUpdates.google_calendar_id = null;
       }
       const { error: sessionUpdateErr } = await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
