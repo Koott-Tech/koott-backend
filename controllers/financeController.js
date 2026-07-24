@@ -1851,14 +1851,23 @@ const getDoctorPayouts = async (req, res) => {
       return res.json(successResponse({ payouts: [] }, 'No doctors found'));
     }
 
-    // Get all sessions
-    const allSessionsQuery = supabaseAdmin
+    // Get only sessions that can appear for the requested payout status.
+    let allSessionsQuery = supabaseAdmin
       .from('sessions')
       .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count')
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment')
       .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'])
       .in('psychologist_id', allPsychIds);
+
+    if (status === 'completed') {
+      allSessionsQuery = allSessionsQuery.eq('status', 'completed');
+      if (dateFrom && dateTo) {
+        allSessionsQuery = allSessionsQuery.gte('completion_date', dateFrom).lte('completion_date', dateTo);
+      }
+    } else if (status === 'pending' && dateFrom && dateTo) {
+      allSessionsQuery = allSessionsQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`).lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+    }
     
     const { data: allSessions } = await allSessionsQuery.order('created_at', { ascending: true });
 
@@ -3841,11 +3850,9 @@ const getCommissions = async (req, res) => {
     
     let psychologists = [];
     try {
-      // Use select('*') to stay compatible across environments where some
-      // optional columns (e.g., individual_session_price) may not exist yet.
       let query = supabaseAdmin
         .from('psychologists')
-        .select('*')
+        .select('id, first_name, last_name, email, phone, experience_years, cover_image_url, profile_picture_url, individual_session_price, created_at, updated_at')
         // Include psychologists even when email is null/empty.
         // Exclude only the configured assessment specialist email.
         .or(`email.is.null,email.neq.${assessmentEmail}`)
@@ -3855,7 +3862,21 @@ const getCommissions = async (req, res) => {
         query = query.eq('id', psychologistId);
       }
 
-      const { data: psychData, error: psychError } = await query;
+      let { data: psychData, error: psychError } = await query;
+
+      if (psychError && String(psychError.message || '').includes('individual_session_price')) {
+        query = supabaseAdmin
+          .from('psychologists')
+          .select('id, first_name, last_name, email, phone, experience_years, cover_image_url, profile_picture_url, created_at, updated_at')
+          .or(`email.is.null,email.neq.${assessmentEmail}`)
+          .order('first_name', { ascending: true });
+
+        if (psychologistId) {
+          query = query.eq('id', psychologistId);
+        }
+
+        ({ data: psychData, error: psychError } = await query);
+      }
       
       if (psychError) {
         console.error('Error fetching psychologists:', psychError);
@@ -3866,42 +3887,6 @@ const getCommissions = async (req, res) => {
     } catch (err) {
       console.error('Exception fetching psychologists:', err);
       psychologists = [];
-    }
-
-    // Align finance-doctors base listing with Koott Therapists:
-    // if we can resolve linked therapists from wix_bookings, prioritize that subset.
-    try {
-      const { data: wixRows } = await supabaseAdmin
-        .from('wix_bookings')
-        .select('therapist_name,payload,created_at')
-        .order('created_at', { ascending: false })
-        .limit(3000);
-
-      if (wixRows?.length && psychologists?.length) {
-        const psychByEmail = new Map();
-        const psychByName = new Map();
-        psychologists.forEach((p) => {
-          const email = String(p.email || '').trim().toLowerCase();
-          if (email) psychByEmail.set(email, p);
-          const nameKey = `${String(p.first_name || '').trim().toLowerCase()} ${String(p.last_name || '').trim().toLowerCase()}`.trim();
-          if (nameKey) psychByName.set(nameKey, p);
-        });
-
-        const matchedPsychIds = new Set();
-        wixRows.forEach((r) => {
-          const payload = r.payload || {};
-          const t = payload.therapist || {};
-          const email = String(t.email || '').trim().toLowerCase();
-          const nameKey = String(r.therapist_name || t.name || t.displayName || t.fullName || '').trim().toLowerCase();
-          const matched = (email && psychByEmail.get(email)) || psychByName.get(nameKey) || null;
-          if (matched?.id) matchedPsychIds.add(matched.id);
-        });
-
-        // Do NOT hard-filter the finance doctors list to Wix matches only.
-        // Finance should still show all psychologist profiles (including missing-email rows).
-      }
-    } catch (wixFilterErr) {
-      console.warn('Wix therapist alignment skipped in getCommissions:', wixFilterErr?.message || wixFilterErr);
     }
 
     // Deduplicate psychologists by identity key:
@@ -3945,62 +3930,6 @@ const getCommissions = async (req, res) => {
     psychologists = Array.from(psychIdentityMap.values());
 
     const allPsychologistIds = psychologists.map(p => p.id);
-
-    // Build Koott-therapists-style Wix booking count map by matched psychologist.
-    const wixCountsByPsychId = {};
-    try {
-      const { data: wixRows } = await supabaseAdmin
-        .from('wix_bookings')
-        .select('therapist_name,created_at,payload')
-        .order('created_at', { ascending: false })
-        .limit(5000);
-
-      if (wixRows?.length && psychologists?.length) {
-        // Same summary keying as admin/wix-therapists page source logic.
-        const summary = new Map();
-        for (const r of wixRows) {
-          const payload = r.payload || {};
-          const t = payload.therapist || {};
-          const name = String(r.therapist_name || t.name || t.displayName || t.fullName || '').trim();
-          const email = String(t.email || '').trim().toLowerCase() || null;
-          if (!name && !email) continue;
-          const key = `${name.toLowerCase()}|${email || ''}`;
-          const existing = summary.get(key);
-          if (!existing) {
-            summary.set(key, { name, email, bookingsCount: 1, latestBookingAt: r.created_at || null });
-          } else {
-            existing.bookingsCount += 1;
-            if ((r.created_at || '') > (existing.latestBookingAt || '')) {
-              existing.latestBookingAt = r.created_at;
-            }
-          }
-        }
-
-        const psychByEmail = new Map();
-        const psychByName = new Map();
-        psychologists.forEach((p) => {
-          const email = String(p.email || '').trim().toLowerCase();
-          if (email) psychByEmail.set(email, p);
-          const nameKey = `${String(p.first_name || '').trim().toLowerCase()} ${String(p.last_name || '').trim().toLowerCase()}`.trim();
-          if (nameKey) psychByName.set(nameKey, p);
-        });
-
-        for (const t of summary.values()) {
-          const nameKey = String(t.name || '').trim().toLowerCase();
-          const matched = (t.email && psychByEmail.get(t.email)) || psychByName.get(nameKey) || null;
-          if (!matched?.id) continue;
-          if (!wixCountsByPsychId[matched.id]) {
-            wixCountsByPsychId[matched.id] = { bookingsCount: 0, latestBookingAt: null };
-          }
-          wixCountsByPsychId[matched.id].bookingsCount += t.bookingsCount || 0;
-          if ((t.latestBookingAt || '') > (wixCountsByPsychId[matched.id].latestBookingAt || '')) {
-            wixCountsByPsychId[matched.id].latestBookingAt = t.latestBookingAt || null;
-          }
-        }
-      }
-    } catch (wixCountErr) {
-      console.warn('Wix booking count enrichment failed in getCommissions:', wixCountErr?.message || wixCountErr);
-    }
 
     // Get package prices for each psychologist
     const packagePricesMap = {};
@@ -4550,9 +4479,6 @@ const getCommissions = async (req, res) => {
         };
       });
 
-      const wixCount = wixCountsByPsychId[psych.id]?.bookingsCount || 0;
-      const displayTotalSessions = wixCount > 0 ? wixCount : stats.total_sessions;
-
       return {
         psychologist_id: psych.id,
         commission_amounts: commissionAmounts, // Full JSONB object
@@ -4581,12 +4507,12 @@ const getCommissions = async (req, res) => {
         package_commissions: effectivePackageCommissions, // Packages with company + doctor commission amounts
         individual_sessions: stats.individual_sessions,
         package_sessions: stats.package_sessions,
-        total_sessions: displayTotalSessions,
+        total_sessions: stats.total_sessions,
         total_sessions_finance: stats.total_sessions,
         pending_sessions: stats.pending_sessions,
         completed_sessions: stats.completed_sessions,
-        wix_bookings_count: wixCount,
-        latest_wix_booking_at: wixCountsByPsychId[psych.id]?.latestBookingAt || null,
+        wix_bookings_count: 0,
+        latest_wix_booking_at: null,
         total_revenue: stats.total_revenue,
         total_commission_to_company: stats.total_commission_to_company,
         total_to_doctor_wallet: stats.total_to_doctor_wallet,
