@@ -1026,6 +1026,8 @@ async function listWixBookings(req, res) {
     const { dateFrom, dateTo, search, session_type, status } = req.query;
     const fromIdx = (page - 1) * limit;
     const toIdx = fromIdx + limit - 1;
+    const normalizedStatusFilter = String(status || '').toLowerCase();
+    const needsRuntimeStatusFilter = ['pending', 'booked', 'rescheduled'].includes(normalizedStatusFilter);
 
     const getEffectiveStatus = (row) => {
       const linked = String(row?.session_status || '').toLowerCase();
@@ -1073,39 +1075,55 @@ async function listWixBookings(req, res) {
       return effective === normalizedStatus;
     };
 
-    let q = supabaseAdmin.from('wix_bookings').select('*');
+    const applyBaseFilters = (query) => {
+      let next = query;
 
-    if (session_type && session_type !== 'all') {
-      q = q.eq('session_type', session_type);
-    }
+      if (session_type && session_type !== 'all') {
+        next = next.eq('session_type', session_type);
+      }
 
-    // For date filtering: ALWAYS check both start_time (when the session happens) and created_at (when it was booked).
-    // Previously this was only for the 'Upcoming' tab, causing packages/completed sessions to disappear if created in a past month.
-    if (dateFrom && dateTo) {
-      q = q.or(
-        `and(start_time.gte.${dateFrom}T00:00:00.000+05:30,start_time.lte.${dateTo}T23:59:59.999+05:30),` +
-        `and(created_at.gte.${dateFrom}T00:00:00.000+05:30,created_at.lte.${dateTo}T23:59:59.999+05:30)`
-      );
-    } else {
-      if (dateFrom) q = q.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
-      if (dateTo) q = q.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
-    }
+      // For date filtering: ALWAYS check both start_time (when the session happens) and created_at (when it was booked).
+      // Previously this was only for the 'Upcoming' tab, causing packages/completed sessions to disappear if created in a past month.
+      if (dateFrom && dateTo) {
+        next = next.or(
+          `and(start_time.gte.${dateFrom}T00:00:00.000+05:30,start_time.lte.${dateTo}T23:59:59.999+05:30),` +
+          `and(created_at.gte.${dateFrom}T00:00:00.000+05:30,created_at.lte.${dateTo}T23:59:59.999+05:30)`
+        );
+      } else {
+        if (dateFrom) next = next.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
+        if (dateTo) next = next.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+      }
 
-    const term = typeof search === 'string' ? search.trim().replace(/,/g, '') : '';
-    if (term) {
-      const esc = term.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-      const pattern = `%${esc}%`;
-      q = q.or(
-        `client_email.ilike.${pattern},client_full_name.ilike.${pattern},client_first_name.ilike.${pattern},therapist_name.ilike.${pattern},title.ilike.${pattern}`
-      );
-    }
+      const term = typeof search === 'string' ? search.trim().replace(/,/g, '') : '';
+      if (term) {
+        const esc = term.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+        const pattern = `%${esc}%`;
+        next = next.or(
+          `client_email.ilike.${pattern},client_full_name.ilike.${pattern},client_first_name.ilike.${pattern},therapist_name.ilike.${pattern},title.ilike.${pattern}`
+        );
+      }
+
+      if (normalizedStatusFilter && normalizedStatusFilter !== 'all' && !needsRuntimeStatusFilter) {
+        const dbStatus = normalizedStatusFilter === 'no_show' ? ['no_show', 'noshow'] : [normalizedStatusFilter];
+        next = next.in('status', dbStatus);
+      }
+
+      next = next.neq('status', 'deleted').not('wix_session_id', 'is', null);
+      return next;
+    };
+
+    let q = applyBaseFilters(supabaseAdmin.from('wix_bookings').select('*', { count: 'exact' }));
 
     // Newest Wix bookings on top
     q = q
       .order('created_at', { ascending: false, nullsFirst: false })
       .order('start_time', { ascending: false, nullsFirst: false });
 
-    const { data: bookingsData, error: bookingsError } = await q;
+    if (!needsRuntimeStatusFilter) {
+      q = q.range(fromIdx, toIdx);
+    }
+
+    const { data: bookingsData, error: bookingsError, count: dbFilteredCount } = await q;
 
     if (bookingsError) {
       console.error('[listWixBookings]', bookingsError);
@@ -1240,9 +1258,15 @@ async function listWixBookings(req, res) {
         return row.status !== 'deleted' && !!row.wix_session_id;
       });
 
-    const statusFilteredRows = allVisibleRows.filter(matchesStatusFilter);
-    const totalVisible = statusFilteredRows.length;
-    const dedupedData = statusFilteredRows.slice(fromIdx, toIdx + 1);
+    const statusFilteredRows = needsRuntimeStatusFilter
+      ? allVisibleRows.filter(matchesStatusFilter)
+      : allVisibleRows;
+    const totalVisible = needsRuntimeStatusFilter
+      ? statusFilteredRows.length
+      : (dbFilteredCount ?? statusFilteredRows.length);
+    const dedupedData = needsRuntimeStatusFilter
+      ? statusFilteredRows.slice(fromIdx, toIdx + 1)
+      : statusFilteredRows;
 
     // Compute total *sessions* (a Package of 3 = 3 sessions, children of a package = 0)
     // by aggregating session_count and package linkage across the same date range.
@@ -1252,7 +1276,7 @@ async function listWixBookings(req, res) {
         .from('wix_bookings')
         .select('session_type, session_count, package_parent_booking_id, package_session_number, status, wix_session_id, wix_order_number, price');
       if (session_type && session_type !== 'all') aggQ = aggQ.eq('session_type', session_type);
-      if (isUpcomingWixTab && dateFrom && dateTo) {
+      if (normalizedStatusFilter === 'booked' && dateFrom && dateTo) {
         aggQ = aggQ.or(
           `and(start_time.gte.${dateFrom}T00:00:00.000+05:30,start_time.lte.${dateTo}T23:59:59.999+05:30),` +
           `and(created_at.gte.${dateFrom}T00:00:00.000+05:30,created_at.lte.${dateTo}T23:59:59.999+05:30)`
