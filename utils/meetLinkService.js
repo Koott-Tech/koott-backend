@@ -70,6 +70,30 @@ class MeetLinkService {
     return `${paddedHours}:${paddedMinutes}:${paddedSeconds}`;
   }
 
+  addDaysToDate(dateStr, days) {
+    const date = new Date(`${dateStr}T00:00:00Z`);
+    if (Number.isNaN(date.getTime())) return dateStr;
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+  }
+
+  resolveEventDateTimes(sessionData) {
+    const startDate = sessionData.startDate;
+    const startTime = this.formatTime(sessionData.startTime);
+    const endTime = this.formatTime(sessionData.endTime);
+    const inferredEndDate = endTime <= startTime
+      ? this.addDaysToDate(startDate, 1)
+      : startDate;
+    const endDate = sessionData.endDate || inferredEndDate;
+
+    return {
+      startDateTime: `${startDate}T${startTime}`,
+      endDateTime: `${endDate}T${endTime}`,
+      startISO: `${startDate}T${startTime}+05:30`,
+      endISO: `${endDate}T${endTime}+05:30`,
+    };
+  }
+
   // Helper: Build normalized return object
   createResult(success, meetLink, method, eventId = null, eventLink = null, error = null, note = null, calendarId = null) {
     return {
@@ -425,15 +449,16 @@ class MeetLinkService {
       const adminEmail = process.env.COMPANY_ADMIN_EMAIL;
       if (adminEmail) pushUniqueEmail(adminEmail);
 
+      const eventDateTimes = this.resolveEventDateTimes(sessionData);
       const event = {
         summary: sessionData.summary || 'Koott Session',
         description: sessionData.description || 'Therapy session with Google Meet',
         start: {
-          dateTime: `${sessionData.startDate}T${this.formatTime(sessionData.startTime)}`,
+          dateTime: eventDateTimes.startDateTime,
           timeZone: 'Asia/Kolkata'
         },
         end: {
-          dateTime: `${sessionData.startDate}T${this.formatTime(sessionData.endTime)}`,
+          dateTime: eventDateTimes.endDateTime,
           timeZone: 'Asia/Kolkata'
         },
         attendees: dedupedAttendees.length > 0 ? dedupedAttendees : undefined,
@@ -636,15 +661,16 @@ class MeetLinkService {
       }
 
       // Create event WITHOUT attendees field (service account limitation)
+      const eventDateTimes = this.resolveEventDateTimes(sessionData);
       const event = {
         summary: sessionData.summary || 'Koott Session',
         description: description,
         start: {
-          dateTime: `${sessionData.startDate}T${this.formatTime(sessionData.startTime)}`,
+          dateTime: eventDateTimes.startDateTime,
           timeZone: 'Asia/Kolkata'
         },
         end: {
-          dateTime: `${sessionData.startDate}T${this.formatTime(sessionData.endTime)}`,
+          dateTime: eventDateTimes.endDateTime,
           timeZone: 'Asia/Kolkata'
         },
         // Make meeting open to anyone with the link (no waiting room)
@@ -925,9 +951,9 @@ class MeetLinkService {
       // Build new start/end in IST. Normalize to HH:MM first so callers may pass either
       // "HH:MM" or "HH:MM:SS" without producing a malformed "...:00:00" datetime (which
       // Google rejects with 400 Bad Request).
-      const toHHMM = (t) => String(t || '').trim().slice(0, 5);
-      const startISO = `${sessionData.startDate}T${toHHMM(sessionData.startTime)}:00+05:30`;
-      const endISO = `${sessionData.startDate}T${toHHMM(sessionData.endTime)}:00+05:30`;
+      const eventDateTimes = this.resolveEventDateTimes(sessionData);
+      const startISO = eventDateTimes.startISO;
+      const endISO = eventDateTimes.endISO;
 
       const patchBody = {
         start: { dateTime: startISO, timeZone: 'Asia/Kolkata' },

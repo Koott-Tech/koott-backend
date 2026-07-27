@@ -42,6 +42,10 @@ function nameMatchKey(value) {
 function normalizedFullName(firstName, lastName) {
   return nameMatchKey([firstName, lastName].filter(Boolean).join(' '));
 }
+function psychologistNameMatches(row, targetFullName) {
+  if (!targetFullName) return true;
+  return normalizedFullName(row?.first_name, row?.last_name) === targetFullName;
+}
 
 function therapistFromBooking(booking) {
   const t = booking?.therapist;
@@ -82,14 +86,27 @@ async function resolveOrCreateWixPsychologist(booking) {
 
   if (!rawName && !rawEmail) return { psychologistId: null, isNew: false };
 
-  // 1. Try resolving by Wix Staff ID (100% unique & reliable)
+  const { firstName, lastName } = splitName(rawName);
+  const targetFullName = nameMatchKey(rawName); // title- and whitespace-insensitive key
+
+  // 1. Try resolving by Wix Staff ID. If Wix also sent a therapist name, guard against
+  // stale/bad staff-id mappings by requiring the matched row's name to agree.
   if (therapist.staffId) {
     const { data: existingByStaffId } = await supabaseAdmin
       .from('psychologists')
-      .select('id')
+      .select('id, first_name, last_name')
       .eq('wix_staff_id', therapist.staffId)
       .limit(1);
-    if (existingByStaffId?.[0]?.id) return { psychologistId: existingByStaffId[0].id, isNew: false };
+    const staffMatch = existingByStaffId?.[0] || null;
+    if (staffMatch?.id && psychologistNameMatches(staffMatch, targetFullName)) {
+      return { psychologistId: staffMatch.id, isNew: false };
+    }
+    if (staffMatch?.id) {
+      console.warn(
+        `[wixPsychologistResolver] ignoring wix_staff_id ${therapist.staffId} because it maps to ` +
+        `"${[staffMatch.first_name, staffMatch.last_name].filter(Boolean).join(' ')}" but Wix booking says "${rawName}"`
+      );
+    }
   }
 
   // 1.5. Try resolving by email (most unique fallback)
@@ -107,12 +124,10 @@ async function resolveOrCreateWixPsychologist(booking) {
   // first_name query — the previous `ilike('first_name', firstName)` missed the existing
   // profile whenever the name was stored/split differently (e.g. "Dr. Gayathri" vs "Dr."),
   // which silently created duplicates. The table is small, so a full scan is cheap.
-  const { firstName, lastName } = splitName(rawName);
-  const targetFullName = nameMatchKey(rawName); // title- and whitespace-insensitive key
   if (targetFullName) {
     const { data: allPsychs } = await supabaseAdmin
       .from('psychologists')
-      .select('id, first_name, last_name, email, google_calendar_credentials');
+      .select('id, first_name, last_name, email, google_calendar_credentials, wix_staff_id');
     const matches = (allPsychs || []).filter((row) =>
       normalizedFullName(row.first_name, row.last_name) === targetFullName
     );
