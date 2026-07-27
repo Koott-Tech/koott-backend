@@ -362,7 +362,9 @@ const getAllSessions = async (req, res) => {
 
     let statusList = normalizeStatusList(status);
     const wixBookingIds = normalizeTextList(wix_booking_id);
-    const sourceFilter = String(source || '').trim().toLowerCase();
+    const requestReferrer = String(req.get('referer') || req.get('referrer') || '');
+    const isWixDiscoverReferrer = /\/admin\/wix-discover(?:[/?#]|$)/.test(requestReferrer);
+    const sourceFilter = String(source || (isWixDiscoverReferrer ? 'non_wix' : '')).trim().toLowerCase();
     const isPendingFilter = statusList.length === 1 && statusList[0].toLowerCase() === 'pending';
     const searchTerm = String(search || '').trim();
     const loweredSearchTerm = searchTerm.toLowerCase();
@@ -629,6 +631,16 @@ const getAllSessions = async (req, res) => {
     if (canUseDatabasePagination) {
       query = query.range(startIndex, endIndex - 1);
     }
+
+    console.log('[getAllSessions] query mode:', {
+      sourceFilter: sourceFilter || null,
+      isWixDiscoverReferrer,
+      sort,
+      statusList,
+      page: pageNumber,
+      limit: pageLimit,
+      canUseDatabasePagination,
+    });
 
     console.log(canUseDatabasePagination
       ? 'Executing paginated sessions query...'
