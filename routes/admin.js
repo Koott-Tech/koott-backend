@@ -261,6 +261,7 @@ router.put('/users/:userId', adminController.updateUser);
 router.delete('/users/:userId', adminController.deleteUser);
 
 // Session management
+router.get('/wix/platform-sessions', sessionController.getWixDiscoverPlatformSessions);
 router.get('/sessions/all', sessionController.getAllSessions);
 router.get('/sessions/:sessionId', sessionController.getSessionById);
 

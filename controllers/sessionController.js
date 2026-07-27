@@ -997,6 +997,16 @@ const getAllSessions = async (req, res) => {
   }
 };
 
+const getWixDiscoverPlatformSessions = async (req, res) => {
+  req.query = {
+    ...req.query,
+    source: 'non_wix',
+    sort: req.query.sort || 'created_at',
+    order: req.query.order || 'desc',
+  };
+  return getAllSessions(req, res);
+};
+
 // Get sessions for a specific client
 const getClientSessions = async (req, res) => {
   try {
@@ -2980,6 +2990,7 @@ module.exports = {
   getClientSessions,
   getPsychologistSessions,
   getAllSessions,
+  getWixDiscoverPlatformSessions,
   getSessionById,
   updateSessionStatus,
   deleteSession,
