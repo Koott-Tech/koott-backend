@@ -522,10 +522,17 @@ const getAllSessions = async (req, res) => {
     // here because PostgREST can't resolve the clients→users relationship in
     // this project's schema cache. Email is fetched separately below and
     // reattached as client.user.email so the frontend contract is preserved.
+    //
+    // NOTE: We intentionally do NOT select `wix_payload` here. It is a large JSONB
+    // blob (~2.4KB/row) and this query fetches ALL matching rows (900+) before
+    // in-memory pagination. Including it produced a ~4MB response that got truncated
+    // mid-stream by the hosting proxy → "SyntaxError: Expected ',' or '}' after
+    // property value" in postgrest-js JSON.parse. wix_payload is re-loaded in small
+    // id-chunks below (loadWixPayloadForSessions) before enrichment needs it.
     let query = supabaseAdmin
       .from('sessions')
       .select(`
-        *,
+        id,client_id,psychologist_id,package_id,session_type,status,scheduled_date,scheduled_time,original_scheduled_date,original_scheduled_time,google_meet_link,google_meet_join_url,google_meet_start_url,google_calendar_link,notes,summary,summary_notes,report,completion_date,feedback,rating,client_feedback,price,amount,created_at,updated_at,source,wix_booking_id,locally_modified,therapist_commission,package_group_id,package_session_number,session_count,payment_id,session_summary,session_notes,wix_order_number,booking_created_at,notified_at,google_calendar_event_id,reminder_sent,is_first_session,payment_verified,payment_verified_at,original_psychologist_id,google_calendar_id,email_sent_at,whatsapp_sent_at,email_error,whatsapp_error,notification_alert_sent,
         client:clients(
           id,
           user_id,
@@ -614,6 +621,37 @@ const getAllSessions = async (req, res) => {
       sessions.forEach((s) => {
         s.booking_created_at = getSessionBookingCreatedAtIso(s);
       });
+    }
+
+    // Re-load wix_payload separately, in small id-chunks, only for Wix-linked rows.
+    // It is excluded from the bulk select above to keep that response small enough to
+    // avoid mid-stream truncation by the hosting proxy. Enrichment (below) only reads
+    // wix_payload for rows where source==='wix' or wix_booking_id is set, so we skip
+    // the rest. Each chunk stays well under the size that corrupts in transit.
+    if (sessions && sessions.length) {
+      const wixLinked = sessions.filter(
+        (s) => String(s.source || '').toLowerCase() === 'wix' || s.wix_booking_id
+      );
+      if (wixLinked.length) {
+        const byId = new Map(wixLinked.map((s) => [s.id, s]));
+        const wixIds = [...byId.keys()];
+        const WP_CHUNK = 150;
+        for (let i = 0; i < wixIds.length; i += WP_CHUNK) {
+          const chunk = wixIds.slice(i, i + WP_CHUNK);
+          const { data: wpRows, error: wpErr } = await supabaseAdmin
+            .from('sessions')
+            .select('id, wix_payload')
+            .in('id', chunk);
+          if (wpErr) {
+            console.warn('[getAllSessions] wix_payload chunk load failed:', wpErr.message || wpErr);
+            continue;
+          }
+          for (const r of wpRows || []) {
+            const s = byId.get(r.id);
+            if (s) s.wix_payload = r.wix_payload;
+          }
+        }
+      }
     }
 
     // Replace Velo therapist-only stubs on sessions.wix_payload with full payload from wix_bookings when present
