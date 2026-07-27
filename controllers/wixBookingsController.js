@@ -2909,6 +2909,7 @@ async function rescheduleWixBooking(req, res) {
     //    cleanup that could race the create and delete the new event.
     let newMeetData = { meetLink: null, eventId: null, calendarLink: null };
     let meetResult = null;
+    let dbEventId = undefined; // track explicitly if we should update DB
     const addMins = (t, m) => {
       const [h, min] = t.split(':').map(Number);
       const total = h * 60 + min + m;
@@ -2965,7 +2966,6 @@ async function rescheduleWixBooking(req, res) {
         }
       }
 
-      let dbEventId = undefined; // track explicitly if we should update DB
       if (meetResult) {
         newMeetData.eventId = meetResult.eventId || null;
         newMeetData.meetLink = meetResult.meetLink || null;
