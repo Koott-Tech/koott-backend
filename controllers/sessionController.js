@@ -338,7 +338,11 @@ const getAllSessions = async (req, res) => {
     const { supabaseAdmin } = require('../config/supabase');
     const adminBookingTimeCol = await getBookingTimeColumnKey(supabaseAdmin);
 
-    const { page = 1, limit = 10, status, session_type, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc', search = '', wix_booking_id } = req.query;
+    const { page = 1, limit = 10, status, session_type, psychologist_id, client_id, date, dateFrom, dateTo, sort = 'created_at', order = 'desc', search = '', wix_booking_id, source } = req.query;
+    const pageNumber = Math.max(1, parseInt(String(page), 10) || 1);
+    const pageLimit = Math.min(500, Math.max(1, parseInt(String(limit), 10) || 10));
+    const startIndex = (pageNumber - 1) * pageLimit;
+    const endIndex = startIndex + pageLimit;
 
     // ?status=booked&status=rescheduled OR ?status=booked,rescheduled OR ?status=booked
     const normalizeStatusList = (raw) => {
@@ -358,6 +362,7 @@ const getAllSessions = async (req, res) => {
 
     let statusList = normalizeStatusList(status);
     const wixBookingIds = normalizeTextList(wix_booking_id);
+    const sourceFilter = String(source || '').trim().toLowerCase();
     const isPendingFilter = statusList.length === 1 && statusList[0].toLowerCase() === 'pending';
     const searchTerm = String(search || '').trim();
     const loweredSearchTerm = searchTerm.toLowerCase();
@@ -460,6 +465,16 @@ const getAllSessions = async (req, res) => {
       if (statusList.length === 1) return q.eq('status', statusList[0]);
       return q.in('status', statusList);
     };
+    const applySourceFilter = (q) => {
+      if (!sourceFilter || sourceFilter === 'all') return q;
+      if (['non_wix', 'non-wix', 'platform'].includes(sourceFilter)) {
+        return q.or('source.is.null,source.neq.wix');
+      }
+      if (sourceFilter === 'wix') {
+        return q.eq('source', 'wix');
+      }
+      return q.eq('source', sourceFilter);
+    };
 
     // First, get the total count of sessions (without pagination)
     // Use supabaseAdmin to bypass RLS (backend has proper auth/authorization)
@@ -474,6 +489,7 @@ const getAllSessions = async (req, res) => {
 
     // Apply same filters for count
     countQuery = applySessionStatusFilter(countQuery);
+    countQuery = applySourceFilter(countQuery);
     if (session_type) {
       countQuery = countQuery.eq('session_type', String(session_type));
     }
@@ -559,6 +575,7 @@ const getAllSessions = async (req, res) => {
 
     // Apply filters
     query = applySessionStatusFilter(query);
+    query = applySourceFilter(query);
     if (session_type) {
       query = query.eq('session_type', String(session_type));
     }
@@ -603,8 +620,19 @@ const getAllSessions = async (req, res) => {
       }
     }
 
-    // Don't paginate yet - we need to combine with assessment sessions first
-    console.log('Executing query for all sessions (no pagination yet)...');
+    const sourceExcludesHiddenWixRows = ['non_wix', 'non-wix', 'platform'].includes(sourceFilter);
+    const canUseDatabasePagination =
+      !isPendingFilter &&
+      sourceExcludesHiddenWixRows &&
+      sort !== 'scheduled_date';
+
+    if (canUseDatabasePagination) {
+      query = query.range(startIndex, endIndex - 1);
+    }
+
+    console.log(canUseDatabasePagination
+      ? 'Executing paginated sessions query...'
+      : 'Executing query for all sessions (runtime filtering/sorting required)...');
     const { data: sessions, error } = await query;
     console.log('Query result:', { sessionsCount: sessions?.length, error });
 
@@ -868,12 +896,12 @@ const getAllSessions = async (req, res) => {
       });
     }
 
-    // Apply pagination to combined results
-    // Note: Since we're combining two different tables, we need to paginate in memory
-    const totalSessions = visibleSessions.length;
-    const startIndex = (page - 1) * parseInt(limit);
-    const endIndex = startIndex + parseInt(limit);
-    const paginatedSessions = visibleSessions.slice(startIndex, endIndex);
+    const totalSessions = canUseDatabasePagination
+      ? (sessionsCount || visibleSessions.length)
+      : visibleSessions.length;
+    const paginatedSessions = canUseDatabasePagination
+      ? visibleSessions
+      : visibleSessions.slice(startIndex, endIndex);
 
     // Commission / net revenue (finance sessions table)
     try {
@@ -931,8 +959,8 @@ const getAllSessions = async (req, res) => {
       totalSessions,
       allSessionsLength: allSessions.length,
       visibleSessionsLength: visibleSessions.length,
-      page: parseInt(page),
-      limit: parseInt(limit),
+      page: pageNumber,
+      limit: pageLimit,
       startIndex,
       endIndex,
       paginatedCount: paginatedSessions.length
@@ -942,8 +970,8 @@ const getAllSessions = async (req, res) => {
       successResponse({
         sessions: paginatedSessions,
         pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
+          page: pageNumber,
+          limit: pageLimit,
           total: totalSessions
         }
       })
