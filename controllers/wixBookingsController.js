@@ -1268,31 +1268,9 @@ async function listWixBookings(req, res) {
       ? statusFilteredRows.slice(fromIdx, toIdx + 1)
       : statusFilteredRows;
 
-    // Compute total *sessions* (a Package of 3 = 3 sessions, children of a package = 0)
-    // by aggregating session_count and package linkage across the same date range.
-    let totalSessions = totalVisible;
-    try {
-      let aggQ = supabaseAdmin
-        .from('wix_bookings')
-        .select('session_type, session_count, package_parent_booking_id, package_session_number, status, wix_session_id, wix_order_number, price');
-      if (session_type && session_type !== 'all') aggQ = aggQ.eq('session_type', session_type);
-      if (normalizedStatusFilter === 'booked' && dateFrom && dateTo) {
-        aggQ = aggQ.or(
-          `and(start_time.gte.${dateFrom}T00:00:00.000+05:30,start_time.lte.${dateTo}T23:59:59.999+05:30),` +
-          `and(created_at.gte.${dateFrom}T00:00:00.000+05:30,created_at.lte.${dateTo}T23:59:59.999+05:30)`
-        );
-      } else {
-        if (dateFrom) aggQ = aggQ.gte('created_at', `${dateFrom}T00:00:00.000+05:30`);
-        if (dateTo) aggQ = aggQ.lte('created_at', `${dateTo}T23:59:59.999+05:30`);
-      }
-      const { data: rowsForCount } = await aggQ;
-      if (Array.isArray(rowsForCount)) {
-        // Same logic as allVisibleRows filter: exclude deleted + no wix_session_id only
-        totalSessions = rowsForCount.filter(
-          (r) => r.status !== 'deleted' && !!r.wix_session_id
-        ).length;
-      }
-    } catch { /* fall back to count */ }
+    // Keep the extra pagination field for API compatibility without running a second
+    // full-row aggregation query. Frontend pages use pagination.total for counts.
+    const totalSessions = totalVisible;
 
     const visibleBookingIds = dedupedData.map((row) => row?.wix_booking_id).filter(Boolean);
     let finalSessionMap = sessionMap;
