@@ -270,6 +270,7 @@ router.put('/sessions/:sessionId', adminController.updateSession);
 router.put('/sessions/:sessionId/no-show', sessionController.markSessionAsNoShow);
 router.post('/sessions/:sessionId/complete', sessionController.completeSession);
 router.patch('/sessions/:sessionId/cancel-refund', sessionController.cancelRefundSession);
+router.patch('/sessions/:sessionId/cancel-only', sessionController.cancelOnlySession);
 router.patch('/sessions/:sessionId/verify-payment', sessionController.verifyPayment);
 router.post('/sessions/:sessionId/transfer', sessionController.transferSession);
 router.delete('/sessions/:sessionId', sessionController.deleteSession);

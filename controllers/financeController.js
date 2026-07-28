@@ -33,6 +33,23 @@ dayjs.extend(timezone);
 
 const FINANCE_IST_TZ = 'Asia/Kolkata';
 
+function escapeHtml(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeReceiptFileName(value = 'koott-receipt.pdf') {
+  const cleaned = String(value || 'koott-receipt.pdf')
+    .replace(/[^\w.\-() ]+/g, '-')
+    .replace(/\s+/g, '-')
+    .slice(0, 120);
+  return cleaned.toLowerCase().endsWith('.pdf') ? cleaned : `${cleaned || 'koott-receipt'}.pdf`;
+}
+
 function isHiddenWixListRow(session) {
   const src = String(session?.source || '').toLowerCase();
   if (src !== 'wix') return false;
@@ -2439,9 +2456,15 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
       .eq('psychologist_id', psychologistId)
       .neq('session_type', 'free_assessment');
 
-    const dateCol = String(dateBasis) === 'booked' ? 'booking_created_at' : 'scheduled_date';
+    const normalizedDateBasis = String(dateBasis || '').toLowerCase();
+    const dateCol = normalizedDateBasis === 'booked'
+      ? 'booking_created_at'
+      : (normalizedDateBasis === 'completed' || normalizedDateBasis === 'completion'
+        ? 'completion_date'
+        : 'scheduled_date');
     if (dateFrom && dateTo) {
       if (dateCol === 'scheduled_date') q = q.gte('scheduled_date', dateFrom).lte('scheduled_date', dateTo);
+      else if (dateCol === 'completion_date') q = q.gte('completion_date', dateFrom).lte('completion_date', dateTo);
       else q = q.gte('booking_created_at', `${dateFrom}T00:00:00+05:30`).lte('booking_created_at', `${dateTo}T23:59:59.999+05:30`);
     }
 
@@ -2460,6 +2483,54 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
         .from('clients').select('id, first_name, last_name, user_id').in('id', clientIds.slice(i, i + 100));
       (cs || []).forEach((c) => clientById.set(c.id, c));
     }
+
+    // Determine first-vs-follow-up using the same client-history idea used elsewhere in finance.
+    // This is exposed so receipt auto-fill can show separate first/follow-up rows instead of guessing.
+    const clientFirstSessions = new Set();
+    const historyBySessionId = new Map();
+    if (clientIds.length) {
+      const historyRows = [];
+      for (let i = 0; i < clientIds.length; i += 100) {
+        const { data: hist } = await supabaseAdmin
+          .from('sessions')
+          .select('id, client_id, created_at, scheduled_date, status, session_type, package_id')
+          .in('client_id', clientIds.slice(i, i + 100))
+          .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+          .neq('session_type', 'free_assessment');
+        historyRows.push(...(hist || []));
+      }
+      historyRows.forEach((s) => historyBySessionId.set(s.id, s));
+
+      const sessionsByClient = {};
+      historyRows.forEach((s) => {
+        if (!s.client_id) return;
+        if (!sessionsByClient[s.client_id]) sessionsByClient[s.client_id] = [];
+        sessionsByClient[s.client_id].push(s);
+      });
+
+      Object.values(sessionsByClient).forEach((clientSessions) => {
+        const sorted = clientSessions.sort((a, b) => {
+          const dateA = new Date(a.created_at || a.scheduled_date || 0);
+          const dateB = new Date(b.created_at || b.scheduled_date || 0);
+          return dateA - dateB;
+        });
+        if (sorted[0]?.id) clientFirstSessions.add(sorted[0].id);
+      });
+
+      const preExistingIds = await getPreExistingClientIds(Object.keys(sessionsByClient));
+      if (preExistingIds.size) {
+        Object.entries(sessionsByClient).forEach(([clientId, clientSessions]) => {
+          if (!preExistingIds.has(clientId)) return;
+          clientSessions.forEach((s) => clientFirstSessions.delete(s.id));
+        });
+      }
+    }
+
+    const firstPackages = new Set();
+    [...clientFirstSessions].forEach((sessionId) => {
+      const firstSession = historyBySessionId.get(sessionId);
+      if (firstSession?.package_id) firstPackages.add(firstSession.package_id);
+    });
 
     // Settled commission rows (authoritative for paid/pending)
     const sessionIds = (sessions || []).map((s) => s.id);
@@ -2525,6 +2596,10 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
       const ch = chBySession.get(s.id) || null;
       const status = String(s.status || '').toLowerCase();
       const counts = !TERMINAL_UNPAID.includes(status);
+      const isPackage = !!s.package_id || (parseInt(s.session_count, 10) || 1) > 1 || String(s.session_type || '').toLowerCase().includes('package');
+      const isCouple = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
+      const isFirstSession = clientFirstSessions.has(s.id);
+      const isPackageFirstForClient = isPackage ? (s.package_id ? firstPackages.has(s.package_id) : isFirstSession) : false;
       const sessionAmount = parseFloat(s.price ?? s.amount ?? 0) || 0;
       // Doctor's share for this session (handles package splitting internally)
       const doctorAmount = counts ? (computeSessionDoctorWallet(s, dc, ch) || 0) : 0;
@@ -2571,6 +2646,12 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
         source: paymentSource,
         raw_source: s.source || null,
         payment_proof_url: payment?.receipt_url || null,
+        is_first_session: isFirstSession,
+        is_package: isPackage,
+        is_couple: isCouple,
+        is_package_first_for_client: isPackageFirstForClient,
+        package_session_number: s.package_session_number || null,
+        session_count: s.session_count || null,
         session_amount: sessionAmount,
         doctor_amount: doctorAmount,
         company_amount: companyAmount,
@@ -3101,6 +3182,102 @@ const getPsychologistOptions = async (req, res) => {
   } catch (error) {
     console.error('Get finance psychologist options error:', error);
     res.status(500).json(errorResponse('Internal server error while fetching psychologists'));
+  }
+};
+
+const sendReceiptEmail = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    if (!['finance', 'admin', 'superadmin'].includes(userRole)) {
+      return res.status(403).json(errorResponse('Access denied. Finance role required.'));
+    }
+
+    const {
+      to,
+      recipientName,
+      template,
+      receiptNo,
+      fileName,
+      pdfBase64,
+      message,
+    } = req.body || {};
+
+    const email = String(to || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json(errorResponse('Valid recipient email is required.'));
+    }
+
+    const cleanBase64 = String(pdfBase64 || '').replace(/^data:application\/pdf;base64,/, '');
+    if (!cleanBase64) {
+      return res.status(400).json(errorResponse('PDF attachment is required.'));
+    }
+
+    const pdfBuffer = Buffer.from(cleanBase64, 'base64');
+    if (!pdfBuffer.length || pdfBuffer.length > 8 * 1024 * 1024) {
+      return res.status(400).json(errorResponse('PDF attachment is empty or too large.'));
+    }
+
+    const receiptLabel = template === 'payoutReceipt'
+      ? 'Payout Receipt'
+      : 'Therapist Salary Slip';
+    const safeReceiptNo = String(receiptNo || '').trim() || 'Draft';
+    const safeRecipientName = String(recipientName || '').trim() || 'Doctor';
+    const attachmentName = sanitizeReceiptFileName(fileName || `koott-${receiptLabel}-${safeReceiptNo}.pdf`);
+
+    const emailService = require('../utils/emailService');
+    await emailService.sendCustomEmail({
+      to: email,
+      subject: `Koott ${receiptLabel} - ${safeReceiptNo}`,
+      text: [
+        `Dear ${safeRecipientName},`,
+        '',
+        `Please find attached your Koott ${receiptLabel.toLowerCase()} (${safeReceiptNo}).`,
+        message ? `\n${message}` : '',
+        '',
+        'Warm regards,',
+        'Team Koott',
+      ].join('\n'),
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 620px; margin: 0 auto; color: #1f2937; line-height: 1.6;">
+          <div style="border-bottom: 3px solid #025545; padding: 18px 0;">
+            <h2 style="margin: 0; color: #025545;">Koott ${escapeHtml(receiptLabel)}</h2>
+          </div>
+          <div style="padding: 22px 0;">
+            <p>Dear <strong>${escapeHtml(safeRecipientName)}</strong>,</p>
+            <p>Please find attached your Koott ${escapeHtml(receiptLabel.toLowerCase())}.</p>
+            <p style="background: #f0fdf4; border-left: 4px solid #025545; padding: 12px 14px;">
+              <strong>Receipt No:</strong> ${escapeHtml(safeReceiptNo)}
+            </p>
+            ${message ? `<p>${escapeHtml(message).replace(/\n/g, '<br>')}</p>` : ''}
+            <p>Warm regards,<br><strong>Team Koott</strong></p>
+          </div>
+        </div>
+      `,
+      attachments: [{
+        filename: attachmentName,
+        content: pdfBuffer,
+        contentType: 'application/pdf',
+        contentDisposition: 'attachment',
+      }],
+    });
+
+    await auditLogger.logAction({
+      userId: req.user.id,
+      userEmail: req.user.email,
+      userRole,
+      action: 'FINANCE_RECEIPT_EMAIL_SENT',
+      resource: 'finance_receipts',
+      details: { to: email, template, receiptNo: safeReceiptNo, fileName: attachmentName },
+      endpoint: '/api/finance/receipts/send-email',
+      method: 'POST',
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    }).catch(() => {});
+
+    res.json(successResponse({ sent: true, to: email }, 'Receipt email sent successfully'));
+  } catch (error) {
+    console.error('Send finance receipt email error:', error);
+    res.status(500).json(errorResponse('Internal server error while sending receipt email'));
   }
 };
 
@@ -6515,6 +6692,7 @@ module.exports = {
   getSessionDetails,
   getPsychologistOptions,
   getClientOptions,
+  sendReceiptEmail,
   getRevenue,
   getExpenses,
   createExpense,
@@ -7062,6 +7240,7 @@ module.exports = {
   getSessionDetails,
   getPsychologistOptions,
   getClientOptions,
+  sendReceiptEmail,
   getRevenue,
   getExpenses,
   createExpense,

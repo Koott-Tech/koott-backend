@@ -2401,7 +2401,7 @@ async function bookWixNextSession(req, res) {
     // ── 2. Fetch linked session for client_id / psychologist_id ─────────
     const { data: linkedSession, error: sessionError } = await supabaseAdmin
       .from('sessions')
-      .select('id, client_id, psychologist_id, session_type, package_group_id, package_session_number')
+      .select('id, client_id, psychologist_id, session_type, package_group_id, package_session_number, session_count, status, price, amount')
       .eq('wix_booking_id', wixRow.wix_booking_id)
       .single();
 
@@ -2425,23 +2425,31 @@ async function bookWixNextSession(req, res) {
       await supabaseAdmin.from('sessions').update({ package_group_id: packageGroupId, package_session_number: linkedSession.package_session_number || 1 }).eq('id', linkedSession.id);
       await supabaseAdmin.from('wix_bookings').update({ package_group_id: packageGroupId }).eq('wix_booking_id', wixRow.wix_booking_id);
     }
+    const inactivePackageStatuses = new Set(['cancelled', 'deleted', 'refunded', 'rescheduled']);
     let nextSessionNumber = (wixRow.package_session_number || 1) + 1;
     if (packageGroupId) {
-      const { data: existingRows } = await supabaseAdmin
-        .from('wix_bookings')
-        .select('package_session_number')
-        .eq('package_group_id', packageGroupId)
-        .neq('status', 'deleted');
-      if (existingRows && existingRows.length > 0) {
-        const maxNum = Math.max(...existingRows.map(r => r.package_session_number || 1));
-        nextSessionNumber = maxNum + 1;
+      const { data: existingSessions } = await supabaseAdmin
+        .from('sessions')
+        .select('package_session_number, status')
+        .eq('package_group_id', packageGroupId);
+      const activeSessionNumbers = (existingSessions || [])
+        .filter((row) => !inactivePackageStatuses.has(String(row.status || '').toLowerCase()))
+        .map((row) => parseInt(row.package_session_number, 10))
+        .filter((num) => Number.isFinite(num) && num > 0);
+      if (activeSessionNumbers.length > 0) {
+        nextSessionNumber = Math.max(...activeSessionNumbers) + 1;
+      } else {
+        nextSessionNumber = 1;
       }
     }
     const totalSessions = wixRow.session_count
       || wixRow.payload?.creditsAvailable
       || wixRow.payload?.detectedSessionCount
       || wixRow.payload?.pricingPlanInfo?.credits?.available
+      || linkedSession.session_count
       || 0;
+    const parentPackagePrice = Number(linkedSession.price || linkedSession.amount || wixRow.payload?.amountReceived || wixRow.payload?.paymentDetails?.balance?.amountReceived || wixRow.payload?.paymentDetails?.balance?.finalPrice?.amount || 0) || 0;
+    const sessionPrice = nextSessionNumber === 1 ? parentPackagePrice : 0;
 
     // ── 4. Build IST start/end times for the wix_bookings mirror ─────────
     // Convert scheduled_date + scheduled_time to ISO strings in UTC (subtract IST offset)
@@ -2495,7 +2503,7 @@ async function bookWixNextSession(req, res) {
       tags: wixRow.tags || null,
       start_time: startTimeIso,
       end_time: endTimeIso,
-      price: '0',          // already paid via original package purchase
+      price: String(sessionPrice),          // session 1 carries package payment; follow-ups are already paid
       currency: wixRow.currency || null,
       locally_modified: true,
       payload: {
@@ -2541,7 +2549,8 @@ async function bookWixNextSession(req, res) {
         original_scheduled_date: scheduled_date,
         original_scheduled_time: scheduled_time,
         status: 'booked',
-        price: 0,                        // already paid via original package
+        price: sessionPrice,             // session 1 carries package payment; follow-ups are already paid
+        amount: sessionPrice,
         session_notes: wixRow.client_full_name ? `Package follow-up for ${wixRow.client_full_name}` : 'Package follow-up (Wix)',
         created_at: now,
         updated_at: now,

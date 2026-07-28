@@ -2999,6 +2999,7 @@ module.exports = {
   markSessionAsNoShow,
   getRescheduleRequests,
   cancelRefundSession,
+  cancelOnlySession,
   verifyPayment,
   transferSession,
 };
@@ -3177,6 +3178,96 @@ async function cancelRefundSession(req, res) {
     });
   } catch (e) {
     console.error('[cancelRefundSession]', e);
+    return res.status(500).json(errorResponse(e.message || String(e)));
+  }
+}
+
+/**
+ * PATCH /admin/sessions/:sessionId/cancel-only
+ * Platform-session equivalent of cancelOnlyWixBooking. For a client who can't attend but
+ * doesn't want a refund and will reschedule later (date not yet confirmed):
+ * - status → 'on_hold' (NOT a refund; money is retained)
+ * - Frees the slot: removes the Google Calendar event(s) from the therapist's/client's
+ *   calendars so the time reopens.
+ * - Keeps the session row (and clears the dead meet/calendar fields) so it can be
+ *   rescheduled later once the client confirms a new date/time.
+ * - Sends NO notifications — silent pause, matching the Wix On Hold flow.
+ */
+async function cancelOnlySession(req, res) {
+  try {
+    const { sessionId } = req.params;
+
+    const { data: session, error: fetchErr } = await supabaseAdmin
+      .from('sessions')
+      .select(`
+        id, status, psychologist_id, wix_booking_id, google_calendar_event_id,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, google_calendar_credentials)
+      `)
+      .eq('id', sessionId)
+      .single();
+
+    if (fetchErr || !session) {
+      return res.status(404).json(errorResponse('Session not found'));
+    }
+
+    // 1. Remove the calendar event(s) from the therapist's calendar so the slot reopens.
+    let calendarEventRemoved = false;
+    if (session.google_calendar_event_id) {
+      try {
+        let userAuth = null;
+        const creds = (Array.isArray(session.psychologist) ? session.psychologist[0] : session.psychologist)?.google_calendar_credentials;
+        if (creds?.access_token) {
+          userAuth = { access_token: creds.access_token, refresh_token: creds.refresh_token, expiry_date: creds.expiry_date };
+        }
+        const eventIds = String(session.google_calendar_event_id).split(',').map((id) => id.trim()).filter(Boolean);
+        for (const eid of eventIds) {
+          const delResult = await meetLinkService.deleteCalendarEvent(eid, userAuth);
+          if (delResult?.success) {
+            calendarEventRemoved = true;
+            console.log('✅ [cancelOnlySession] Removed calendar event:', eid);
+          } else {
+            console.warn('[cancelOnlySession] calendar delete non-fatal:', delResult?.error);
+          }
+        }
+      } catch (calErr) {
+        console.warn('[cancelOnlySession] calendar delete failed (non-fatal):', calErr.message || calErr);
+      }
+    }
+
+    // 2. Session → on_hold; clear the now-dead calendar/meet fields but keep the row so it
+    //    stays reschedulable. locally_modified stops the next Wix sync from resurrecting it.
+    const { error: updateErr } = await supabaseAdmin
+      .from('sessions')
+      .update({
+        status: 'on_hold',
+        locally_modified: true,
+        google_calendar_event_id: null,
+        google_meet_link: null,
+        google_meet_join_url: null,
+        google_meet_start_url: null,
+        google_calendar_link: null,
+        reminder_sent: false,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', sessionId);
+    if (updateErr) return res.status(500).json(errorResponse(updateErr.message));
+
+    // 3. Mirror to wix_bookings if linked.
+    if (session.wix_booking_id) {
+      await supabaseAdmin
+        .from('wix_bookings')
+        .update({ status: 'on_hold', locally_modified: true, synced_at: new Date().toISOString() })
+        .eq('wix_booking_id', session.wix_booking_id);
+    }
+
+    console.log(`⏸️  [cancelOnlySession] ${sessionId} → on_hold (no refund); slot freed.`);
+    return res.json({
+      success: true,
+      message: 'Session put on hold without refund. The slot is now free — reschedule it once the client confirms a new date/time.',
+      data: { sessionId, calendarEventRemoved },
+    });
+  } catch (e) {
+    console.error('[cancelOnlySession]', e);
     return res.status(500).json(errorResponse(e.message || String(e)));
   }
 }

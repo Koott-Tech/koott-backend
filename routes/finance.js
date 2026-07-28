@@ -40,6 +40,7 @@ router.patch('/sessions/:sessionId/cancel-refund', sessionController.cancelRefun
 router.delete('/sessions/:sessionId', sessionController.deleteSession);
 router.get('/psychologists', financeController.getPsychologistOptions);
 router.get('/clients', financeController.getClientOptions);
+router.post('/receipts/send-email', financeController.sendReceiptEmail);
 
 // Revenue Management
 router.get('/revenue', financeController.getRevenue);

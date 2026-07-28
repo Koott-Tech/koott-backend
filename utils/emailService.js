@@ -2952,7 +2952,7 @@ The Koott Team
    * Generic email sender for internal/ops alerts (e.g. overbooking crawler).
    * @param {{ to: string, subject: string, html: string, text?: string }} opts
    */
-  async sendCustomEmail({ to, subject, html, text }) {
+  async sendCustomEmail({ to, subject, html, text, attachments }) {
     if (!this.transporter) {
       console.error('📧 Email Service - Transporter not initialized (sendCustomEmail)');
       throw new Error('Email service not properly initialized');
@@ -2967,6 +2967,7 @@ The Koott Team
       subject,
       html,
       ...(text ? { text } : {}),
+      ...(attachments ? { attachments } : {}),
     };
     const finalMailOptions = this.addEmailHeaders(mailOptions);
     return this.transporter.sendMail(finalMailOptions);
