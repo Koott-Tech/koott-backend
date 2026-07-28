@@ -2407,18 +2407,23 @@ const getSessions = async (req, res) => {
  * company commission) plus payout status, and a summary. Uses computeSessionDoctorWallet —
  * the same source of truth the rest of finance uses — so the numbers reconcile.
  */
-const getDoctorFinanceProfile = async (req, res) => {
-  try {
-    const { psychologistId } = req.params;
-    if (!psychologistId) return res.status(400).json(errorResponse('psychologistId is required'));
-    const { dateFrom, dateTo, dateBasis = 'scheduled' } = req.query;
+const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, dateTo, dateBasis = 'scheduled' } = {}) => {
+    if (!psychologistId) {
+      const err = new Error('psychologistId is required');
+      err.statusCode = 400;
+      throw err;
+    }
 
     const { data: doctor, error: docErr } = await supabaseAdmin
       .from('psychologists')
       .select('id, first_name, last_name, email, phone, area_of_expertise, designation, created_at')
       .eq('id', psychologistId)
       .maybeSingle();
-    if (docErr || !doctor) return res.status(404).json(errorResponse('Therapist not found'));
+    if (docErr || !doctor) {
+      const err = new Error('Therapist not found');
+      err.statusCode = 404;
+      throw err;
+    }
 
     // Commission rates live in their own table (one active row per therapist).
     const { data: dcRows } = await supabaseAdmin
@@ -2441,7 +2446,11 @@ const getDoctorFinanceProfile = async (req, res) => {
     }
 
     const { data: sessions, error: sErr } = await q.order('scheduled_date', { ascending: false });
-    if (sErr) return res.status(500).json(errorResponse('Failed to fetch sessions'));
+    if (sErr) {
+      const err = new Error('Failed to fetch sessions');
+      err.statusCode = 500;
+      throw err;
+    }
 
     // Client names
     const clientIds = [...new Set((sessions || []).map((s) => s.client_id).filter(Boolean))];
@@ -2580,7 +2589,7 @@ const getDoctorFinanceProfile = async (req, res) => {
     const pendingRows = rows.filter((r) => r.payout_status === 'pending');
     const upcoming = rows.filter((r) => r.payout_status === 'not_due');
 
-    return res.json(successResponse({
+    return {
       doctor: {
         id: doctor.id,
         name: `${doctor.first_name || ''} ${doctor.last_name || ''}`.trim(),
@@ -2603,10 +2612,20 @@ const getDoctorFinanceProfile = async (req, res) => {
       },
       sessions: rows,
       filters: { dateFrom: dateFrom || null, dateTo: dateTo || null, dateBasis },
-    }, 'Doctor finance profile fetched'));
+    };
+};
+
+const getDoctorFinanceProfile = async (req, res) => {
+  try {
+    const { psychologistId } = req.params;
+    const { dateFrom, dateTo, dateBasis = 'scheduled' } = req.query;
+    const payload = await buildDoctorFinanceProfilePayload(psychologistId, { dateFrom, dateTo, dateBasis });
+    return res.json(successResponse(payload, 'Doctor finance profile fetched'));
   } catch (error) {
     console.error('getDoctorFinanceProfile error:', error);
-    return res.status(500).json(errorResponse('Internal server error while building doctor profile'));
+    return res
+      .status(error.statusCode || 500)
+      .json(errorResponse(error.statusCode ? error.message : 'Internal server error while building doctor profile'));
   }
 };
 
@@ -4392,7 +4411,7 @@ const getCommissions = async (req, res) => {
 
 
     // Build final response with all doctors
-    const commissionsWithTotals = psychologists?.map(psych => {
+    const commissionsWithTotals = await Promise.all((psychologists || []).map(async (psych) => {
       const commission = commissionsMap[psych.id];
       const stats = statsByPsych[psych.id] || {
         individual_sessions: 0,
@@ -4479,6 +4498,28 @@ const getCommissions = async (req, res) => {
         };
       });
 
+      let profileSummary = null;
+      try {
+        const profilePayload = await buildDoctorFinanceProfilePayload(psych.id, {
+          dateFrom,
+          dateTo,
+          dateBasis: doctorDateBasis,
+        });
+        profileSummary = profilePayload?.summary || null;
+      } catch (profileError) {
+        console.error(`Failed to load unified finance summary for psychologist ${psych.id}:`, profileError);
+      }
+
+      const unifiedTotalSessions = profileSummary?.total_sessions ?? stats.total_sessions;
+      const unifiedCompletedSessions = profileSummary?.completed_sessions ?? stats.completed_sessions;
+      const unifiedUpcomingSessions = profileSummary?.upcoming_sessions ?? stats.pending_sessions;
+      const unifiedGrossRevenue = profileSummary?.gross_revenue ?? stats.total_revenue;
+      const unifiedDoctorEarnings = profileSummary?.doctor_earnings ?? stats.total_to_doctor_wallet;
+      const unifiedCompanyEarnings = profileSummary?.company_earnings ?? stats.total_commission_to_company;
+      const unifiedPendingPayout = profileSummary?.payout_pending ?? stats.completed_payout;
+      const unifiedPaidPayout = profileSummary?.payout_paid ?? 0;
+      const unifiedNotDuePayout = profileSummary?.payout_not_due ?? stats.pending_payout;
+
       return {
         psychologist_id: psych.id,
         commission_amounts: commissionAmounts, // Full JSONB object
@@ -4507,17 +4548,26 @@ const getCommissions = async (req, res) => {
         package_commissions: effectivePackageCommissions, // Packages with company + doctor commission amounts
         individual_sessions: stats.individual_sessions,
         package_sessions: stats.package_sessions,
-        total_sessions: stats.total_sessions,
-        total_sessions_finance: stats.total_sessions,
-        pending_sessions: stats.pending_sessions,
-        completed_sessions: stats.completed_sessions,
+        total_sessions: unifiedTotalSessions,
+        total_sessions_finance: unifiedTotalSessions,
+        pending_sessions: unifiedUpcomingSessions,
+        upcoming_sessions: unifiedUpcomingSessions,
+        completed_sessions: unifiedCompletedSessions,
+        cancelled_sessions: profileSummary?.cancelled_sessions ?? 0,
         wix_bookings_count: 0,
         latest_wix_booking_at: null,
-        total_revenue: stats.total_revenue,
-        total_commission_to_company: stats.total_commission_to_company,
-        total_to_doctor_wallet: stats.total_to_doctor_wallet,
-        pending_payout: stats.pending_payout,
-        completed_payout: stats.completed_payout,
+        total_revenue: unifiedGrossRevenue,
+        gross_revenue: unifiedGrossRevenue,
+        total_commission_to_company: unifiedCompanyEarnings,
+        company_earnings: unifiedCompanyEarnings,
+        total_to_doctor_wallet: unifiedDoctorEarnings,
+        doctor_earnings: unifiedDoctorEarnings,
+        pending_payout: unifiedPendingPayout,
+        payout_pending: unifiedPendingPayout,
+        completed_payout: unifiedPaidPayout,
+        payout_paid: unifiedPaidPayout,
+        not_due_payout: unifiedNotDuePayout,
+        payout_not_due: unifiedNotDuePayout,
         monthly_breakdown: Object.values(stats.monthly_breakdown).sort((a, b) => 
           b.month.localeCompare(a.month)
         ),
@@ -4535,7 +4585,7 @@ const getCommissions = async (req, res) => {
           cover_image_url: psych.cover_image_url
         }
       };
-    }) || [];
+    }));
 
     await auditLogger.logAction({
       userId: req.user.id,
@@ -5451,19 +5501,45 @@ const getPendingPayouts = async (req, res) => {
     }
 
     // Convert to array and format for frontend
-    const payouts = Object.values(payoutsByDoctor).map(payout => ({
-      id: payout.psychologist_id, // Using psychologist_id as ID for pending payouts
-      psychologist_id: payout.psychologist_id,
-      psychologist: payout.psychologist,
-      total_sessions: payout.total_sessions,
-      session_counts_by_type: payout.session_counts_by_type,
-      total_doctor_wallet: Math.round(payout.total_doctor_wallet * 100) / 100,
-      pending_payout_amount: Math.round(payout.total_doctor_wallet * 100) / 100,
-      total_company_commission: Math.round(payout.total_company_commission * 100) / 100,
-      // For backward compatibility with frontend
-      total_commission: payout.total_company_commission,
-      net_payout: payout.total_doctor_wallet,
-      session_details: payout.sessions
+    const payouts = await Promise.all(Object.values(payoutsByDoctor).map(async (payout) => {
+      let profileSummary = null;
+      try {
+        const profilePayload = await buildDoctorFinanceProfilePayload(payout.psychologist_id, {
+          dateFrom: monthStart,
+          dateTo: monthEnd,
+          dateBasis: 'scheduled',
+        });
+        profileSummary = profilePayload?.summary || null;
+      } catch (profileError) {
+        console.error(`Failed to load unified payout summary for psychologist ${payout.psychologist_id}:`, profileError);
+      }
+
+      const pendingDoctorWallet = Math.round((profileSummary?.payout_pending ?? payout.total_doctor_wallet) * 100) / 100;
+      const companyEarnings = Math.round((profileSummary?.company_earnings ?? payout.total_company_commission) * 100) / 100;
+
+      return {
+        id: payout.psychologist_id, // Using psychologist_id as ID for pending payouts
+        psychologist_id: payout.psychologist_id,
+        psychologist: payout.psychologist,
+        total_sessions: payout.total_sessions,
+        profile_total_sessions: profileSummary?.total_sessions ?? null,
+        completed_sessions: profileSummary?.completed_sessions ?? payout.total_sessions,
+        upcoming_sessions: profileSummary?.upcoming_sessions ?? null,
+        cancelled_sessions: profileSummary?.cancelled_sessions ?? null,
+        session_counts_by_type: payout.session_counts_by_type,
+        total_doctor_wallet: pendingDoctorWallet,
+        pending_payout_amount: pendingDoctorWallet,
+        total_company_commission: companyEarnings,
+        profile_company_earnings: companyEarnings,
+        profile_gross_revenue: profileSummary?.gross_revenue ?? null,
+        profile_doctor_earnings: profileSummary?.doctor_earnings ?? null,
+        profile_payout_paid: profileSummary?.payout_paid ?? null,
+        profile_payout_not_due: profileSummary?.payout_not_due ?? null,
+        // For backward compatibility with frontend
+        total_commission: companyEarnings,
+        net_payout: pendingDoctorWallet,
+        session_details: payout.sessions
+      };
     }));
     
     console.log(`✅ Processed ${payouts.length} doctors with completed paid sessions`);
