@@ -3206,6 +3206,9 @@ const sendReceiptEmail = async (req, res) => {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json(errorResponse('Valid recipient email is required.'));
     }
+    if (!['payoutReceipt', 'salaryCertificate'].includes(template)) {
+      return res.status(400).json(errorResponse('Only the 2026 payout receipt and salary certificate templates are supported.'));
+    }
 
     const cleanBase64 = String(pdfBase64 || '').replace(/^data:application\/pdf;base64,/, '');
     if (!cleanBase64) {
@@ -3217,9 +3220,7 @@ const sendReceiptEmail = async (req, res) => {
       return res.status(400).json(errorResponse('PDF attachment is empty or too large.'));
     }
 
-    const receiptLabel = template === 'payoutReceipt'
-      ? 'Payout Receipt'
-      : 'Therapist Salary Slip';
+    const receiptLabel = template === 'salaryCertificate' ? 'Salary Certificate' : 'Payout Receipt';
     const safeReceiptNo = String(receiptNo || '').trim() || 'Draft';
     const safeRecipientName = String(recipientName || '').trim() || 'Doctor';
     const attachmentName = sanitizeReceiptFileName(fileName || `koott-${receiptLabel}-${safeReceiptNo}.pdf`);
