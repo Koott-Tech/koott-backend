@@ -947,6 +947,9 @@ class MeetLinkService {
       // Fetch the existing event so we preserve attendees, conference data, etc.
       const { data: existing } = await calendar.events.get({ calendarId: 'primary', eventId });
       if (!existing) return { success: false, error: 'Event not found' };
+      if (String(existing.status || '').toLowerCase() === 'cancelled') {
+        return { success: false, error: 'Event is cancelled', notFound: true };
+      }
 
       // Build new start/end in IST. Normalize to HH:MM first so callers may pass either
       // "HH:MM" or "HH:MM:SS" without producing a malformed "...:00:00" datetime (which
