@@ -251,6 +251,7 @@ router.post('/wix/backfill-clients', wixBookingsController.backfillWixClients);
 router.post('/psychologists', adminController.createPsychologist);
 router.put('/psychologists/:psychologistId', adminController.updatePsychologist);
 router.delete('/psychologists/:psychologistId', adminController.deletePsychologist);
+router.get('/psychologists/:psychologistId/booking-details', adminController.getPsychologistBookingDetails);
 
 // Availability management
 router.post('/availability/update-all', adminController.updateAllPsychologistsAvailability);

@@ -138,9 +138,10 @@ async function hydrateSessionsWixPayloadFromMirror(supabaseAdmin, sessions) {
 
   for (const s of sessions) {
     const p = parsePayload(s.wix_payload);
-    if (!p || !isBareTherapistEnvelope(p)) continue;
+    const shouldHydrate = !p || isBareTherapistEnvelope(p);
+    if (!shouldHydrate) continue;
     const key =
-      p.id != null && String(p.id).trim() !== ''
+      p?.id != null && String(p.id).trim() !== ''
         ? String(p.id).trim()
         : s.wix_booking_id != null
           ? String(s.wix_booking_id).trim()
@@ -183,7 +184,7 @@ async function hydrateSessionsWixPayloadFromMirror(supabaseAdmin, sessions) {
     if (!full) continue;
     for (const s of keyToSessions.get(key) || []) {
       const bare = parsePayload(s.wix_payload);
-      s.wix_payload = mergeBareTherapistIntoExisting(full, bare);
+      s.wix_payload = bare ? mergeBareTherapistIntoExisting(full, bare) : full;
       merged += 1;
     }
   }

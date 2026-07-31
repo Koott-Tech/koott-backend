@@ -21,6 +21,21 @@ function sessionTypeFromBooking(b) {
   const hasCoupleTag   = tags.includes('couple');
   const hasPackageTag  = tags.includes('package') || tags.includes('pack') || tags.includes('bundle') || tags.includes('membership');
 
+  // Couple signals gathered from EVERY field up front. A couple PACKAGE must be typed
+  // 'couple' (with session_count > 1) so per-session commission computes as couple_package_N
+  // — not the generic 'package' rate. Without this, a couple package whose duration isn't
+  // > 75 min falls into the bookingType==='package' branch below and is mislabeled 'package',
+  // and its ₹0 follow-ups end up as standalone 'couple' — breaking the doctor's commission.
+  const _bookingTypeEarly = String(b.bookingType || '').toLowerCase().trim();
+  const _serviceNameLc = String(b.serviceName || '').toLowerCase();
+  const _titleLc = String(b.title || b.rawBookedEntity?.title || '').toLowerCase();
+  const _variantLc = JSON.stringify(b.variantSelections || b.rawFormInfo?.variantSelections || '').toLowerCase();
+  const hasCoupleSignal = hasCoupleTag
+    || _bookingTypeEarly === 'couple'
+    || _serviceNameLc.includes('couple')
+    || _titleLc.includes('couple')
+    || _variantLc.includes('couple');
+
   // 1. Duration — runs first because it is the ground truth for couple vs individual.
   //    A 110-min session tagged INDIVIDUAL is still a couple session.
   const durMin = b.sessionDurationMin != null
@@ -46,14 +61,15 @@ function sessionTypeFromBooking(b) {
     // effectively individual (session_count=1, no planSessionNumber, no creditsAvailable).
     const count = sessionCountFromBooking(b);
     const hasPsn = b.planSessionNumber != null;
-    if (count > 1 || hasPsn) return 'package';
+    // A couple package: keep it 'couple' (session_count>1 preserves its package nature).
+    if (count > 1 || hasPsn) return hasCoupleSignal ? 'couple' : 'package';
     // Fall through — will be caught by isPlanCredit → individual below
   }
   if (bookingType === 'couple') return 'couple';
 
   // 2. Now apply couple/package tags (duration didn't fire, so session is ≤75 min)
   if (hasCoupleTag)  return 'couple';
-  if (hasPackageTag) return 'package';
+  if (hasPackageTag) return hasCoupleSignal ? 'couple' : 'package';
   // Explicit INDIVIDUAL tag wins over plan-credit signals (moved up so it fires before step 3)
   if (hasExplicitIndividualTag) return 'individual';
 
@@ -69,7 +85,7 @@ function sessionTypeFromBooking(b) {
 
   if (isPlanCredit) {
     const count = sessionCountFromBooking(b);
-    return count > 1 ? 'package' : 'individual';
+    return count > 1 ? (hasCoupleSignal ? 'couple' : 'package') : 'individual';
   }
 
   // 4. Short + free → discovery

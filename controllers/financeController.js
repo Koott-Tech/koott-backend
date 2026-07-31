@@ -24,6 +24,7 @@ const FINANCE_BOOKING_TOTAL_STATUSES = [
 const IST_DAY_START_SUFFIX = 'T00:00:00.000+05:30';
 const IST_DAY_END_SUFFIX = 'T23:59:59.999+05:30';
 const { getBookingTimeColumnKey, appendBookingTimeSelectFragment } = require('../utils/sessionsBookingTimeColumn');
+const { enrichSessionRowDisplayFields, hydrateSessionsWixPayloadFromMirror } = require('../utils/wixSessionRowEnrichment');
 
 const dayjs = require('dayjs');
 const timezone = require('dayjs/plugin/timezone');
@@ -86,6 +87,25 @@ function isHiddenWixListRow(session) {
   const isUndefinedWix = !session?.payment_id && missingSessionId;
   const isPackageChild = Number(session?.package_session_number || 1) > 1;
   return isUndefinedWix || isPackageChild;
+}
+
+function isCoupleSessionLike(session) {
+  const sessionTypeText = String(session?.session_type || '').toLowerCase();
+  const payloadText = `${session?.wix_payload?.bookingType || ''} ${session?.wix_payload?.booking_type || ''} ${session?.wix_payload?.session_type || ''}`.toLowerCase();
+  return sessionTypeText.includes('couple') ||
+    sessionTypeText.includes('cpl') ||
+    payloadText.includes('couple') ||
+    payloadText.includes('cpl');
+}
+
+function getFinancePackageType(session, packageMeta = null) {
+  const sessionCount = Math.max(
+    1,
+    parseInt(session?.session_count || packageMeta?.session_count, 10) || 1
+  );
+  const isCouplePackage = isCoupleSessionLike(session) && sessionCount > 1;
+  if (isCouplePackage) return `couple_package_${sessionCount}`;
+  return packageMeta?.package_type || `package_${sessionCount}`;
 }
 
 /** Non-terminal sessions that still count as “pending fulfilment” on the dashboard card (excludes cancelled). */
@@ -2276,7 +2296,14 @@ const getSessions = async (req, res) => {
 
     // Ensure sessions is an array
     let sessionsData = sessions || [];
-    
+
+    // Upgrade bare therapist-only wix_payload stubs to the full Wix payload from the
+    // wix_bookings mirror — otherwise Wix rows (which have null client_id/psychologist_id)
+    // have no client name/email/therapist to display. Mirrors the admin Wix Discovery page.
+    if (sessionsData.length) {
+      await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, sessionsData);
+    }
+
     // Apply search filter after fetching (search by session ID only)
     if (search) {
       const searchLower = search.toLowerCase();
@@ -2331,21 +2358,37 @@ const getSessions = async (req, res) => {
     
     let psychologists = [];
     let clients = [];
-    
-    if (psychologistIds.length > 0) {
+
+    // Chunk these `.in()` lookups in batches of 100. A single `.in()` with hundreds of
+    // UUIDs overflows the PostgREST GET URL and the whole request fails ("fetch failed"),
+    // which silently dropped ALL client/therapist names for FK-based rows.
+    for (let i = 0; i < psychologistIds.length; i += 100) {
       const { data: psychData } = await supabaseAdmin
         .from('psychologists')
         .select('id, first_name, last_name')
-        .in('id', psychologistIds);
-      psychologists = psychData || [];
+        .in('id', psychologistIds.slice(i, i + 100));
+      if (psychData) psychologists.push(...psychData);
     }
-    
-    if (clientIds.length > 0) {
+
+    for (let i = 0; i < clientIds.length; i += 100) {
       const { data: clientData } = await supabaseAdmin
         .from('clients')
-        .select('id, first_name, last_name, child_name, email')
-        .in('id', clientIds);
-      clients = clientData || [];
+        .select('id, first_name, last_name, child_name, email, phone_number')
+        .in('id', clientIds.slice(i, i + 100));
+      if (clientData) clients.push(...clientData);
+    }
+
+    // Wix rows have null client_id/psychologist_id — their client & therapist live in the
+    // wix_bookings mirror's flat columns (exactly what the admin Wix Discovery page reads).
+    // Batch-fetch them so finance rows show the same name/email/phone/therapist.
+    const wixBookingIds = [...new Set(sessionsData.map(s => s?.wix_booking_id).filter(Boolean))];
+    const wixMirrorMap = {};
+    for (let i = 0; i < wixBookingIds.length; i += 100) {
+      const { data: wbRows } = await supabaseAdmin
+        .from('wix_bookings')
+        .select('wix_booking_id, client_full_name, client_first_name, client_last_name, client_email, client_phone, therapist_name')
+        .in('wix_booking_id', wixBookingIds.slice(i, i + 100));
+      (wbRows || []).forEach(r => { wixMirrorMap[r.wix_booking_id] = r; });
     }
 
     const sessionsWithCommission = sessionsForResponse.map(session => {
@@ -2354,25 +2397,51 @@ const getSessions = async (req, res) => {
       const psychologist = psychologists.find(p => p.id === session.psychologist_id);
       const client = clients.find(c => c.id === session.client_id);
       
-      return {
+      const mirror = session.wix_booking_id ? wixMirrorMap[session.wix_booking_id] : null;
+
+      // Client: FK client → Wix mirror flat columns → (wix_payload via enrich below).
+      let clientObj = client ? {
+        id: client.id,
+        first_name: client.first_name,
+        last_name: client.last_name,
+        child_name: client.child_name,
+        phone_number: client.phone_number || null,
+        email: client.email || null,
+        // Frontend reads client.user.email (mirrors the admin/Wix pages) — nest it too.
+        user: client.email ? { email: client.email } : undefined,
+      } : null;
+      if (!clientObj && mirror && (mirror.client_full_name || mirror.client_first_name || mirror.client_email)) {
+        clientObj = {
+          id: null,
+          first_name: mirror.client_first_name || mirror.client_full_name || null,
+          last_name: mirror.client_last_name || null,
+          child_name: null,
+          phone_number: mirror.client_phone || null,
+          email: mirror.client_email || null,
+          user: mirror.client_email ? { email: mirror.client_email } : undefined,
+        };
+      }
+
+      // Therapist: FK psychologist → Wix mirror therapist_name.
+      let psychObj = psychologist ? {
+        id: psychologist.id,
+        first_name: psychologist.first_name,
+        last_name: psychologist.last_name,
+      } : null;
+      if (!psychObj && mirror?.therapist_name) {
+        const parts = String(mirror.therapist_name).trim().split(/\s+/);
+        psychObj = { id: null, first_name: parts[0] || mirror.therapist_name, last_name: parts.slice(1).join(' ') || null };
+      }
+
+      const built = {
         ...session,
         booking_created_at: getSessionBookingCreatedAtIso(session),
         // Map backend fields to frontend expected fields
         session_date: session.scheduled_date,
         amount: session.price,
         session_type: session.session_type || 'Individual', // Default to Individual if not set
-        psychologist: psychologist ? {
-          id: psychologist.id,
-          first_name: psychologist.first_name,
-          last_name: psychologist.last_name
-        } : null,
-        client: client ? {
-          id: client.id,
-          first_name: client.first_name,
-          last_name: client.last_name,
-          child_name: client.child_name,
-          email: client.email || null
-        } : null,
+        psychologist: psychObj,
+        client: clientObj,
         commission_amount: commission?.commission_amount || 0,
         company_revenue: commission?.company_revenue || 0,
         net_company_revenue: commission?.net_company_revenue || 0,
@@ -2385,6 +2454,10 @@ const getSessions = async (req, res) => {
         // Payment proof image for manual booking approval popup
         receipt_url: session.payment_id ? (paymentReceiptMap[session.payment_id] || null) : null,
       };
+      // For Wix rows the FK client/psychologist are null — fill name/email/therapist/price
+      // from wix_payload so the finance list shows the same detail as the Wix Discovery page.
+      enrichSessionRowDisplayFields(built);
+      return built;
     }).filter(Boolean);
     
     // Apply final search filter on client/psychologist names if search provided
@@ -2480,7 +2553,7 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
 
     let q = supabaseAdmin
       .from('sessions')
-      .select('id, scheduled_date, scheduled_time, status, session_type, session_count, package_id, package_group_id, package_session_number, price, amount, therapist_commission, client_id, source, wix_order_number, payment_id, completion_date, created_at, booking_created_at')
+      .select('id, scheduled_date, scheduled_time, status, session_type, session_count, package_id, package_group_id, package_session_number, price, amount, therapist_commission, client_id, source, wix_order_number, payment_id, completion_date, created_at, booking_created_at, wix_payload')
       .eq('psychologist_id', psychologistId)
       .neq('session_type', 'free_assessment');
 
@@ -2502,14 +2575,33 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
       err.statusCode = 500;
       throw err;
     }
+    if (sessions?.length) {
+      await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, sessions);
+    }
 
-    // Client names
+    // Client names/emails. Keep this flat and fast: embedded user joins are noticeably
+    // slower on large profile/payout popups, so fetch user emails only for clients that need it.
     const clientIds = [...new Set((sessions || []).map((s) => s.client_id).filter(Boolean))];
     const clientById = new Map();
     for (let i = 0; i < clientIds.length; i += 100) {
       const { data: cs } = await supabaseAdmin
-        .from('clients').select('id, first_name, last_name, user_id').in('id', clientIds.slice(i, i + 100));
+        .from('clients')
+        .select('id, first_name, last_name, user_id, email')
+        .in('id', clientIds.slice(i, i + 100));
       (cs || []).forEach((c) => clientById.set(c.id, c));
+    }
+    const userIdsForEmail = [...new Set(
+      [...clientById.values()]
+        .filter((c) => !c.email && c.user_id)
+        .map((c) => c.user_id)
+    )];
+    const userEmailById = new Map();
+    for (let i = 0; i < userIdsForEmail.length; i += 100) {
+      const { data: users } = await supabaseAdmin
+        .from('users')
+        .select('id, email')
+        .in('id', userIdsForEmail.slice(i, i + 100));
+      (users || []).forEach((u) => userEmailById.set(u.id, u.email));
     }
 
     // Determine first-vs-follow-up using the same client-history idea used elsewhere in finance.
@@ -2608,10 +2700,13 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
       for (let i = 0; i < groupIds.length; i += 100) {
         const { data: sib } = await supabaseAdmin
           .from('sessions')
-          .select('id, status, session_type, session_count, package_id, package_group_id, package_session_number, price, amount, therapist_commission')
+          .select('id, status, session_type, session_count, package_id, package_group_id, package_session_number, price, amount, therapist_commission, wix_payload')
           .eq('psychologist_id', psychologistId)
           .in('package_group_id', groupIds.slice(i, i + 100));
         siblings.push(...(sib || []));
+      }
+      if (siblings.length) {
+        await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, siblings);
       }
       for (const sib of siblings) {
         if (TERMINAL_UNPAID.includes(String(sib.status || '').toLowerCase())) continue;
@@ -2625,12 +2720,12 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
       const status = String(s.status || '').toLowerCase();
       const counts = !TERMINAL_UNPAID.includes(status);
       const isPackage = !!s.package_id || (parseInt(s.session_count, 10) || 1) > 1 || String(s.session_type || '').toLowerCase().includes('package');
-      const isCouple = String(s.session_type || '').toLowerCase().includes('couple') || String(s.session_type || '').toLowerCase().includes('cpl');
+      const isCouple = isCoupleSessionLike(s);
       const isFirstSession = clientFirstSessions.has(s.id);
       const isPackageFirstForClient = isPackage ? (s.package_id ? firstPackages.has(s.package_id) : isFirstSession) : false;
       const sessionAmount = parseFloat(s.price ?? s.amount ?? 0) || 0;
       // Doctor's share for this session (handles package splitting internally)
-      const doctorAmount = counts ? (computeSessionDoctorWallet(s, dc, ch) || 0) : 0;
+      const doctorAmount = counts ? (computeSessionDoctorWallet(s, dc, ch, { isFirstSession }) || 0) : 0;
       // Company share. For a package, the paying session carries the WHOLE package's profit
       // (price − therapist's commission across all its sessions) and follow-ups show ₹0 — so
       // the first row reads as "what the company earned on this package" and no row goes
@@ -2665,10 +2760,11 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
         booked_at: s.booking_created_at || s.created_at,
         completion_date: s.completion_date,
         client_name: c ? `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—' : '—',
+        client_email: c?.email || userEmailById.get(c?.user_id) || null,
         client_id: s.client_id,
         session_type: s.session_type,
         package_label: Number(s.session_count) > 1 && s.package_session_number
-          ? `${s.session_type === 'couple' ? 'Couple ' : ''}Package ${s.package_session_number}/${s.session_count}`
+          ? `${isCouple ? 'Couple ' : ''}Package ${s.package_session_number}/${s.session_count}`
           : (s.session_type || '—'),
         status: s.status,
         source: paymentSource,
@@ -5288,7 +5384,8 @@ const getPendingPayouts = async (req, res) => {
         1,
         parseInt(session.session_count || packageMeta?.session_count, 10) || 1
       );
-      const packageType = packageMeta?.package_type || `package_${resolvedSessionCount}`;
+      const packageType = getFinancePackageType(session, packageMeta);
+      const fallbackPackageType = packageMeta?.package_type || `package_${resolvedSessionCount}`;
       const packageNumber = parseInt(session.package_session_number, 10) || 1;
       const doctorPackages =
         cfg?.doctor_commission_packages && typeof cfg.doctor_commission_packages === 'object'
@@ -5296,19 +5393,25 @@ const getPendingPayouts = async (req, res) => {
           : {};
       const firstKey = `${packageType}_first_session`;
       const followupKey = `${packageType}_followup`;
+      const fallbackFirstKey = `${fallbackPackageType}_first_session`;
+      const fallbackFollowupKey = `${fallbackPackageType}_followup`;
       const configuredTotal =
         packageNumber <= 1
           ? (
             doctorPackages[firstKey] ??
+            doctorPackages[fallbackFirstKey] ??
             cfg?.doctor_commission_first_session_package ??
             doctorPackages[followupKey] ??
+            doctorPackages[fallbackFollowupKey] ??
             cfg?.doctor_commission_followup_package ??
             0
           )
           : (
             doctorPackages[followupKey] ??
+            doctorPackages[fallbackFollowupKey] ??
             cfg?.doctor_commission_followup_package ??
             doctorPackages[firstKey] ??
+            doctorPackages[fallbackFirstKey] ??
             cfg?.doctor_commission_first_session_package ??
             0
           );
@@ -5345,6 +5448,7 @@ const getPendingPayouts = async (req, res) => {
         psychologist_id,
         client_id,
         session_type,
+        wix_booking_id,
         package_id,
         package_session_number,
         scheduled_date,
@@ -5355,6 +5459,7 @@ const getPendingPayouts = async (req, res) => {
         payment_id,
         price,
         session_count,
+        wix_payload,
         psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
       `)
       .eq('status', 'completed')
@@ -5371,6 +5476,7 @@ const getPendingPayouts = async (req, res) => {
           psychologist_id,
           client_id,
           session_type,
+          wix_booking_id,
           package_id,
           package_session_number,
           scheduled_date,
@@ -5399,6 +5505,7 @@ const getPendingPayouts = async (req, res) => {
           psychologist_id,
           client_id,
           session_type,
+          wix_booking_id,
           package_id,
           package_session_number,
           scheduled_date,
@@ -5420,6 +5527,9 @@ const getPendingPayouts = async (req, res) => {
 
     // Payout eligibility is based on completion status, not payment row availability.
     const completedSessionsWithPayments = completedSessions || [];
+    if (completedSessionsWithPayments.length) {
+      await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, completedSessionsWithPayments);
+    }
 
     if (sessionsError) throw sessionsError;
     
@@ -5688,22 +5798,16 @@ const getPendingPayouts = async (req, res) => {
       const sessionCountForType = parseInt(session.session_count, 10) || 1;
       if (session.package_id || sessionCountForType > 1 || String(session.session_type || '').toLowerCase().includes('package')) {
         const pkg = packagesMap[session.package_id];
-        if (pkg) {
-          sessionTypeForCount = pkg.package_type || `package_${pkg.session_count || 'unknown'}`;
-        } else if (sessionCountForType > 1) {
-          sessionTypeForCount = `package_${sessionCountForType}`;
-        } else {
-          sessionTypeForCount = 'package_unknown';
-        }
+        sessionTypeForCount = getFinancePackageType(session, pkg);
       }
       const packageSessionNumber = parseInt(session.package_session_number, 10) || null;
-      const sessionTypeLabel = sessionTypeForCount.startsWith('package_')
-        ? `Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('package_', '')}`
-        : sessionTypeForCount.startsWith('couple_package_')
+      const sessionTypeLabel = sessionTypeForCount.startsWith('couple_package_')
           ? `Couple Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('couple_package_', '')}`
+        : sessionTypeForCount.startsWith('package_')
+          ? `Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('package_', '')}`
         : (sessionTypeForCount === 'package_unknown'
           ? `Package${packageSessionNumber ? ` (${packageSessionNumber}/${sessionCountForType || '?'})` : ''}`
-          : (String(session.session_type || sessionTypeForCount || '').toLowerCase().includes('couple')
+          : (isCoupleSessionLike(session)
             ? 'Couple'
             : 'Individual'));
 
@@ -5728,7 +5832,7 @@ const getPendingPayouts = async (req, res) => {
         parseInt(session.session_count || packageMeta?.session_count, 10) || 1
       );
       const packageTypeForMoney = isPackageSession
-        ? (packageMeta?.package_type || `package_${resolvedSessionCount}`)
+        ? getFinancePackageType(session, packageMeta)
         : null;
 
       let sessionAmount = parseFloat(commission?.session_amount ?? session.price ?? 0) || 0;
@@ -5759,6 +5863,7 @@ const getPendingPayouts = async (req, res) => {
           : null;
         const totalCompanyPackageCommission = parseFloat(
           amountConfig?.[packageTypeForMoney] ??
+          amountConfig?.[packageMeta?.package_type || `package_${resolvedSessionCount}`] ??
           amountConfig?.package ??
           cfg?.commission_amount_package ??
           0
@@ -6712,18 +6817,16 @@ const updateSessionCommission = async (req, res) => {
     }
 
     const { sessionId } = req.params;
-    const { commission_amount } = req.body;
+    const { commission_amount, session_amount } = req.body;
 
     if (commission_amount === undefined || commission_amount === null || isNaN(Number(commission_amount))) {
       return res.status(400).json(errorResponse('commission_amount is required and must be a number'));
     }
 
-    const companyCommission = Math.max(0, Number(commission_amount));
-
     // Fetch session to get session_amount and psychologist_id
     const { data: session, error: sessionError } = await supabaseAdmin
       .from('sessions')
-      .select('id, price, psychologist_id, payment_id')
+      .select('id, price, amount, psychologist_id, payment_id')
       .eq('id', sessionId)
       .single();
 
@@ -6731,8 +6834,19 @@ const updateSessionCommission = async (req, res) => {
       return res.status(404).json(errorResponse('Session not found'));
     }
 
-    const sessionAmount = parseFloat(session.price || 0);
-    const doctorWallet = Math.max(0, sessionAmount - companyCommission);
+    const sessionAmount = session_amount === undefined || session_amount === null || session_amount === ''
+      ? (parseFloat(session.price ?? session.amount ?? 0) || 0)
+      : Number(session_amount);
+    const companyCommission = Number(commission_amount);
+
+    if (!Number.isFinite(sessionAmount) || sessionAmount < 0) {
+      return res.status(400).json(errorResponse('session_amount must be a valid non-negative number'));
+    }
+    if (!Number.isFinite(companyCommission)) {
+      return res.status(400).json(errorResponse('commission_amount must be a valid number'));
+    }
+
+    const doctorWallet = sessionAmount - companyCommission;
 
     // Check if commission_history row already exists
     const { data: existing } = await supabaseAdmin
@@ -6770,10 +6884,14 @@ const updateSessionCommission = async (req, res) => {
       return res.status(500).json(errorResponse('Failed to update commission record'));
     }
 
-    // Sync sessions.therapist_commission (doctor wallet) as fallback
+    // Sync session money fields so all finance views reconcile after manual edits.
     await supabaseAdmin
       .from('sessions')
-      .update({ therapist_commission: doctorWallet })
+      .update({
+        price: sessionAmount,
+        amount: sessionAmount,
+        therapist_commission: doctorWallet,
+      })
       .eq('id', sessionId);
 
     await auditLogger.logAction({

@@ -66,8 +66,13 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
 
     // Determine session type
     const sessionTypeText = String(session.session_type || '').toLowerCase();
-    const isCoupleSession = sessionTypeText.includes('couple') || sessionTypeText.includes('cpl');
-    const sessionType = session.package_id || session.session_type === 'Package Session' ? 'package' : (isCoupleSession ? 'couple' : 'individual');
+    const payloadTypeText = `${session.wix_payload?.bookingType || ''} ${session.wix_payload?.booking_type || ''} ${session.wix_payload?.session_type || ''}`.toLowerCase();
+    const sessionCount = Math.max(1, parseInt(session.session_count, 10) || 1);
+    const isCoupleSession = sessionTypeText.includes('couple') ||
+      sessionTypeText.includes('cpl') ||
+      payloadTypeText.includes('couple') ||
+      payloadTypeText.includes('cpl');
+    const sessionType = session.package_id || sessionCount > 1 || session.session_type === 'Package Session' || sessionTypeText.includes('package') ? 'package' : (isCoupleSession ? 'couple' : 'individual');
     const clientId = session.client_id;
     let packageType = 'package';
     let isInitialCommissionSession = false;
@@ -98,6 +103,11 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
         if (packageData) {
           packageType = packageData.package_type || 'package';
         }
+      }
+      if (sessionType === 'package' && isCoupleSession) {
+        packageType = `couple_package_${sessionCount}`;
+      } else if (sessionType === 'package' && !session.package_id && sessionCount > 1) {
+        packageType = `package_${sessionCount}`;
       }
 
       // Use JSONB commission_amounts if available (company-facing fixed fallback amounts)
@@ -214,15 +224,21 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
       
       if (isInitialCommissionSession) {
         const packageFirstSessionKey = `${packageType}_first_session`;
+        const fallbackPackageFirstSessionKey = `package_${sessionCount}_first_session`;
         if (doctorCommissionPackages[packageFirstSessionKey] !== null && doctorCommissionPackages[packageFirstSessionKey] !== undefined) {
           totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[packageFirstSessionKey]) || 0;
+        } else if (doctorCommissionPackages[fallbackPackageFirstSessionKey] !== null && doctorCommissionPackages[fallbackPackageFirstSessionKey] !== undefined) {
+          totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[fallbackPackageFirstSessionKey]) || 0;
         } else if (commissionRecord?.doctor_commission_first_session_package !== null && commissionRecord?.doctor_commission_first_session_package !== undefined) {
           totalDoctorPackageCommission = parseFloat(commissionRecord.doctor_commission_first_session_package) || 0;
         }
       } else {
         const packageFollowupKey = `${packageType}_followup`;
+        const fallbackPackageFollowupKey = `package_${sessionCount}_followup`;
         if (doctorCommissionPackages[packageFollowupKey] !== null && doctorCommissionPackages[packageFollowupKey] !== undefined) {
           totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[packageFollowupKey]) || 0;
+        } else if (doctorCommissionPackages[fallbackPackageFollowupKey] !== null && doctorCommissionPackages[fallbackPackageFollowupKey] !== undefined) {
+          totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[fallbackPackageFollowupKey]) || 0;
         } else if (commissionRecord?.doctor_commission_followup_package !== null && commissionRecord?.doctor_commission_followup_package !== undefined) {
           totalDoctorPackageCommission = parseFloat(commissionRecord.doctor_commission_followup_package) || 0;
         }
@@ -262,15 +278,21 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
       
       if (isInitialCommissionSession) {
         const packageFirstSessionKey = `${packageType}_first_session`;
+        const fallbackPackageFirstSessionKey = `package_${sessionCount}_first_session`;
         if (doctorCommissionPackages[packageFirstSessionKey] !== null && doctorCommissionPackages[packageFirstSessionKey] !== undefined) {
           totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[packageFirstSessionKey]) || 0;
+        } else if (doctorCommissionPackages[fallbackPackageFirstSessionKey] !== null && doctorCommissionPackages[fallbackPackageFirstSessionKey] !== undefined) {
+          totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[fallbackPackageFirstSessionKey]) || 0;
         } else if (commissionRecord?.doctor_commission_first_session_package !== null && commissionRecord?.doctor_commission_first_session_package !== undefined) {
           totalDoctorPackageCommission = parseFloat(commissionRecord.doctor_commission_first_session_package) || 0;
         }
       } else {
         const packageFollowupKey = `${packageType}_followup`;
+        const fallbackPackageFollowupKey = `package_${sessionCount}_followup`;
         if (doctorCommissionPackages[packageFollowupKey] !== null && doctorCommissionPackages[packageFollowupKey] !== undefined) {
           totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[packageFollowupKey]) || 0;
+        } else if (doctorCommissionPackages[fallbackPackageFollowupKey] !== null && doctorCommissionPackages[fallbackPackageFollowupKey] !== undefined) {
+          totalDoctorPackageCommission = parseFloat(doctorCommissionPackages[fallbackPackageFollowupKey]) || 0;
         } else if (commissionRecord?.doctor_commission_followup_package !== null && commissionRecord?.doctor_commission_followup_package !== undefined) {
           totalDoctorPackageCommission = parseFloat(commissionRecord.doctor_commission_followup_package) || 0;
         }
@@ -378,4 +400,3 @@ module.exports = {
   recalculateCommission,
   calculateCommissionsBatch
 };
-

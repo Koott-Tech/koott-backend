@@ -320,6 +320,14 @@ async function createOneManualPackageSession({
     updated_at: new Date().toISOString(),
     booking_created_at: new Date().toISOString(),
     original_scheduled_date: scheduledDate,
+    wix_payload: {
+      bookingType: sessionType,
+      packageType: sessionType === 'couple' ? `couple_package_${sessionCount}` : `package_${sessionCount}`,
+      planSessionNumber: sessionNumber,
+      creditsAvailable: sessionCount,
+      isAdminManual: true,
+      manualBooking: true,
+    },
     // NOTE: wix_booking_id is set AFTER the mirror row exists (FK constraint) — see below.
   };
   if (meetData.eventId) sessionRow.google_calendar_event_id = meetData.eventId;
@@ -2488,6 +2496,146 @@ const getAllPsychologists = async (req, res) => {
     return res.json(successResponse(transformedData));
   } catch (error) {
     console.error('Error in getAllPsychologists:', error);
+    return res.status(500).json(errorResponse('Internal server error'));
+  }
+};
+
+const getPsychologistBookingDetails = async (req, res) => {
+  try {
+    const { psychologistId } = req.params;
+    const {
+      page = 1,
+      limit = 100,
+      status = 'all',
+      dateFrom,
+      dateTo,
+    } = req.query || {};
+
+    if (!psychologistId) {
+      return res.status(400).json(errorResponse('Psychologist ID is required'));
+    }
+
+    const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 300);
+    const from = (parsedPage - 1) * parsedLimit;
+    const to = from + parsedLimit - 1;
+
+    const { data: psychologist, error: psychologistError } = await supabaseAdmin
+      .from('psychologists')
+      .select('id, first_name, last_name, email, phone')
+      .eq('id', psychologistId)
+      .maybeSingle();
+
+    if (psychologistError) {
+      console.error('Get psychologist booking details: psychologist fetch error:', psychologistError);
+      return res.status(500).json(errorResponse('Failed to fetch psychologist'));
+    }
+
+    if (!psychologist) {
+      return res.status(404).json(errorResponse('Psychologist not found'));
+    }
+
+    const buildSessionsQuery = ({ countOnly = false } = {}) => {
+      let query = supabaseAdmin
+        .from('sessions')
+        .select(
+          countOnly
+            ? 'id'
+            : `
+              *,
+              client:clients(id, first_name, last_name, child_name, phone_number, user:users(email)),
+              psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
+            `,
+          countOnly ? { count: 'exact', head: true } : { count: 'exact' }
+        )
+        .eq('psychologist_id', psychologistId);
+
+      if (status && status !== 'all') {
+        query = query.eq('status', status);
+      }
+      if (dateFrom) {
+        query = query.gte('scheduled_date', dateFrom);
+      }
+      if (dateTo) {
+        query = query.lte('scheduled_date', dateTo);
+      }
+
+      return query;
+    };
+
+    const { data: sessions, error, count } = await buildSessionsQuery()
+      .order('scheduled_date', { ascending: false, nullsLast: true })
+      .order('created_at', { ascending: false })
+      .range(from, to);
+
+    if (error) {
+      console.error('Get psychologist booking details: sessions fetch error:', error);
+      return res.status(500).json(errorResponse('Failed to fetch psychologist bookings'));
+    }
+
+    const { data: allSummarySessions, error: summaryError } = await supabaseAdmin
+      .from('sessions')
+      .select('id, status, price, amount, session_type, session_count, package_group_id, package_session_number')
+      .eq('psychologist_id', psychologistId);
+
+    if (summaryError) {
+      console.warn('Get psychologist booking details: summary fetch error:', summaryError.message || summaryError);
+    }
+
+    const summaryRows = allSummarySessions || [];
+    const normalizeStatus = (value) => String(value || '').toLowerCase();
+    const completedStatuses = new Set(['completed']);
+    const upcomingStatuses = new Set(['booked', 'scheduled', 'confirmed', 'rescheduled', 'reschedule_requested']);
+    const voidStatuses = new Set(['cancelled', 'canceled', 'deleted', 'refunded']);
+    const noShowStatuses = new Set(['no_show', 'no-show']);
+    const moneyValue = (row) => {
+      const value = row?.amount ?? row?.price ?? 0;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const summary = summaryRows.reduce((acc, row) => {
+      const rowStatus = normalizeStatus(row.status);
+      acc.total += 1;
+      if (completedStatuses.has(rowStatus)) acc.completed += 1;
+      if (upcomingStatuses.has(rowStatus)) acc.upcoming += 1;
+      if (voidStatuses.has(rowStatus)) acc.void += 1;
+      if (noShowStatuses.has(rowStatus)) acc.no_show += 1;
+      acc.total_amount += moneyValue(row);
+      if (completedStatuses.has(rowStatus)) acc.completed_amount += moneyValue(row);
+      if (Number(row.session_count || 1) > 1 || row.package_group_id || row.package_session_number) {
+        acc.package_sessions += 1;
+      }
+      return acc;
+    }, {
+      total: 0,
+      completed: 0,
+      upcoming: 0,
+      void: 0,
+      no_show: 0,
+      package_sessions: 0,
+      total_amount: 0,
+      completed_amount: 0,
+    });
+
+    const doctorName = `${psychologist.first_name || ''} ${psychologist.last_name || ''}`.trim() || psychologist.email;
+
+    return res.json(successResponse({
+      psychologist: {
+        ...psychologist,
+        name: doctorName,
+      },
+      bookings: sessions || [],
+      summary,
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total: count || 0,
+        totalPages: Math.ceil((count || 0) / parsedLimit),
+      },
+    }));
+  } catch (error) {
+    console.error('Error in getPsychologistBookingDetails:', error);
     return res.status(500).json(errorResponse('Internal server error'));
   }
 };
@@ -5007,6 +5155,9 @@ const bookPackageNextSession = async (req, res) => {
     // Next session number = all existing non-cancelled sessions in this package + 1.
     // (completedCount + bookedCount were computed above from packageSessions.)
     const nextSessionNumber = completedCount + bookedCount + 1;
+    const packageType = String(clientPackage.package?.package_type || '').toLowerCase();
+    const isCouplePackage = packageType.includes('couple');
+    const sessionTypeForPackage = isCouplePackage ? 'couple' : 'package';
 
     const fallbackMeetLink = 'https://meet.google.com/new?hs=122&authuser=0';
     const nowIso = new Date().toISOString();
@@ -5018,7 +5169,7 @@ const bookPackageNextSession = async (req, res) => {
       scheduled_time: formattedTime,
       status: 'booked',
       // Package metadata so the row shows as "Package (n/total)" and book-next gating works.
-      session_type: 'package',
+      session_type: sessionTypeForPackage,
       session_count: totalSessionsCount,
       package_session_number: nextSessionNumber,
       // Join the same group as the package's other sessions so "Book Next" only shows on
@@ -5032,6 +5183,14 @@ const bookPackageNextSession = async (req, res) => {
       // booking_created_at MUST be set — the admin sessions list filters the "All" tab by this
       // column, and a NULL value would silently hide the row from the bookings page.
       booking_created_at: nowIso,
+      wix_payload: {
+        bookingType: sessionTypeForPackage,
+        packageType: clientPackage.package?.package_type || null,
+        planSessionNumber: nextSessionNumber,
+        creditsAvailable: totalSessionsCount,
+        isAdminManual: true,
+        manualBooking: true,
+      },
     };
 
     const { data: session, error: sessionError } = await supabaseAdmin
@@ -5771,6 +5930,7 @@ module.exports = {
   updateEventRegistration,
   deleteEventRegistration,
   getAllPsychologists,
+  getPsychologistBookingDetails,
   createPsychologist,
   updatePsychologist,
   deletePsychologist,
