@@ -2247,24 +2247,28 @@ const getSessions = async (req, res) => {
 
     if (!shouldIncludeUnpaid) {
       // Include paid sessions OR manual/plan-credit sessions (price > 0, no payment_id)
-      // Plan-credit Wix sessions (inPerson vendor) have no payment_id but are real paid sessions
-      query = query.or('payment_id.not.is.null,source.eq.admin_manual,price.gt.0');
+      // Plan-credit Wix sessions (inPerson vendor) have no payment_id but are real paid sessions.
+      // Also include ₹0 package follow-ups (they belong to a paid package) so a package's later
+      // sessions show alongside its paid first session — matching the Wix Discovery page.
+      query = query.or('payment_id.not.is.null,source.eq.admin_manual,price.gt.0,package_group_id.not.is.null');
     }
 
-    // Apply filters
-    if (dateFrom) {
-      if (normalizedDateBasis === 'booked') {
-        query = query.gte(bookingTimeCol, `${dateFrom}${IST_DAY_START_SUFFIX}`);
-      } else {
-        query = query.gte('scheduled_date', dateFrom);
-      }
-    }
-    if (dateTo) {
-      if (normalizedDateBasis === 'booked') {
-        query = query.lte(bookingTimeCol, `${dateTo}${IST_DAY_END_SUFFIX}`);
-      } else {
-        query = query.lte('scheduled_date', dateTo);
-      }
+    // Apply date filter. Match the admin Wix Discovery page: a session belongs to a month if
+    // it was either SCHEDULED in that month OR BOOKED in that month (OR-union). So a
+    // July-booked / August-scheduled session shows under BOTH July AND August — otherwise the
+    // 'booked' basis hides August-scheduled bookings from the August view (they were booked in
+    // July), leaving the current month nearly empty. Applied whenever a full range is given.
+    if (dateFrom && dateTo) {
+      query = query.or(
+        `and(scheduled_date.gte.${dateFrom},scheduled_date.lte.${dateTo}),` +
+        `and(${bookingTimeCol}.gte.${dateFrom}${IST_DAY_START_SUFFIX},${bookingTimeCol}.lte.${dateTo}${IST_DAY_END_SUFFIX})`
+      );
+    } else if (dateFrom) {
+      if (normalizedDateBasis === 'booked') query = query.gte(bookingTimeCol, `${dateFrom}${IST_DAY_START_SUFFIX}`);
+      else query = query.gte('scheduled_date', dateFrom);
+    } else if (dateTo) {
+      if (normalizedDateBasis === 'booked') query = query.lte(bookingTimeCol, `${dateTo}${IST_DAY_END_SUFFIX}`);
+      else query = query.lte('scheduled_date', dateTo);
     }
     if (psychologistId) {
       query = query.eq('psychologist_id', psychologistId);
@@ -2333,9 +2337,25 @@ const getSessions = async (req, res) => {
       }
     }
 
+    // A Wix booking counts as PAID via its wix_payload (paymentState COMPLETE/PAID, or a
+    // real positive price) even when it has no row in the `payments` table — Wix payments
+    // live in wix_payload, not `payments`. Without this, Wix sessions (the bulk of a month,
+    // e.g. August) silently vanish from the finance list even though they show on the admin
+    // Wix Discovery page. Mirrors that page's "real paid booking" rule.
+    const isPaidWixRow = (s) => {
+      if (!s.wix_booking_id && String(s.source || '').toLowerCase() !== 'wix') return false;
+      const p = s.wix_payload || {};
+      const state = String(p.paymentState || p.paymentDetails?.state || '').toUpperCase();
+      if (state === 'COMPLETE' || state === 'PAID') return true;
+      if (Number(s.price) > 0) return true;                       // real-priced Wix booking
+      // ₹0 package follow-up belonging to a (paid) package
+      if (s.package_group_id || s.package_id || Number(s.session_count) > 1) return true;
+      return false;
+    };
+
     const sessionsForResponse = shouldIncludeUnpaid
       ? sessionsData
-      : sessionsData.filter(s => s.payment_id && successfulPaymentIds.includes(s.payment_id));
+      : sessionsData.filter(s => (s.payment_id && successfulPaymentIds.includes(s.payment_id)) || isPaidWixRow(s));
 
     // Get commission data for each session
     const sessionIds = sessionsForResponse.map(s => s?.id).filter(Boolean);
