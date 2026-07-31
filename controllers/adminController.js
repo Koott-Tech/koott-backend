@@ -1648,22 +1648,27 @@ const createRecordOnlyBooking = async (req, res) => {
       (typeof payment_screenshot_url === 'string' && payment_screenshot_url.trim()) ||
       null;
 
+    // NOTE: payments has no transaction_id / session_type columns (schema migrated to the
+    // provider* shape). The record id goes in provider_payment_id and the session_type +
+    // record-only metadata live in razorpay_params.notes — mirrors createRecordOnlyPackage.
     const { data: payment, error: paymentError } = await supabaseAdmin
       .from('payments')
       .insert({
-        transaction_id: transactionId,
         session_id: null,
         psychologist_id: psychologist_id,
         client_id: client.id,
         package_id: package_id || null,
         amount: amount,
-        session_type: packageData ? 'package' : 'individual',
+        currency: 'INR',
         status: 'success',
+        provider: 'manual',
+        provider_payment_id: transactionId,
         payment_method: normalizedPaymentMethod,
         receipt_url: normalizedReceiptUrl,
         razorpay_params: {
           notes: {
             record_only: true,
+            session_type: packageData ? 'package' : 'individual',
             payment_method: normalizedPaymentMethod,
             admin_created: true,
             created_by: req.user?.id,
@@ -1679,8 +1684,9 @@ const createRecordOnlyBooking = async (req, res) => {
       .single();
 
     if (paymentError) {
+      console.error('[createRecordOnlyBooking] payment insert failed:', paymentError.message, paymentError.details || '');
       return res.status(500).json(
-        errorResponse('Failed to create payment record')
+        errorResponse(`Failed to create payment record: ${paymentError.message || 'unknown'}`)
       );
     }
     paymentRecord = payment;

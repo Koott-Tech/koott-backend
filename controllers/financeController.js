@@ -45,7 +45,7 @@ const DEFAULT_SALARY_EMPLOYEES = [
   { employee_id: 'KT009', name: 'ABHISHEK R', email: 'abhishekravi063@gmail.com', designation: 'DEVELOPER TEAM', location: 'Calicut, India' },
   { employee_id: 'KT0010', name: 'SIMSARUL HAQUE', email: 'simsar280108@gmail.com', designation: 'GROUP ACCOUNTANT', location: 'Calicut, India' },
   { employee_id: 'KT0011', name: 'SREERAG BABU', email: 'sreerag.koott@gmail.com', designation: 'CONSULTANT PSYCHOLOGIST', location: 'Calicut, India' },
-  { employee_id: 'KT0012', name: 'AISWARYA', email: null, designation: 'TEAM MARKETING', location: 'Calicut, India' },
+  { employee_id: 'KT0012', name: 'AISWARYA', email: 'aiswaryasanthosh801@gamil.com', designation: 'TEAM MARKETING', location: 'Calicut, India' },
   { employee_id: 'KT0013', name: 'SREEDEVI V V', email: 'Sreedevi.koott@gmail.com', designation: 'TEAM OPERATION', location: 'Calicut, India' },
   { employee_id: 'KT0014', name: 'RAHNAS FATHIMA', email: 'rahnaskoott@gmail.com', designation: 'TEAM OPERATION', location: 'Calicut, India' },
   { employee_id: 'KT0015', name: 'SREELAKSHMI N', email: 'sreelakshmi.koott@gmail.com', designation: 'CONSULTANT PSYCHOLOGIST', location: 'Calicut, India' },
