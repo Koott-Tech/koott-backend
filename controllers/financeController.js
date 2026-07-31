@@ -33,6 +33,34 @@ dayjs.extend(timezone);
 
 const FINANCE_IST_TZ = 'Asia/Kolkata';
 
+const DEFAULT_SALARY_EMPLOYEES = [
+  { employee_id: 'KT001', name: 'ATHULYA O', email: 'koott.athulya@gmail.com', designation: 'CARE MANAGER / PSYCHOLOGIST', location: 'Calicut, India' },
+  { employee_id: 'KT002', name: 'JISHNULAL M', email: 'Jishnulal954@gmail.com', designation: 'TEAM MARKETING', location: 'Calicut, India' },
+  { employee_id: 'KT003', name: 'DR. ASWATHI PR', email: 'dr.aswathi.raman.koott@gmail.com', designation: 'CHIEF PSYCHOLOGIST', location: 'Calicut, India' },
+  { employee_id: 'KT004', name: 'IRENE CHERIAN', email: 'irene.Koott@gmail.com', designation: 'CONSULTANT PSYCHOLOGIST', location: 'Calicut, India' },
+  { employee_id: 'KT005', name: 'SHUHAIMA KATTI', email: 'shuhaima.koott@gmail.com', designation: 'CONSULTANT PSYCHOLOGIST', location: 'Calicut, India' },
+  { employee_id: 'KT006', name: 'SHINAS KD', email: 'Shinaschungam@mail.com', designation: 'MARKETING TEAM', location: 'Calicut, India' },
+  { employee_id: 'KT007', name: 'FAISAL VP', email: 'faisal@koott.in', designation: 'CEO / FOUNDER', location: 'Calicut, India' },
+  { employee_id: 'KT008', name: 'LIANA SAMEER', email: 'liana.koott@gmail.com', designation: 'CONSULTANT PSYCHOLOGIST', location: 'Calicut, India' },
+  { employee_id: 'KT009', name: 'ABHISHEK R', email: 'abhishekravi063@gmail.com', designation: 'DEVELOPER TEAM', location: 'Calicut, India' },
+  { employee_id: 'KT0010', name: 'SIMSARUL HAQUE', email: 'simsar280108@gmail.com', designation: 'GROUP ACCOUNTANT', location: 'Calicut, India' },
+  { employee_id: 'KT0011', name: 'SREERAG BABU', email: 'sreerag.koott@gmail.com', designation: 'CONSULTANT PSYCHOLOGIST', location: 'Calicut, India' },
+  { employee_id: 'KT0012', name: 'AISWARYA', email: null, designation: 'TEAM MARKETING', location: 'Calicut, India' },
+  { employee_id: 'KT0013', name: 'SREEDEVI V V', email: 'Sreedevi.koott@gmail.com', designation: 'TEAM OPERATION', location: 'Calicut, India' },
+  { employee_id: 'KT0014', name: 'RAHNAS FATHIMA', email: 'rahnaskoott@gmail.com', designation: 'TEAM OPERATION', location: 'Calicut, India' },
+  { employee_id: 'KT0015', name: 'SREELAKSHMI N', email: 'sreelakshmi.koott@gmail.com', designation: 'CONSULTANT PSYCHOLOGIST', location: 'Calicut, India' },
+  { employee_id: 'KT0016', name: 'SIKHA K', email: 'sikha.koott@gmail.com', designation: 'TEAM OPERATION', location: 'Calicut, India' },
+];
+
+const mapSalaryEmployeeForApi = (row) => ({
+  id: row.id || null,
+  employeeId: row.employee_id || row.employeeId || '',
+  name: row.name || '',
+  email: row.email || '',
+  designation: row.designation || '',
+  location: row.location || 'Calicut, India',
+});
+
 function escapeHtml(value = '') {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -3182,6 +3210,96 @@ const getPsychologistOptions = async (req, res) => {
   } catch (error) {
     console.error('Get finance psychologist options error:', error);
     res.status(500).json(errorResponse('Internal server error while fetching psychologists'));
+  }
+};
+
+const getSalaryEmployees = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    if (!['finance', 'admin', 'superadmin'].includes(userRole)) {
+      return res.status(403).json(errorResponse('Access denied. Finance role required.'));
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('finance_salary_employees')
+      .select('id, employee_id, name, email, designation, location, is_active')
+      .eq('is_active', true)
+      .order('employee_id', { ascending: true });
+
+    if (error) {
+      if (String(error.message || '').includes('finance_salary_employees')) {
+        return res.json(successResponse({
+          employees: DEFAULT_SALARY_EMPLOYEES.map(mapSalaryEmployeeForApi),
+          source: 'fallback',
+        }, 'Salary employees fetched from fallback seed'));
+      }
+      throw error;
+    }
+
+    res.json(successResponse({
+      employees: (data || []).map(mapSalaryEmployeeForApi),
+      source: 'database',
+    }, 'Salary employees fetched successfully'));
+  } catch (error) {
+    console.error('Get salary employees error:', error);
+    res.status(500).json(errorResponse('Internal server error while fetching salary employees'));
+  }
+};
+
+const upsertSalaryEmployee = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    if (!['finance', 'admin', 'superadmin'].includes(userRole)) {
+      return res.status(403).json(errorResponse('Access denied. Finance role required.'));
+    }
+
+    const employeeId = String(req.body?.employeeId || req.body?.employee_id || '').trim();
+    const name = String(req.body?.name || '').trim();
+    const email = String(req.body?.email || '').trim();
+    const designation = String(req.body?.designation || '').trim();
+    const location = String(req.body?.location || 'Calicut, India').trim() || 'Calicut, India';
+
+    if (!employeeId || !name) {
+      return res.status(400).json(errorResponse('Employee ID and name are required.'));
+    }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json(errorResponse('Valid employee email is required.'));
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('finance_salary_employees')
+      .upsert({
+        employee_id: employeeId,
+        name,
+        email: email || null,
+        designation: designation || null,
+        location,
+        is_active: true,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'employee_id' })
+      .select('id, employee_id, name, email, designation, location, is_active')
+      .single();
+
+    if (error) throw error;
+
+    await auditLogger.logAction({
+      userId: req.user.id,
+      userEmail: req.user.email,
+      userRole,
+      action: 'FINANCE_SALARY_EMPLOYEE_SAVED',
+      resource: 'finance_salary_employees',
+      resourceId: data?.id,
+      endpoint: '/api/finance/settings/salary-employees',
+      method: 'POST',
+      details: { employee_id: employeeId, name, email: email || null },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    }).catch(err => console.error('Audit log error:', err));
+
+    res.json(successResponse({ employee: mapSalaryEmployeeForApi(data) }, 'Salary employee saved successfully'));
+  } catch (error) {
+    console.error('Upsert salary employee error:', error);
+    res.status(500).json(errorResponse('Internal server error while saving salary employee'));
   }
 };
 
@@ -6693,6 +6811,8 @@ module.exports = {
   getSessionDetails,
   getPsychologistOptions,
   getClientOptions,
+  getSalaryEmployees,
+  upsertSalaryEmployee,
   sendReceiptEmail,
   getRevenue,
   getExpenses,
@@ -7241,6 +7361,8 @@ module.exports = {
   getSessionDetails,
   getPsychologistOptions,
   getClientOptions,
+  getSalaryEmployees,
+  upsertSalaryEmployee,
   sendReceiptEmail,
   getRevenue,
   getExpenses,

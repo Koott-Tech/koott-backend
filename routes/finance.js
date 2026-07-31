@@ -84,6 +84,8 @@ router.get('/settings/categories', financeController.getExpenseCategories);
 router.post('/settings/categories', financeController.createExpenseCategory);
 router.get('/settings/income-sources', financeController.getIncomeSources);
 router.post('/settings/income-sources', financeController.createIncomeSource);
+router.get('/settings/salary-employees', financeController.getSalaryEmployees);
+router.post('/settings/salary-employees', financeController.upsertSalaryEmployee);
 
 // Payouts & Payments
 router.get('/payouts', financeController.getPayouts);
