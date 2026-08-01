@@ -17,6 +17,36 @@ const DEFAULT_WIX_SYNC_LIMIT = Number.parseInt(
   10
 ) || 100;
 
+const WIX_BOOKING_LIST_SELECT = [
+  'id',
+  'wix_booking_id',
+  'wix_session_id',
+  'schedule_id',
+  'contact_id',
+  'service_id',
+  'status',
+  'created_at',
+  'start_time',
+  'end_time',
+  'title',
+  'session_type',
+  'session_count',
+  'session_index',
+  'package_parent_booking_id',
+  'package_session_number',
+  'package_group_id',
+  'client_email',
+  'client_full_name',
+  'client_first_name',
+  'client_last_name',
+  'client_phone',
+  'therapist_name',
+  'price',
+  'currency',
+  'wix_order_number',
+  'locally_modified',
+].join(', ');
+
 async function sessionRowsForSchema(sessionRows) {
   const btc = await getBookingTimeColumnKey(supabaseAdmin);
   if (btc === 'booking_created_at') return sessionRows;
@@ -1112,7 +1142,7 @@ async function listWixBookings(req, res) {
       return next;
     };
 
-    let q = applyBaseFilters(supabaseAdmin.from('wix_bookings').select('*', { count: 'exact' }));
+    let q = applyBaseFilters(supabaseAdmin.from('wix_bookings').select(WIX_BOOKING_LIST_SELECT, { count: 'exact' }));
 
     // Newest Wix bookings on top
     q = q
@@ -1234,7 +1264,7 @@ async function listWixBookings(req, res) {
     const allVisibleRows = dedupeBookings((enrichedBookingsData || []).map((row) => ({
       id: row.wix_booking_id,
       status: row.status,
-      createdDate: row.payload?.createdDate || row.created_at,
+      createdDate: row.created_at,
       startTime: row.start_time,
       scheduleId: row.schedule_id,
       sessionId: row.wix_session_id,
@@ -1275,6 +1305,21 @@ async function listWixBookings(req, res) {
     const visibleBookingIds = dedupedData.map((row) => row?.wix_booking_id).filter(Boolean);
     let finalSessionMap = sessionMap;
     if (visibleBookingIds.length > 0) {
+      const { data: visiblePayloadRows, error: visiblePayloadError } = await supabaseAdmin
+        .from('wix_bookings')
+        .select('wix_booking_id, payload')
+        .in('wix_booking_id', visibleBookingIds);
+      if (visiblePayloadError) {
+        console.warn('[listWixBookings] visible payload fetch failed:', visiblePayloadError.message || visiblePayloadError);
+      } else {
+        const payloadByBookingId = new Map((visiblePayloadRows || []).map((row) => [row.wix_booking_id, row.payload]));
+        dedupedData.forEach((row) => {
+          if (row?.wix_booking_id && payloadByBookingId.has(row.wix_booking_id)) {
+            row.payload = payloadByBookingId.get(row.wix_booking_id);
+          }
+        });
+      }
+
       const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
       const hasMarkers = await hasNotificationMarkerColumns(supabaseAdmin);
       const { data: finalSessionsData } = await supabaseAdmin

@@ -18,7 +18,7 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
     if (!session) {
       const { data, error } = await supabaseAdmin
         .from('sessions')
-        .select('*')
+        .select('id, status, price, payment_id, psychologist_id, session_type, session_count, wix_payload, package_id, client_id, created_at, scheduled_date')
         .eq('id', sessionId)
         .single();
 
@@ -100,13 +100,13 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
           .eq('id', session.package_id)
           .single();
         
-        if (packageData) {
-          packageType = packageData.package_type || 'package';
+        if (packageData?.package_type && packageData.package_type !== 'package') {
+          packageType = packageData.package_type;
         }
       }
       if (sessionType === 'package' && isCoupleSession) {
         packageType = `couple_package_${sessionCount}`;
-      } else if (sessionType === 'package' && !session.package_id && sessionCount > 1) {
+      } else if (sessionType === 'package' && (!packageType || packageType === 'package')) {
         packageType = `package_${sessionCount}`;
       }
 
@@ -248,10 +248,6 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
         throw new Error(`Doctor commission not configured for ${isInitialCommissionSession ? 'initial' : 'follow-up'} package type: ${packageType}.`);
       }
       
-      // Derive session count from packageType (e.g. "package_3") or fallback to 1
-      const countMatch = String(packageType).match(/\d+/);
-      const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 1;
-      
       // Split the doctor's commission evenly across all sessions in the package
       const splitDoctorCommission = totalDoctorPackageCommission / (sessionCount > 0 ? sessionCount : 1);
       
@@ -320,7 +316,7 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
-      .select()
+      .select('id, psychologist_id, session_id, session_amount, commission_amount, payment_status, created_at, updated_at')
       .single();
 
     if (commissionError) {

@@ -34,6 +34,148 @@ dayjs.extend(timezone);
 
 const FINANCE_IST_TZ = 'Asia/Kolkata';
 
+const FINANCE_SNAPSHOT_SELECT = [
+  'snapshot_locked',
+  'total_revenue',
+  'net_profit',
+  'total_expenses',
+  'pending_payout',
+  'payout_received',
+  'total_sessions',
+  'pending_sessions',
+  'completed_sessions',
+  'rescheduled_sessions',
+  'reschedule_requested_sessions',
+  'no_show_sessions',
+  'upcoming_sessions',
+  'active_doctors',
+  'total_company_commission',
+  'total_doctor_wallet',
+  'refund_total',
+].join(', ');
+
+const FINANCE_EXPENSE_SELECT = [
+  'id',
+  'date',
+  'created_at',
+  'category',
+  'custom_category',
+  'description',
+  'amount',
+  'payment_method',
+  'vendor_supplier',
+  'receipt_url',
+  'reference_number',
+  'notes',
+  'approval_status',
+  'status',
+  'approved_by',
+  'approved_at',
+  'updated_at',
+  'is_recurring',
+  'recurring_frequency',
+  'expense_type',
+  'subscription_id',
+].join(', ');
+
+const FINANCE_EXPENSE_LEGACY_SELECT = [
+  'id',
+  'created_at',
+  'category',
+  'custom_category',
+  'description',
+  'amount',
+  'payment_method',
+  'vendor_supplier',
+  'receipt_url',
+  'reference_number',
+  'notes',
+  'status',
+  'approved_by',
+  'approved_at',
+  'updated_at',
+  'is_recurring',
+  'recurring_frequency',
+  'expense_type',
+  'subscription_id',
+].join(', ');
+
+const FINANCE_INCOME_SELECT = [
+  'id',
+  'date',
+  'created_at',
+  'income_source',
+  'description',
+  'amount',
+  'payment_method',
+  'reference_number',
+  'notes',
+  'updated_at',
+].join(', ');
+
+const FINANCE_INCOME_LEGACY_SELECT = [
+  'id',
+  'created_at',
+  'income_source',
+  'description',
+  'amount',
+  'payment_method',
+  'reference_number',
+  'notes',
+  'updated_at',
+].join(', ');
+
+const FINANCE_DOCTOR_COMMISSION_SELECT = [
+  'id',
+  'psychologist_id',
+  'commission_amount_individual',
+  'commission_amount_package',
+  'commission_percentage',
+  'commission_amounts',
+  'doctor_commission_first_session',
+  'doctor_commission_followup',
+  'doctor_commission_individual',
+  'doctor_commission_first_session_package',
+  'doctor_commission_followup_package',
+  'doctor_commission_packages',
+  'is_active',
+  'effective_from',
+  'notes',
+  'created_at',
+  'updated_at',
+].join(', ');
+
+const FINANCE_PAYMENT_SELECT = [
+  'id',
+  'transaction_id',
+  'razorpay_order_id',
+  'razorpay_payment_id',
+  'amount',
+  'currency',
+  'status',
+  'payment_method',
+  'completed_at',
+  'created_at',
+  'receipt_url',
+  'reference_number',
+  'notes',
+  'razorpay_params',
+  'razorpay_response',
+].join(', ');
+
+const FINANCE_RECEIPT_SELECT = [
+  'receipt_number',
+  'receipt_number_long',
+  'receipt_url',
+  'file_path',
+  'file_url',
+  'created_at',
+].join(', ');
+
+const FINANCE_CATEGORY_SELECT = 'id, name, description, is_active, created_at, updated_at';
+const FINANCE_INCOME_SOURCE_SELECT = 'id, name, description, is_auto_calculated, is_active, created_at, updated_at';
+const FINANCE_PAYOUT_FALLBACK_SELECT = 'id, net_payout, payout_amount, amount, payout_date, status';
+
 const DEFAULT_SALARY_EMPLOYEES = [
   { employee_id: 'KT001', name: 'ATHULYA O', email: 'koott.athulya@gmail.com', designation: 'CARE MANAGER / PSYCHOLOGIST', location: 'Calicut, India' },
   { employee_id: 'KT002', name: 'JISHNULAL M', email: 'Jishnulal954@gmail.com', designation: 'TEAM MARKETING', location: 'Calicut, India' },
@@ -245,7 +387,7 @@ const getDashboard = async (req, res) => {
     const { dateFrom, dateTo, includeCharts, allTime } = req.query;
     const allTimeMode = String(allTime || '').toLowerCase() === 'true';
     console.log('Processing dashboard with dates:', { dateFrom, dateTo, allTimeMode });
-    const shouldIncludeCharts = includeCharts !== 'false'; // Default to true for backward compatibility
+    const shouldIncludeCharts = includeCharts === true || String(includeCharts || '').toLowerCase() === 'true';
     
     // Get current date in IST timezone for accurate defaults
     const getISTDateString = (date) => {
@@ -313,7 +455,7 @@ const getDashboard = async (req, res) => {
       try {
         const { data: snapshot, error: snapshotError } = await supabaseAdmin
           .from('monthly_finance_dashboard')
-          .select('*')
+          .select(FINANCE_SNAPSHOT_SELECT)
           .eq('year', filterYear)
           .eq('month', filterMonth)
           .maybeSingle();
@@ -490,7 +632,7 @@ const getDashboard = async (req, res) => {
       let expensesError = null;
       ({ data: expenses, error: expensesError } = await supabaseAdmin
         .from('expenses')
-        .select('*')
+        .select(FINANCE_EXPENSE_SELECT)
         .eq('approval_status', 'approved')
         .gte('date', ytdFrom));
 
@@ -498,7 +640,7 @@ const getDashboard = async (req, res) => {
       if (expensesError && String(expensesError.message || '').includes('approval_status')) {
         ({ data: expenses, error: expensesError } = await supabaseAdmin
           .from('expenses')
-          .select('*')
+          .select(FINANCE_EXPENSE_LEGACY_SELECT)
           .eq('status', 'approved')
           .gte('created_at', `${ytdFrom}T00:00:00`));
       }
@@ -531,14 +673,14 @@ const getDashboard = async (req, res) => {
       let incomeError = null;
       ({ data: income, error: incomeError } = await supabaseAdmin
         .from('income_entries')
-        .select('*')
+        .select(FINANCE_INCOME_SELECT)
         .gte('date', ytdFrom));
 
       // Legacy fallback where table is named `income`.
       if (incomeError && (incomeError.code === '42P01' || incomeError.code === 'PGRST205')) {
         ({ data: income, error: incomeError } = await supabaseAdmin
           .from('income')
-          .select('*')
+          .select(FINANCE_INCOME_SELECT)
           .gte('date', ytdFrom));
       }
 
@@ -546,7 +688,7 @@ const getDashboard = async (req, res) => {
       if (incomeError && String(incomeError.message || '').includes('.date')) {
         ({ data: income, error: incomeError } = await supabaseAdmin
           .from('income_entries')
-          .select('*')
+          .select(FINANCE_INCOME_LEGACY_SELECT)
           .gte('created_at', `${ytdFrom}T00:00:00`));
       }
 
@@ -1484,7 +1626,7 @@ const getDashboard = async (req, res) => {
             let paidPayoutErr = null;
             let paidPayoutQuery = supabaseAdmin
               .from('payouts')
-              .select('*')
+              .select(FINANCE_PAYOUT_FALLBACK_SELECT)
               .in('status', ['paid', 'completed']);
             if (mtdFrom && mtdTo) {
               paidPayoutQuery = paidPayoutQuery.gte('payout_date', mtdFrom).lte('payout_date', mtdTo);
@@ -2566,7 +2708,7 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
     // Commission rates live in their own table (one active row per therapist).
     const { data: dcRows } = await supabaseAdmin
       .from('doctor_commissions')
-      .select('*')
+      .select(FINANCE_DOCTOR_COMMISSION_SELECT)
       .eq('psychologist_id', psychologistId)
       .order('created_at', { ascending: false });
     const activeDc = (dcRows || []).find((r) => r.is_active !== false) || (dcRows || [])[0] || null;
@@ -3027,7 +3169,7 @@ const getSessionDetails = async (req, res) => {
     if (session.payment_id) {
       const { data: payment, error: paymentError } = await supabaseAdmin
         .from('payments')
-        .select('*')
+        .select(FINANCE_PAYMENT_SELECT)
         .eq('id', session.payment_id)
         .single();
       
@@ -3092,7 +3234,7 @@ const getSessionDetails = async (req, res) => {
     if (paymentDetails?.transaction_id) {
       const { data: receipt, error: receiptError } = await supabaseAdmin
         .from('receipts')
-        .select('*')
+        .select(FINANCE_RECEIPT_SELECT)
         .eq('transaction_id', paymentDetails.transaction_id)
         .maybeSingle();
       
@@ -3123,7 +3265,7 @@ const getSessionDetails = async (req, res) => {
     // Get commission data
     const { data: commission } = await supabaseAdmin
       .from('commission_history')
-      .select('*')
+      .select('id, session_id, psychologist_id, payment_id, session_amount, commission_amount, payment_status, created_at, updated_at')
       .eq('session_id', sessionId)
       .single();
 
@@ -3718,7 +3860,7 @@ const getExpenses = async (req, res) => {
 
     let query = supabaseAdmin
       .from('expenses')
-      .select('*', { count: 'exact' })
+      .select(FINANCE_EXPENSE_SELECT, { count: 'exact' })
       .order('date', { ascending: false });
 
     if (dateFrom) query = query.gte('date', dateFrom);
@@ -3734,7 +3876,7 @@ const getExpenses = async (req, res) => {
     if (result.error && String(result.error.message || '').includes('column expenses.date does not exist')) {
       let fallbackQuery = supabaseAdmin
         .from('expenses')
-        .select('*', { count: 'exact' })
+        .select(FINANCE_EXPENSE_LEGACY_SELECT, { count: 'exact' })
         .order('created_at', { ascending: false });
       if (category) fallbackQuery = fallbackQuery.eq('category', category);
       if (approvalStatus) fallbackQuery = fallbackQuery.eq('approval_status', approvalStatus);
@@ -3881,7 +4023,7 @@ const createExpense = async (req, res) => {
         // Match by either category or custom_category
         const { data: previousExpenses } = await supabaseAdmin
           .from('expenses')
-          .select('*')
+          .select('id, amount, subscription_id')
           .eq('expense_type', 'subscription')
           .or(`category.eq.${finalCategory},custom_category.eq.${finalCategory}`)
           .lt('date', `${expenseYear}-${expenseMonth < 10 ? '0' : ''}${expenseMonth}-01`)
@@ -3923,7 +4065,7 @@ const createExpense = async (req, res) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
-      .select()
+      .select(FINANCE_EXPENSE_SELECT)
       .single();
 
     // If this is the first subscription expense, update it to use its own id as subscription_id
@@ -3981,7 +4123,7 @@ const approveExpense = async (req, res) => {
 
     const { data: expense, error: fetchError } = await supabaseAdmin
       .from('expenses')
-      .select('*')
+      .select(FINANCE_EXPENSE_SELECT)
       .eq('id', expenseId)
       .single();
 
@@ -4000,7 +4142,7 @@ const approveExpense = async (req, res) => {
         updated_at: new Date().toISOString()
       })
       .eq('id', expenseId)
-      .select()
+      .select(FINANCE_EXPENSE_SELECT)
       .single();
 
     if (error) throw error;
@@ -4069,7 +4211,7 @@ const updateExpense = async (req, res) => {
     // Check if expense exists
     const { data: existingExpense, error: checkError } = await supabaseAdmin
       .from('expenses')
-      .select('*')
+      .select(FINANCE_EXPENSE_SELECT)
       .eq('id', expenseId)
       .single();
 
@@ -4129,7 +4271,7 @@ const updateExpense = async (req, res) => {
         .from('expenses')
         .update(updateData)
         .eq('id', expenseId)
-        .select()
+        .select(FINANCE_EXPENSE_SELECT)
         .single();
       
       updatedExpense = data;
@@ -4190,7 +4332,7 @@ const deleteExpense = async (req, res) => {
     // Check if expense exists
     const { data: existingExpense, error: checkError } = await supabaseAdmin
       .from('expenses')
-      .select('*')
+      .select('id')
       .eq('id', expenseId)
       .single();
 
@@ -4460,7 +4602,7 @@ const getCommissions = async (req, res) => {
         // Preferred path (newer schema with is_active)
         ({ data: commissionData, error } = await supabaseAdmin
           .from('doctor_commissions')
-          .select('*')
+          .select(FINANCE_DOCTOR_COMMISSION_SELECT)
           .eq('is_active', true)
           .in('psychologist_id', allPsychologistIds)
           .order('effective_from', { ascending: false }));
@@ -4471,7 +4613,7 @@ const getCommissions = async (req, res) => {
           console.warn('doctor_commissions schema mismatch; falling back to basic latest-record query');
           ({ data: commissionData, error } = await supabaseAdmin
             .from('doctor_commissions')
-            .select('*')
+            .select(FINANCE_DOCTOR_COMMISSION_SELECT)
             .in('psychologist_id', allPsychologistIds));
         }
 
@@ -4683,10 +4825,10 @@ const getCommissions = async (req, res) => {
           // Package session - commission is split evenly across all sessions in the package.
           const pkg = s.package_id ? packagePricesMap[s.psychologist_id]?.find(p => p.id === s.package_id) : null;
           let packageType = pkg?.type || (s.package_id ? packageTypeMap[s.package_id] : null);
-          if (!packageType && s.session_count) {
-             packageType = `package_${s.session_count}`;
-          } else if (!packageType) {
-             packageType = 'package';
+          const resolvedSessionCount = Math.max(1, parseInt(s.session_count, 10) || 1);
+          const packageTypeFromCount = `package_${resolvedSessionCount}`;
+          if (!packageType || packageType === 'package') {
+            packageType = packageTypeFromCount;
           }
 
           // Get package-specific doctor commissions from JSONB field
@@ -4717,10 +4859,9 @@ const getCommissions = async (req, res) => {
             }
           }
           
-          // Derive session count from packageType (e.g. "package_3") or fallback to 3
-          const countMatch = String(packageType).match(/\d+/);
-          const sessionCount = countMatch ? parseInt(countMatch[0], 10) : 3;
-          const divisor = sessionCount > 0 ? sessionCount : 3;
+          // Use the actual session_count as the divisor. Falling back to a generic
+          // package type here can make a 9-session package calculate as package_3.
+          const divisor = resolvedSessionCount;
 
           // Split doctor commission evenly across all sessions in the package.
           // Follow-up sessions have price=0 but still earn their share.
@@ -4731,7 +4872,10 @@ const getCommissions = async (req, res) => {
           // give a negative result. commissionAmounts[packageType] is the total company
           // cut for the whole package (e.g. commissionAmounts.package_3 = ₹1500).
           const totalCompanyPackageCommission = toMoneyNumber(
-            commissionAmounts?.[packageType] || commissionAmounts?.package || 0
+            commissionAmounts?.[packageType] ||
+            commissionAmounts?.[packageTypeFromCount] ||
+            commissionAmounts?.package ||
+            0
           );
           commissionToCompany = Math.round(totalCompanyPackageCommission / divisor);
         } else {
@@ -4823,7 +4967,7 @@ const getCommissions = async (req, res) => {
 
 
     // Build final response with all doctors
-    const commissionsWithTotals = await Promise.all((psychologists || []).map(async (psych) => {
+    const commissionsWithTotals = (psychologists || []).map((psych) => {
       const commission = commissionsMap[psych.id];
       const stats = statsByPsych[psych.id] || {
         individual_sessions: 0,
@@ -4910,27 +5054,15 @@ const getCommissions = async (req, res) => {
         };
       });
 
-      let profileSummary = null;
-      try {
-        const profilePayload = await buildDoctorFinanceProfilePayload(psych.id, {
-          dateFrom,
-          dateTo,
-          dateBasis: doctorDateBasis,
-        });
-        profileSummary = profilePayload?.summary || null;
-      } catch (profileError) {
-        console.error(`Failed to load unified finance summary for psychologist ${psych.id}:`, profileError);
-      }
-
-      const unifiedTotalSessions = profileSummary?.total_sessions ?? stats.total_sessions;
-      const unifiedCompletedSessions = profileSummary?.completed_sessions ?? stats.completed_sessions;
-      const unifiedUpcomingSessions = profileSummary?.upcoming_sessions ?? stats.pending_sessions;
-      const unifiedGrossRevenue = profileSummary?.gross_revenue ?? stats.total_revenue;
-      const unifiedDoctorEarnings = profileSummary?.doctor_earnings ?? stats.total_to_doctor_wallet;
-      const unifiedCompanyEarnings = profileSummary?.company_earnings ?? stats.total_commission_to_company;
-      const unifiedPendingPayout = profileSummary?.payout_pending ?? stats.completed_payout;
-      const unifiedPaidPayout = profileSummary?.payout_paid ?? 0;
-      const unifiedNotDuePayout = profileSummary?.payout_not_due ?? stats.pending_payout;
+      const unifiedTotalSessions = stats.total_sessions;
+      const unifiedCompletedSessions = stats.completed_sessions;
+      const unifiedUpcomingSessions = stats.pending_sessions;
+      const unifiedGrossRevenue = stats.total_revenue;
+      const unifiedDoctorEarnings = stats.total_to_doctor_wallet;
+      const unifiedCompanyEarnings = stats.total_commission_to_company;
+      const unifiedPendingPayout = stats.completed_payout;
+      const unifiedPaidPayout = 0;
+      const unifiedNotDuePayout = stats.pending_payout;
 
       return {
         psychologist_id: psych.id,
@@ -4965,7 +5097,7 @@ const getCommissions = async (req, res) => {
         pending_sessions: unifiedUpcomingSessions,
         upcoming_sessions: unifiedUpcomingSessions,
         completed_sessions: unifiedCompletedSessions,
-        cancelled_sessions: profileSummary?.cancelled_sessions ?? 0,
+        cancelled_sessions: 0,
         wix_bookings_count: 0,
         latest_wix_booking_at: null,
         total_revenue: unifiedGrossRevenue,
@@ -4997,7 +5129,7 @@ const getCommissions = async (req, res) => {
           cover_image_url: psych.cover_image_url
         }
       };
-    }));
+    });
 
     await auditLogger.logAction({
       userId: req.user.id,
@@ -5236,7 +5368,7 @@ const updateCommissionRate = async (req, res) => {
       // Update existing record - only update changed fields
       const { data: existingCommissionData } = await supabaseAdmin
         .from('doctor_commissions')
-        .select('*')
+        .select(FINANCE_DOCTOR_COMMISSION_SELECT)
         .eq('id', existingRecord.id)
         .single();
 
@@ -5286,7 +5418,7 @@ const updateCommissionRate = async (req, res) => {
           .from('doctor_commissions')
           .update(updateData)
           .eq('id', existingRecord.id)
-          .select()
+          .select(FINANCE_DOCTOR_COMMISSION_SELECT)
           .single();
 
         // Legacy schema fallback: if JSONB column is missing, retry without it.
@@ -5297,7 +5429,7 @@ const updateCommissionRate = async (req, res) => {
             .from('doctor_commissions')
             .update(retryData)
             .eq('id', existingRecord.id)
-            .select()
+            .select(FINANCE_DOCTOR_COMMISSION_SELECT)
             .single();
         }
         
@@ -5307,7 +5439,7 @@ const updateCommissionRate = async (req, res) => {
         // No changes, return existing record
         const { data } = await supabaseAdmin
           .from('doctor_commissions')
-          .select('*')
+          .select(FINANCE_DOCTOR_COMMISSION_SELECT)
           .eq('id', existingRecord.id)
           .single();
         newCommission = data;
@@ -5321,7 +5453,7 @@ const updateCommissionRate = async (req, res) => {
       let result = await supabaseAdmin
         .from('doctor_commissions')
         .insert([commissionData])
-        .select()
+        .select(FINANCE_DOCTOR_COMMISSION_SELECT)
         .single();
 
       // Legacy schema fallback: if JSONB column is missing, retry without it.
@@ -5331,7 +5463,7 @@ const updateCommissionRate = async (req, res) => {
         result = await supabaseAdmin
           .from('doctor_commissions')
           .insert([retryData])
-          .select()
+          .select(FINANCE_DOCTOR_COMMISSION_SELECT)
           .single();
       }
       
@@ -5869,7 +6001,7 @@ const getPendingPayouts = async (req, res) => {
         commissionForWallet
       );
 
-      if (isPackageSession) {
+      if (isPackageSession && !commission) {
         const packageDoctorShare = getConfiguredPackageDoctorShare(session, packageMeta, cfg);
         if (packageDoctorShare > 0) {
           doctorWallet = packageDoctorShare;
@@ -6049,7 +6181,7 @@ const processPayout = async (req, res) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
-      .select()
+      .select('id, psychologist_id, payout_amount, net_payout, payout_date, status, payment_method, notes, created_at')
       .single();
 
     if (error) throw error;
@@ -6224,7 +6356,7 @@ const markPayoutAsPaid = async (req, res) => {
 
     const { data: dcRows } = await supabaseAdmin
       .from('doctor_commissions')
-      .select('*')
+      .select(FINANCE_DOCTOR_COMMISSION_SELECT)
       .eq('psychologist_id', psychologist_id)
       .order('created_at', { ascending: false });
     const activeDc = (dcRows || []).find((r) => r.is_active !== false) || (dcRows || [])[0] || null;
@@ -6300,7 +6432,7 @@ const markPayoutAsPaid = async (req, res) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
-      .select()
+      .select(FINANCE_INCOME_SELECT)
       .single();
 
     if (payoutError) {
@@ -6403,7 +6535,7 @@ const getIncome = async (req, res) => {
     let sourceTable = 'income_entries';
     let query = supabaseAdmin
       .from(sourceTable)
-      .select('*', { count: 'exact' })
+      .select(FINANCE_INCOME_SELECT, { count: 'exact' })
       .order('date', { ascending: false });
 
     if (dateFrom) query = query.gte('date', dateFrom);
@@ -6420,7 +6552,7 @@ const getIncome = async (req, res) => {
       sourceTable = 'income';
       let fallbackQuery = supabaseAdmin
         .from(sourceTable)
-        .select('*', { count: 'exact' })
+        .select(FINANCE_INCOME_SELECT, { count: 'exact' })
         .order('date', { ascending: false });
       if (dateFrom) fallbackQuery = fallbackQuery.gte('date', dateFrom);
       if (dateTo) fallbackQuery = fallbackQuery.lte('date', dateTo);
@@ -6433,7 +6565,7 @@ const getIncome = async (req, res) => {
       // Fallback if date column is missing.
       let fallbackQuery = supabaseAdmin
         .from(sourceTable)
-        .select('*', { count: 'exact' })
+        .select(FINANCE_INCOME_LEGACY_SELECT, { count: 'exact' })
         .order('created_at', { ascending: false });
       if (incomeSource) fallbackQuery = fallbackQuery.eq('income_source', incomeSource);
       fallbackQuery = fallbackQuery.range(offset, offset + parseInt(limit) - 1);
@@ -6533,7 +6665,7 @@ const createIncome = async (req, res) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
-      .select()
+      .select(FINANCE_CATEGORY_SELECT)
       .single();
 
     if (error) {
@@ -6587,7 +6719,7 @@ const getExpenseCategories = async (req, res) => {
 
     let { data: categories, error } = await supabaseAdmin
       .from('expense_categories')
-      .select('*')
+      .select(FINANCE_CATEGORY_SELECT)
       .eq('is_active', true)
       .order('name', { ascending: true });
 
@@ -6595,7 +6727,7 @@ const getExpenseCategories = async (req, res) => {
     if (error && String(error.message || '').includes('is_active')) {
       ({ data: categories, error } = await supabaseAdmin
         .from('expense_categories')
-        .select('*')
+        .select(FINANCE_CATEGORY_SELECT)
         .order('name', { ascending: true }));
     }
 
@@ -6653,7 +6785,7 @@ const createExpenseCategory = async (req, res) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
-      .select()
+      .select(FINANCE_CATEGORY_SELECT)
       .single();
 
     if (error) {
@@ -6712,14 +6844,14 @@ const getIncomeSources = async (req, res) => {
 
     let { data: sources, error } = await supabaseAdmin
       .from('income_sources')
-      .select('*')
+      .select(FINANCE_INCOME_SOURCE_SELECT)
       .eq('is_active', true)
       .order('name', { ascending: true });
 
     if (error && String(error.message || '').includes('is_active')) {
       ({ data: sources, error } = await supabaseAdmin
         .from('income_sources')
-        .select('*')
+        .select(FINANCE_INCOME_SOURCE_SELECT)
         .order('name', { ascending: true }));
     }
 
@@ -6777,7 +6909,7 @@ const createIncomeSource = async (req, res) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
-      .select()
+      .select(FINANCE_INCOME_SOURCE_SELECT)
       .single();
 
     if (error) {
@@ -6996,7 +7128,7 @@ const updateIncome = async (req, res) => {
     // Check if income entry exists
     const { data: existingIncome, error: checkError } = await supabaseAdmin
       .from('income_entries')
-      .select('*')
+      .select(FINANCE_INCOME_SELECT)
       .eq('id', incomeId)
       .single();
 
@@ -7035,7 +7167,7 @@ const updateIncome = async (req, res) => {
         .from('income_entries')
         .update(updateData)
         .eq('id', incomeId)
-        .select()
+        .select(FINANCE_INCOME_SELECT)
         .single();
       
       updatedIncome = data;
@@ -7095,7 +7227,7 @@ const deleteIncome = async (req, res) => {
     // Check if income entry exists
     const { data: existingIncome, error: checkError } = await supabaseAdmin
       .from('income_entries')
-      .select('*')
+      .select(FINANCE_INCOME_SELECT)
       .eq('id', incomeId)
       .single();
 

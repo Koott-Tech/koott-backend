@@ -1360,7 +1360,7 @@ class EmailService {
           const { generateGoogleCalendarLink, generateOutlookCalendarLink } = require('./calendarInviteGenerator');
           const calendarData = {
             clientName: clientName || 'Client',
-            psychologistName: psychologistName || 'Specialist',
+            psychologistName: psychologistName || 'Therapist',
             sessionDate: scheduledDate,
             sessionTime: scheduledTime,
             meetLink: meetLink,
@@ -1532,7 +1532,7 @@ class EmailService {
                       <div style="color: #4a5568; font-size: 15px; line-height: 1.8; margin: 0 0 30px 0;">
                         •⁠  ⁠Old: ${formattedOldDate}, ${formattedOldTime}<br>
                         •⁠  ⁠New: ${formattedNewDate}, ${formattedNewTime}<br>
-                        ${psychologistName ? `•⁠  ⁠Specialist: ${psychologistName}<br>` : ''}
+                        ${psychologistName ? `•⁠  ⁠Therapist: ${psychologistName}<br>` : ''}
                       </div>
                       
                       ${meetLink ? `
