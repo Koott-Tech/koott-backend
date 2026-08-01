@@ -60,23 +60,42 @@ function computeSessionDoctorWallet(session, dc, ch, opts) {
   if (!dc) return 0;
 
   if (isPackage) {
-    // Get total package doctor commission from doctor_commission_packages
-    // e.g. doctor_commission_packages.package_3_first_session = 600 (total for whole package)
-    // Couple packages use couple_package_3_* when configured.
     const pkgPackages = (dc.doctor_commission_packages && typeof dc.doctor_commission_packages === 'object')
       ? dc.doctor_commission_packages : {};
+
+    // Package configs store the doctor's WHOLE-package amount. Split that total
+    // equally across completed package sessions, using the caller's first/follow-up hint.
     const packageType = isCoupleSession ? `couple_package_${totalSessions}` : `package_${totalSessions}`;
     const fallbackPackageType = `package_${totalSessions}`;
-    const pkgKey = `${packageType}_first_session`;
-    const fallbackPkgKey = `${fallbackPackageType}_first_session`;
+    const isFirst = opts?.isFirstSession;
+    const firstKeys = [
+      `${packageType}_first_session`,
+      `${fallbackPackageType}_first_session`,
+      'doctor_commission_first_session_package'
+    ].filter(Boolean);
+    const followupKeys = [
+      `${packageType}_followup`,
+      `${fallbackPackageType}_followup`,
+      'doctor_commission_followup_package'
+    ].filter(Boolean);
+    const orderedKeys = isFirst === true
+      ? [...firstKeys, ...followupKeys]
+      : (isFirst === false ? [...followupKeys, ...firstKeys] : [...followupKeys, ...firstKeys]);
+
     let totalPackageCommission = parseFloat(
-      pkgPackages[pkgKey] ??
-      pkgPackages[fallbackPkgKey] ??
-      dc.doctor_commission_first_session_package ??
-      0
+      orderedKeys.reduce((value, key) => {
+        if (value != null) return value;
+        return Object.prototype.hasOwnProperty.call(pkgPackages, key) ? pkgPackages[key] : dc[key];
+      }, null) ?? 0
     );
 
-    // Fallback: derive from (package_price − company_commission) using session #1's price
+    if ((!totalPackageCommission || totalPackageCommission <= 0) && isCoupleSession) {
+      const couplePerSession = parseFloat(pkgPackages.couple_session ?? pkgPackages.cpl_session ?? dc.doctor_commission_individual ?? 0);
+      if (Number.isFinite(couplePerSession) && couplePerSession > 0) {
+        totalPackageCommission = couplePerSession * totalSessions;
+      }
+    }
+
     if ((!totalPackageCommission || totalPackageCommission <= 0) && parseFloat(s.price || 0) > 0) {
       const pkgAmts = (dc.commission_amounts && typeof dc.commission_amounts === 'object') ? dc.commission_amounts : {};
       const companyCommission = parseFloat(
@@ -84,8 +103,6 @@ function computeSessionDoctorWallet(session, dc, ch, opts) {
       );
       totalPackageCommission = Math.max(0, parseFloat(s.price) - companyCommission);
     }
-
-    // Per-session share = total ÷ session_count (rounded to whole rupees)
     return Math.max(0, Math.round(totalPackageCommission / totalSessions));
   }
 
