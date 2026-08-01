@@ -5507,6 +5507,7 @@ const getPendingPayouts = async (req, res) => {
           payment_id,
           price,
           session_count,
+          wix_payload,
           psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
@@ -5534,6 +5535,7 @@ const getPendingPayouts = async (req, res) => {
           payment_id,
           price,
           session_count,
+          wix_payload,
           psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
         `)
         .eq('status', 'completed')
@@ -5921,47 +5923,37 @@ const getPendingPayouts = async (req, res) => {
       });
     }
 
-    // Convert to array and format for frontend
-    const payouts = await Promise.all(Object.values(payoutsByDoctor).map(async (payout) => {
-      let profileSummary = null;
-      try {
-        const profilePayload = await buildDoctorFinanceProfilePayload(payout.psychologist_id, {
-          dateFrom: monthStart,
-          dateTo: monthEnd,
-          dateBasis: 'scheduled',
-        });
-        profileSummary = profilePayload?.summary || null;
-      } catch (profileError) {
-        console.error(`Failed to load unified payout summary for psychologist ${payout.psychologist_id}:`, profileError);
-      }
-
-      const pendingDoctorWallet = Math.round((profileSummary?.payout_pending ?? payout.total_doctor_wallet) * 100) / 100;
-      const companyEarnings = Math.round((profileSummary?.company_earnings ?? payout.total_company_commission) * 100) / 100;
+    // Convert to array and format for frontend. Avoid rebuilding every doctor profile here:
+    // this endpoint already has the eligible completed sessions, and the extra profile pass
+    // makes large months time out on Render.
+    const payouts = Object.values(payoutsByDoctor).map((payout) => {
+      const pendingDoctorWallet = Math.round(payout.total_doctor_wallet * 100) / 100;
+      const companyEarnings = Math.round(payout.total_company_commission * 100) / 100;
 
       return {
         id: payout.psychologist_id, // Using psychologist_id as ID for pending payouts
         psychologist_id: payout.psychologist_id,
         psychologist: payout.psychologist,
         total_sessions: payout.total_sessions,
-        profile_total_sessions: profileSummary?.total_sessions ?? null,
-        completed_sessions: profileSummary?.completed_sessions ?? payout.total_sessions,
-        upcoming_sessions: profileSummary?.upcoming_sessions ?? null,
-        cancelled_sessions: profileSummary?.cancelled_sessions ?? null,
+        profile_total_sessions: payout.total_sessions,
+        completed_sessions: payout.total_sessions,
+        upcoming_sessions: null,
+        cancelled_sessions: null,
         session_counts_by_type: payout.session_counts_by_type,
         total_doctor_wallet: pendingDoctorWallet,
         pending_payout_amount: pendingDoctorWallet,
         total_company_commission: companyEarnings,
         profile_company_earnings: companyEarnings,
-        profile_gross_revenue: profileSummary?.gross_revenue ?? null,
-        profile_doctor_earnings: profileSummary?.doctor_earnings ?? null,
-        profile_payout_paid: profileSummary?.payout_paid ?? null,
-        profile_payout_not_due: profileSummary?.payout_not_due ?? null,
+        profile_gross_revenue: pendingDoctorWallet + companyEarnings,
+        profile_doctor_earnings: pendingDoctorWallet,
+        profile_payout_paid: null,
+        profile_payout_not_due: null,
         // For backward compatibility with frontend
         total_commission: companyEarnings,
         net_payout: pendingDoctorWallet,
         session_details: payout.sessions
       };
-    }));
+    });
     
     console.log(`✅ Processed ${payouts.length} doctors with completed paid sessions`);
 
