@@ -5540,6 +5540,8 @@ const getPendingPayouts = async (req, res) => {
     }
 
     const { month, year } = req.query;
+    const includeDetails = String(req.query.includeDetails ?? 'true').toLowerCase() !== 'false';
+    const listOnly = String(req.query.listOnly ?? 'false').toLowerCase() === 'true';
     
     // Default to current month if not specified
     const today = new Date();
@@ -5609,13 +5611,16 @@ const getPendingPayouts = async (req, res) => {
 
     // Pending payouts should follow the recorded completion date so they match
     // the doctor breakdown and completed payout reconciliation.
-
-    let completedSessions = null;
-    let sessionsError = null;
-
-    ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
-      .from('sessions')
-      .select(`
+    const completedSessionSelect = listOnly
+      ? `
+        id,
+        psychologist_id,
+        session_type,
+        status,
+        completion_date,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
+      `
+      : `
         id,
         psychologist_id,
         client_id,
@@ -5633,7 +5638,88 @@ const getPendingPayouts = async (req, res) => {
         session_count,
         wix_payload,
         psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
-      `)
+      `;
+    const completedSessionFallbackSelect = listOnly
+      ? `
+        id,
+        psychologist_id,
+        session_type,
+        status,
+        completion_date,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
+      `
+      : `
+        id,
+        psychologist_id,
+        client_id,
+        session_type,
+        wix_booking_id,
+        package_id,
+        package_session_number,
+        scheduled_date,
+        completion_date,
+        created_at,
+        updated_at,
+        status,
+        payment_id,
+        price,
+        session_count,
+        wix_payload,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
+      `;
+    const completedScheduledFallbackSelect = listOnly
+      ? `
+        id,
+        psychologist_id,
+        session_type,
+        status,
+        scheduled_date,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
+      `
+      : `
+        id,
+        psychologist_id,
+        client_id,
+        session_type,
+        wix_booking_id,
+        package_id,
+        package_session_number,
+        scheduled_date,
+        created_at,
+        status,
+        payment_id,
+        price,
+        session_count,
+        wix_payload,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
+      `;
+    const notDueSessionSelect = listOnly
+      ? `
+        id,
+        psychologist_id,
+        session_type,
+        status,
+        scheduled_date,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
+      `
+      : completedSessionSelect;
+    const notDueSessionFallbackSelect = listOnly
+      ? `
+        id,
+        psychologist_id,
+        session_type,
+        status,
+        scheduled_date,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
+      `
+      : completedSessionFallbackSelect;
+
+    let completedSessions = null;
+    let sessionsError = null;
+
+    ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
+      .from('sessions')
+      .select(completedSessionSelect)
       .eq('status', 'completed')
       .gte('completion_date', monthStart)
       .lte('completion_date', monthEnd)
@@ -5643,25 +5729,7 @@ const getPendingPayouts = async (req, res) => {
     if (sessionsError && String(sessionsError.message || '').includes('cover_image_url')) {
       ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
         .from('sessions')
-        .select(`
-          id,
-          psychologist_id,
-          client_id,
-          session_type,
-          wix_booking_id,
-          package_id,
-          package_session_number,
-          scheduled_date,
-          completion_date,
-          created_at,
-          updated_at,
-          status,
-          payment_id,
-          price,
-          session_count,
-          wix_payload,
-          psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
-        `)
+        .select(completedScheduledFallbackSelect)
         .eq('status', 'completed')
         .gte('completion_date', monthStart)
         .lte('completion_date', monthEnd)
@@ -5673,23 +5741,7 @@ const getPendingPayouts = async (req, res) => {
     if (sessionsError && String(sessionsError.message || '').includes('completion_date')) {
       ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
         .from('sessions')
-        .select(`
-          id,
-          psychologist_id,
-          client_id,
-          session_type,
-          wix_booking_id,
-          package_id,
-          package_session_number,
-          scheduled_date,
-          created_at,
-          status,
-          payment_id,
-          price,
-          session_count,
-          wix_payload,
-          psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
-        `)
+        .select(completedSessionFallbackSelect)
         .eq('status', 'completed')
         .gte('scheduled_date', monthStart)
         .lte('scheduled_date', monthEnd)
@@ -5701,7 +5753,7 @@ const getPendingPayouts = async (req, res) => {
 
     // Payout eligibility is based on completion status, not payment row availability.
     const completedSessionsWithPayments = completedSessions || [];
-    if (completedSessionsWithPayments.length) {
+    if (!listOnly && completedSessionsWithPayments.length) {
       await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, completedSessionsWithPayments);
     }
 
@@ -5709,25 +5761,7 @@ const getPendingPayouts = async (req, res) => {
     let notDueError = null;
     ({ data: notDueSessions, error: notDueError } = await supabaseAdmin
       .from('sessions')
-      .select(`
-        id,
-        psychologist_id,
-        client_id,
-        session_type,
-        wix_booking_id,
-        package_id,
-        package_session_number,
-        scheduled_date,
-        completion_date,
-        created_at,
-        updated_at,
-        status,
-        payment_id,
-        price,
-        session_count,
-        wix_payload,
-        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
-      `)
+      .select(notDueSessionSelect)
       .in('status', Array.from(PENDING_SESSION_CARD_STATUSES))
       .gte('scheduled_date', monthStart)
       .lte('scheduled_date', monthEnd)
@@ -5737,25 +5771,7 @@ const getPendingPayouts = async (req, res) => {
     if (notDueError && String(notDueError.message || '').includes('cover_image_url')) {
       ({ data: notDueSessions, error: notDueError } = await supabaseAdmin
         .from('sessions')
-        .select(`
-          id,
-          psychologist_id,
-          client_id,
-          session_type,
-          wix_booking_id,
-          package_id,
-          package_session_number,
-          scheduled_date,
-          completion_date,
-          created_at,
-          updated_at,
-          status,
-          payment_id,
-          price,
-          session_count,
-          wix_payload,
-          psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
-        `)
+        .select(notDueSessionFallbackSelect)
         .in('status', Array.from(PENDING_SESSION_CARD_STATUSES))
         .gte('scheduled_date', monthStart)
         .lte('scheduled_date', monthEnd)
@@ -5766,7 +5782,7 @@ const getPendingPayouts = async (req, res) => {
     if (notDueError) throw notDueError;
 
     const visibleNotDueSessions = notDueSessions || [];
-    if (visibleNotDueSessions.length) {
+    if (!listOnly && visibleNotDueSessions.length) {
       await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, visibleNotDueSessions);
     }
 
@@ -5782,14 +5798,16 @@ const getPendingPayouts = async (req, res) => {
       let historyChunk = [];
       ({ data: historyChunk, error: commissionError } = await supabaseAdmin
         .from('commission_history')
-        .select(`
-          session_id,
-          psychologist_id,
-          session_amount,
-          commission_amount,
-          session_type,
-          payment_status
-        `)
+        .select(listOnly
+          ? 'session_id, payment_status'
+          : `
+            session_id,
+            psychologist_id,
+            session_amount,
+            commission_amount,
+            session_type,
+            payment_status
+          `)
         .in('session_id', chunk));
 
       if (commissionError && (
@@ -5888,18 +5906,92 @@ const getPendingPayouts = async (req, res) => {
       }, 'No payout sessions found for the selected month'));
     }
 
+    if (listOnly) {
+      const payoutsByDoctor = {};
+      const ensurePayout = (session, state) => {
+        const psychId = session.psychologist_id;
+        if (!payoutsByDoctor[psychId]) {
+          payoutsByDoctor[psychId] = {
+            id: psychId,
+            psychologist_id: psychId,
+            psychologist: session.psychologist,
+            payout_state: state,
+            payment_status: state,
+            has_payable_sessions: state === 'pending',
+            can_mark_paid: state === 'pending',
+            total_sessions: null,
+            profile_total_sessions: null,
+            completed_sessions: null,
+            upcoming_sessions: null,
+            cancelled_sessions: null,
+            session_counts_by_type: {},
+            total_doctor_wallet: null,
+            pending_payout_amount: null,
+            total_company_commission: null,
+            profile_company_earnings: null,
+            profile_gross_revenue: null,
+            profile_doctor_earnings: null,
+            profile_payout_paid: null,
+            profile_payout_not_due: null,
+            not_due_payout: null,
+            not_due_company_earnings: null,
+            total_commission: null,
+            net_payout: null,
+            session_details: []
+          };
+        } else if (state === 'pending') {
+          payoutsByDoctor[psychId].payout_state = 'pending';
+          payoutsByDoctor[psychId].payment_status = 'pending';
+          payoutsByDoctor[psychId].has_payable_sessions = true;
+          payoutsByDoctor[psychId].can_mark_paid = true;
+        }
+      };
+
+      unpaidNotDueSessions.forEach((session) => ensurePayout(session, 'not_due'));
+      unpaidSessions.forEach((session) => ensurePayout(session, 'pending'));
+
+      const payouts = Object.values(payoutsByDoctor).sort((a, b) => {
+        const aName = `${a.psychologist?.first_name || ''} ${a.psychologist?.last_name || ''}`.trim();
+        const bName = `${b.psychologist?.first_name || ''} ${b.psychologist?.last_name || ''}`.trim();
+        return aName.localeCompare(bName);
+      });
+
+      console.log(`✅ Listed ${payouts.length} payout doctors without finance aggregation`);
+
+      await auditLogger.logAction({
+        userId: req.user.id,
+        userEmail: req.user.email,
+        userRole,
+        action: 'FINANCE_PENDING_PAYOUTS_VIEWED',
+        resource: 'payouts',
+        endpoint: '/api/finance/payouts/pending',
+        method: 'GET',
+        ip: req.ip,
+        userAgent: req.headers['user-agent']
+      }).catch(err => console.error('Audit log error:', err));
+
+      return res.json(successResponse({
+        payouts,
+        month: targetMonth,
+        year: targetYear,
+        month_name: new Date(targetYear, targetMonth - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+      }, 'Pending payout doctors listed successfully'));
+    }
+
     // Client names for the session-level breakdown table (View Details modal).
     const pendingScopeSessions = [...unpaidSessions, ...unpaidNotDueSessions];
     const pendingClientIds = [...new Set(pendingScopeSessions.map(s => s.client_id).filter(Boolean))];
     const pendingClientNameMap = {};
-    for (let i = 0; i < pendingClientIds.length; i += 100) {
-      const { data: cRows } = await supabaseAdmin
-        .from('clients')
-        .select('id, first_name, last_name')
-        .in('id', pendingClientIds.slice(i, i + 100));
-      (cRows || []).forEach((c) => {
-        pendingClientNameMap[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
-      });
+    if (includeDetails) {
+      for (let i = 0; i < pendingClientIds.length; i += 100) {
+        const { data: cRows } = await supabaseAdmin
+          .from('clients')
+          .select('id, first_name, last_name')
+          .in('id', pendingClientIds.slice(i, i + 100));
+        (cRows || []).forEach((c) => {
+          pendingClientNameMap[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
+        });
+      }
     }
 
     const pendingClientFirstSessions = new Set();
@@ -6217,24 +6309,26 @@ const getPendingPayouts = async (req, res) => {
       doctorPayout.total_company_commission += commissionAmount;
 
       // Store session details
-      doctorPayout.sessions.push({
-        session_id: session.id,
-        session_date: session.scheduled_date,
-        client_name: pendingClientNameMap[session.client_id] || '—',
-        session_type: sessionTypeForCount,
-        session_type_label: sessionTypeLabel,
-        session_sequence: sessionSequence,
-        session_sequence_label: sessionSequenceLabel,
-        is_first_session: isClientFirstSession,
-        is_package_first_for_client: isPackageFirstForClient,
-        package_session_number: packageSessionNumber,
-        session_count: sessionCountForType,
-        session_amount: sessionAmount,
-        doctor_wallet: doctorWallet,
-        company_commission: commissionAmount,
-        status: session.status,
-        payout_status: 'pending'
-      });
+      if (includeDetails) {
+        doctorPayout.sessions.push({
+          session_id: session.id,
+          session_date: session.scheduled_date,
+          client_name: pendingClientNameMap[session.client_id] || '—',
+          session_type: sessionTypeForCount,
+          session_type_label: sessionTypeLabel,
+          session_sequence: sessionSequence,
+          session_sequence_label: sessionSequenceLabel,
+          is_first_session: isClientFirstSession,
+          is_package_first_for_client: isPackageFirstForClient,
+          package_session_number: packageSessionNumber,
+          session_count: sessionCountForType,
+          session_amount: sessionAmount,
+          doctor_wallet: doctorWallet,
+          company_commission: commissionAmount,
+          status: session.status,
+          payout_status: 'pending'
+        });
+      }
     }
 
     for (const session of unpaidNotDueSessions) {
@@ -6268,24 +6362,26 @@ const getPendingPayouts = async (req, res) => {
       doctorPayout.not_due_doctor_wallet += finance.doctorWallet;
       doctorPayout.not_due_company_commission += finance.commissionAmount;
 
-      doctorPayout.sessions.push({
-        session_id: session.id,
-        session_date: session.scheduled_date,
-        client_name: pendingClientNameMap[session.client_id] || '—',
-        session_type: sessionTypeForCount,
-        session_type_label: sessionTypeLabel,
-        session_sequence: sessionSequence,
-        session_sequence_label: sessionSequenceLabel,
-        is_first_session: isClientFirstSession,
-        is_package_first_for_client: isPackageFirstForClient,
-        package_session_number: packageSessionNumber,
-        session_count: sessionCountForType,
-        session_amount: finance.sessionAmount,
-        doctor_wallet: finance.doctorWallet,
-        company_commission: finance.commissionAmount,
-        status: session.status,
-        payout_status: 'not_due'
-      });
+      if (includeDetails) {
+        doctorPayout.sessions.push({
+          session_id: session.id,
+          session_date: session.scheduled_date,
+          client_name: pendingClientNameMap[session.client_id] || '—',
+          session_type: sessionTypeForCount,
+          session_type_label: sessionTypeLabel,
+          session_sequence: sessionSequence,
+          session_sequence_label: sessionSequenceLabel,
+          is_first_session: isClientFirstSession,
+          is_package_first_for_client: isPackageFirstForClient,
+          package_session_number: packageSessionNumber,
+          session_count: sessionCountForType,
+          session_amount: finance.sessionAmount,
+          doctor_wallet: finance.doctorWallet,
+          company_commission: finance.commissionAmount,
+          status: session.status,
+          payout_status: 'not_due'
+        });
+      }
     }
 
     // Convert to array and format for frontend. Avoid rebuilding every doctor profile here:
