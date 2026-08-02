@@ -52,16 +52,18 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
 
     const psychologistId = session.psychologist_id;
 
-    // Check if commission already calculated
-    const { data: existingCommission } = await supabaseAdmin
+    // Check if commission already calculated. Use limit(1), NOT single(): single() throws
+    // when 2+ rows already exist (data → null), which made the guard fall through and INSERT
+    // yet another duplicate. limit(1) returns the existing row(s) so a re-run is a no-op.
+    const { data: existingCommissionRows } = await supabaseAdmin
       .from('commission_history')
       .select('id')
       .eq('session_id', sessionId)
-      .single();
+      .limit(1);
 
-    if (existingCommission) {
+    if (existingCommissionRows && existingCommissionRows.length > 0) {
       console.log(`⏭️  Commission already calculated for session ${sessionId}`);
-      return existingCommission;
+      return existingCommissionRows[0];
     }
 
     // Determine session type
@@ -298,6 +300,7 @@ async function calculateAndRecordCommission(sessionId, sessionData = null) {
     } else {
       doctorWalletAmount = Math.max(0, sessionAmount - finalCommissionAmount);
     }
+
     // Net company revenue equals company commission (no GST deduction)
     const netCompanyRevenue = companyCommission;
 
