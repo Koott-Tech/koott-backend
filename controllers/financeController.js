@@ -5527,7 +5527,7 @@ const updateCommissionRate = async (req, res) => {
 /**
  * Get Pending Payouts
  * GET /api/finance/payouts/pending
- * Returns doctors with completed sessions only, grouped by month
+ * Returns doctors with payable completed sessions and visible not-yet-due sessions, grouped by month
  */
 const getPendingPayouts = async (req, res) => {
   try {
@@ -5705,6 +5705,71 @@ const getPendingPayouts = async (req, res) => {
       await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, completedSessionsWithPayments);
     }
 
+    let notDueSessions = null;
+    let notDueError = null;
+    ({ data: notDueSessions, error: notDueError } = await supabaseAdmin
+      .from('sessions')
+      .select(`
+        id,
+        psychologist_id,
+        client_id,
+        session_type,
+        wix_booking_id,
+        package_id,
+        package_session_number,
+        scheduled_date,
+        completion_date,
+        created_at,
+        updated_at,
+        status,
+        payment_id,
+        price,
+        session_count,
+        wix_payload,
+        psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone, cover_image_url)
+      `)
+      .in('status', Array.from(PENDING_SESSION_CARD_STATUSES))
+      .gte('scheduled_date', monthStart)
+      .lte('scheduled_date', monthEnd)
+      .not('psychologist_id', 'is', null)
+      .neq('session_type', 'free_assessment'));
+
+    if (notDueError && String(notDueError.message || '').includes('cover_image_url')) {
+      ({ data: notDueSessions, error: notDueError } = await supabaseAdmin
+        .from('sessions')
+        .select(`
+          id,
+          psychologist_id,
+          client_id,
+          session_type,
+          wix_booking_id,
+          package_id,
+          package_session_number,
+          scheduled_date,
+          completion_date,
+          created_at,
+          updated_at,
+          status,
+          payment_id,
+          price,
+          session_count,
+          wix_payload,
+          psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name, email, phone)
+        `)
+        .in('status', Array.from(PENDING_SESSION_CARD_STATUSES))
+        .gte('scheduled_date', monthStart)
+        .lte('scheduled_date', monthEnd)
+        .not('psychologist_id', 'is', null)
+        .neq('session_type', 'free_assessment'));
+    }
+
+    if (notDueError) throw notDueError;
+
+    const visibleNotDueSessions = notDueSessions || [];
+    if (visibleNotDueSessions.length) {
+      await hydrateSessionsWixPayloadFromMirror(supabaseAdmin, visibleNotDueSessions);
+    }
+
     if (sessionsError) throw sessionsError;
     
     // Get commission_history for these completed sessions
@@ -5752,7 +5817,11 @@ const getPendingPayouts = async (req, res) => {
 
     // Check if there are any payouts for any psychologists in this month
     // If a payout exists for a psychologist, all sessions for that psychologist in that month should be excluded
-    const psychologistIds = [...new Set(completedSessionsWithPayments.map(s => s.psychologist_id).filter(Boolean))];
+    const psychologistIds = [...new Set(
+      [...completedSessionsWithPayments, ...visibleNotDueSessions]
+        .map(s => s.psychologist_id)
+        .filter(Boolean)
+    )];
     
     let paidPsychologistIds = new Set();
     if (psychologistIds.length > 0) {
@@ -5794,10 +5863,12 @@ const getPendingPayouts = async (req, res) => {
     const unpaidSessions = completedSessionsWithPayments.filter(s => 
       !paidSessionIds.has(s.id) && !paidPsychologistIds.has(s.psychologist_id)
     );
-    
-    console.log(`📊 Found ${unpaidSessions.length} unpaid completed sessions (${completedSessionsWithPayments.length} total) for ${targetMonth}/${targetYear}`);
 
-    if (!unpaidSessions || unpaidSessions.length === 0) {
+    const unpaidNotDueSessions = visibleNotDueSessions.filter(s => !paidPsychologistIds.has(s.psychologist_id));
+    
+    console.log(`📊 Found ${unpaidSessions.length} unpaid completed sessions and ${unpaidNotDueSessions.length} not-yet-due sessions for ${targetMonth}/${targetYear}`);
+
+    if ((!unpaidSessions || unpaidSessions.length === 0) && (!unpaidNotDueSessions || unpaidNotDueSessions.length === 0)) {
       await auditLogger.logAction({
         userId: req.user.id,
         userEmail: req.user.email,
@@ -5814,11 +5885,12 @@ const getPendingPayouts = async (req, res) => {
         payouts: [],
         month: targetMonth,
         year: targetYear
-      }, 'No completed sessions found for the selected month'));
+      }, 'No payout sessions found for the selected month'));
     }
 
     // Client names for the session-level breakdown table (View Details modal).
-    const pendingClientIds = [...new Set(unpaidSessions.map(s => s.client_id).filter(Boolean))];
+    const pendingScopeSessions = [...unpaidSessions, ...unpaidNotDueSessions];
+    const pendingClientIds = [...new Set(pendingScopeSessions.map(s => s.client_id).filter(Boolean))];
     const pendingClientNameMap = {};
     for (let i = 0; i < pendingClientIds.length; i += 100) {
       const { data: cRows } = await supabaseAdmin
@@ -5877,7 +5949,7 @@ const getPendingPayouts = async (req, res) => {
     }
 
     // Get package types for package sessions
-    const packageIds = [...new Set(unpaidSessions.map(s => s.package_id).filter(Boolean))];
+    const packageIds = [...new Set(pendingScopeSessions.map(s => s.package_id).filter(Boolean))];
     let packagesMap = {};
     if (packageIds.length > 0) {
       const { data: packages } = await supabaseAdmin
@@ -5910,7 +5982,7 @@ const getPendingPayouts = async (req, res) => {
     });
 
     // Commission fallback config per doctor (when commission_history row is missing).
-    const pendingPsychIds = [...new Set(unpaidSessions.map(s => s.psychologist_id).filter(Boolean))];
+    const pendingPsychIds = [...new Set(pendingScopeSessions.map(s => s.psychologist_id).filter(Boolean))];
     const commissionConfigMap = {};
     if (pendingPsychIds.length > 0) {
       let commissionCfgRows = [];
@@ -5944,6 +6016,114 @@ const getPendingPayouts = async (req, res) => {
 
     // Group by psychologist
     const payoutsByDoctor = {};
+
+    const ensureDoctorPayout = (session) => {
+      const psychId = session.psychologist_id;
+      if (!payoutsByDoctor[psychId]) {
+        payoutsByDoctor[psychId] = {
+          psychologist_id: psychId,
+          psychologist: session.psychologist,
+          total_sessions: 0,
+          completed_sessions: 0,
+          upcoming_sessions: 0,
+          session_counts_by_type: {},
+          total_doctor_wallet: 0,
+          total_company_commission: 0,
+          not_due_doctor_wallet: 0,
+          not_due_company_commission: 0,
+          sessions: []
+        };
+      }
+      return payoutsByDoctor[psychId];
+    };
+
+    const getPendingSessionFinance = (session, commission, rateIsFirstSession, psychId) => {
+      const cfg = commissionConfigMap[psychId] || null;
+      const isPackageSession =
+        !!session.package_id ||
+        (parseInt(session.session_count, 10) || 1) > 1 ||
+        String(session.session_type || '').toLowerCase().includes('package');
+      const packageMeta = isPackageSession ? packagesMap[session.package_id] : null;
+      const resolvedSessionCount = Math.max(
+        1,
+        parseInt(session.session_count || packageMeta?.session_count, 10) || 1
+      );
+      const packageTypeForMoney = isPackageSession
+        ? getFinancePackageType(session, packageMeta)
+        : null;
+
+      let sessionAmount = parseFloat(commission?.session_amount ?? session.price ?? 0) || 0;
+      let commissionAmount = parseFloat(commission?.commission_amount ?? 0) || 0;
+      const commissionForWallet =
+        isPackageSession && sessionAmount <= 0
+          ? null
+          : (commission || null);
+      let doctorWallet = computeSessionDoctorWallet(
+        { ...session, session_count: resolvedSessionCount },
+        cfg,
+        commissionForWallet,
+        { isFirstSession: rateIsFirstSession }
+      );
+
+      if (isPackageSession && !commission) {
+        const packageDoctorShare = getConfiguredPackageDoctorShare(session, packageMeta, cfg, rateIsFirstSession);
+        if (packageDoctorShare > 0) {
+          doctorWallet = packageDoctorShare;
+        }
+        if (sessionAmount > 0) {
+          commissionAmount = Math.max(0, sessionAmount - doctorWallet);
+        }
+      }
+
+      if (isPackageSession && sessionAmount <= 0) {
+        const amountConfig = cfg?.commission_amounts && typeof cfg.commission_amounts === 'object'
+          ? cfg.commission_amounts
+          : null;
+        const totalCompanyPackageCommission = parseFloat(
+          amountConfig?.[packageTypeForMoney] ??
+          amountConfig?.[packageMeta?.package_type || `package_${resolvedSessionCount}`] ??
+          amountConfig?.package ??
+          cfg?.commission_amount_package ??
+          0
+        ) || 0;
+        commissionAmount = totalCompanyPackageCommission / resolvedSessionCount;
+        sessionAmount = doctorWallet + commissionAmount;
+      } else if (!isPackageSession) {
+        const isCoupleSession = String(session.session_type || '').toLowerCase().includes('couple') ||
+          String(session.session_type || '').toLowerCase().includes('cpl');
+        doctorWallet = sessionAmount > 0
+          ? doctorWallet
+          : (isCoupleSession
+            ? getConfiguredCoupleDoctorShare(cfg)
+            : computeSessionDoctorWallet(session, cfg, commission || null));
+        commissionAmount = sessionAmount > 0
+          ? commissionAmount
+          : Math.max(0, sessionAmount - doctorWallet);
+      }
+
+      return { sessionAmount, doctorWallet, commissionAmount };
+    };
+
+    const getSessionTypeMeta = (session) => {
+      let sessionTypeForCount = 'individual';
+      const sessionCountForType = parseInt(session.session_count, 10) || 1;
+      if (session.package_id || sessionCountForType > 1 || String(session.session_type || '').toLowerCase().includes('package')) {
+        const pkg = packagesMap[session.package_id];
+        sessionTypeForCount = getFinancePackageType(session, pkg);
+      }
+      const packageSessionNumber = parseInt(session.package_session_number, 10) || null;
+      const sessionTypeLabel = sessionTypeForCount.startsWith('couple_package_')
+          ? `Couple Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('couple_package_', '')}`
+        : sessionTypeForCount.startsWith('package_')
+          ? `Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('package_', '')}`
+        : (sessionTypeForCount === 'package_unknown'
+          ? `Package${packageSessionNumber ? ` (${packageSessionNumber}/${sessionCountForType || '?'})` : ''}`
+          : (isCoupleSessionLike(session)
+            ? 'Couple'
+            : 'Individual'));
+
+      return { sessionTypeForCount, sessionTypeLabel, packageSessionNumber, sessionCountForType };
+    };
     
     // Use for...of loop instead of forEach to support await
     for (const session of unpaidSessions) {
@@ -6010,114 +6190,34 @@ const getPendingPayouts = async (req, res) => {
         continue;
       }
 
-      if (!payoutsByDoctor[psychId]) {
-        payoutsByDoctor[psychId] = {
-          psychologist_id: psychId,
-          psychologist: session.psychologist,
-          total_sessions: 0,
-          session_counts_by_type: {},
-          total_doctor_wallet: 0,
-          total_company_commission: 0,
-          sessions: []
-        };
-      }
+      const doctorPayout = ensureDoctorPayout(session);
 
       // Determine session type for counting
-      let sessionTypeForCount = 'individual';
-      const sessionCountForType = parseInt(session.session_count, 10) || 1;
-      if (session.package_id || sessionCountForType > 1 || String(session.session_type || '').toLowerCase().includes('package')) {
-        const pkg = packagesMap[session.package_id];
-        sessionTypeForCount = getFinancePackageType(session, pkg);
-      }
-      const packageSessionNumber = parseInt(session.package_session_number, 10) || null;
-      const sessionTypeLabel = sessionTypeForCount.startsWith('couple_package_')
-          ? `Couple Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('couple_package_', '')}`
-        : sessionTypeForCount.startsWith('package_')
-          ? `Package ${packageSessionNumber ? `${packageSessionNumber}/${sessionCountForType}` : String(sessionTypeForCount).replace('package_', '')}`
-        : (sessionTypeForCount === 'package_unknown'
-          ? `Package${packageSessionNumber ? ` (${packageSessionNumber}/${sessionCountForType || '?'})` : ''}`
-          : (isCoupleSessionLike(session)
-            ? 'Couple'
-            : 'Individual'));
+      const {
+        sessionTypeForCount,
+        sessionTypeLabel,
+        packageSessionNumber,
+        sessionCountForType
+      } = getSessionTypeMeta(session);
 
       // Update counts
-      payoutsByDoctor[psychId].total_sessions += 1;
-      if (!payoutsByDoctor[psychId].session_counts_by_type[sessionTypeForCount]) {
-        payoutsByDoctor[psychId].session_counts_by_type[sessionTypeForCount] = 0;
+      doctorPayout.total_sessions += 1;
+      doctorPayout.completed_sessions += 1;
+      if (!doctorPayout.session_counts_by_type[sessionTypeForCount]) {
+        doctorPayout.session_counts_by_type[sessionTypeForCount] = 0;
       }
-      payoutsByDoctor[psychId].session_counts_by_type[sessionTypeForCount] += 1;
+      doctorPayout.session_counts_by_type[sessionTypeForCount] += 1;
 
       // Calculate per-session financial split.
       // Package follow-up rows often have price/session_amount = 0 in the DB, but
       // payout math must still show their allocated share of the package totals.
-      const cfg = commissionConfigMap[psychId] || null;
-      const isPackageSession =
-        !!session.package_id ||
-        (parseInt(session.session_count, 10) || 1) > 1 ||
-        String(session.session_type || '').toLowerCase().includes('package');
-      const packageMeta = isPackageSession ? packagesMap[session.package_id] : null;
-      const resolvedSessionCount = Math.max(
-        1,
-        parseInt(session.session_count || packageMeta?.session_count, 10) || 1
-      );
-      const packageTypeForMoney = isPackageSession
-        ? getFinancePackageType(session, packageMeta)
-        : null;
+      const { sessionAmount, doctorWallet, commissionAmount } = getPendingSessionFinance(session, commission, rateIsFirstSession, psychId);
 
-      let sessionAmount = parseFloat(commission?.session_amount ?? session.price ?? 0) || 0;
-      let commissionAmount = parseFloat(commission?.commission_amount ?? 0) || 0;
-      const commissionForWallet =
-        isPackageSession && sessionAmount <= 0
-          ? null
-          : (commission || null);
-      let doctorWallet = computeSessionDoctorWallet(
-        { ...session, session_count: resolvedSessionCount },
-        cfg,
-        commissionForWallet,
-        { isFirstSession: rateIsFirstSession }
-      );
-
-      if (isPackageSession && !commission) {
-        const packageDoctorShare = getConfiguredPackageDoctorShare(session, packageMeta, cfg, rateIsFirstSession);
-        if (packageDoctorShare > 0) {
-          doctorWallet = packageDoctorShare;
-        }
-        if (sessionAmount > 0) {
-          commissionAmount = Math.max(0, sessionAmount - doctorWallet);
-        }
-      }
-
-      if (isPackageSession && sessionAmount <= 0) {
-        const amountConfig = cfg?.commission_amounts && typeof cfg.commission_amounts === 'object'
-          ? cfg.commission_amounts
-          : null;
-        const totalCompanyPackageCommission = parseFloat(
-          amountConfig?.[packageTypeForMoney] ??
-          amountConfig?.[packageMeta?.package_type || `package_${resolvedSessionCount}`] ??
-          amountConfig?.package ??
-          cfg?.commission_amount_package ??
-          0
-        ) || 0;
-        commissionAmount = totalCompanyPackageCommission / resolvedSessionCount;
-        sessionAmount = doctorWallet + commissionAmount;
-      } else if (!isPackageSession) {
-        const isCoupleSession = String(session.session_type || '').toLowerCase().includes('couple') ||
-          String(session.session_type || '').toLowerCase().includes('cpl');
-        doctorWallet = sessionAmount > 0
-          ? doctorWallet
-          : (isCoupleSession
-            ? getConfiguredCoupleDoctorShare(cfg)
-            : computeSessionDoctorWallet(session, cfg, commission || null));
-        commissionAmount = sessionAmount > 0
-          ? commissionAmount
-          : Math.max(0, sessionAmount - doctorWallet);
-      }
-
-      payoutsByDoctor[psychId].total_doctor_wallet += doctorWallet;
-      payoutsByDoctor[psychId].total_company_commission += commissionAmount;
+      doctorPayout.total_doctor_wallet += doctorWallet;
+      doctorPayout.total_company_commission += commissionAmount;
 
       // Store session details
-      payoutsByDoctor[psychId].sessions.push({
+      doctorPayout.sessions.push({
         session_id: session.id,
         session_date: session.scheduled_date,
         client_name: pendingClientNameMap[session.client_id] || '—',
@@ -6131,7 +6231,60 @@ const getPendingPayouts = async (req, res) => {
         session_count: sessionCountForType,
         session_amount: sessionAmount,
         doctor_wallet: doctorWallet,
-        company_commission: commissionAmount
+        company_commission: commissionAmount,
+        status: session.status,
+        payout_status: 'pending'
+      });
+    }
+
+    for (const session of unpaidNotDueSessions) {
+      const psychId = session.psychologist_id;
+      const doctorPayout = ensureDoctorPayout(session);
+      const isPackageForRate =
+        !!session.package_id ||
+        (parseInt(session.session_count, 10) || 1) > 1 ||
+        String(session.session_type || '').toLowerCase().includes('package');
+      const isClientFirstSession = pendingClientFirstSessions.has(session.id);
+      const isPackageFirstForClient = isPackageForRate
+        ? (session.package_id ? pendingFirstPackages.has(session.package_id) : isClientFirstSession)
+        : false;
+      const rateIsFirstSession = isPackageForRate ? isPackageFirstForClient : isClientFirstSession;
+      const sessionSequence = rateIsFirstSession ? 'first' : 'followup';
+      const sessionSequenceLabel = rateIsFirstSession ? 'First' : 'Follow-up';
+      const {
+        sessionTypeForCount,
+        sessionTypeLabel,
+        packageSessionNumber,
+        sessionCountForType
+      } = getSessionTypeMeta(session);
+      const finance = getPendingSessionFinance(session, null, rateIsFirstSession, psychId);
+
+      doctorPayout.total_sessions += 1;
+      doctorPayout.upcoming_sessions += 1;
+      if (!doctorPayout.session_counts_by_type[sessionTypeForCount]) {
+        doctorPayout.session_counts_by_type[sessionTypeForCount] = 0;
+      }
+      doctorPayout.session_counts_by_type[sessionTypeForCount] += 1;
+      doctorPayout.not_due_doctor_wallet += finance.doctorWallet;
+      doctorPayout.not_due_company_commission += finance.commissionAmount;
+
+      doctorPayout.sessions.push({
+        session_id: session.id,
+        session_date: session.scheduled_date,
+        client_name: pendingClientNameMap[session.client_id] || '—',
+        session_type: sessionTypeForCount,
+        session_type_label: sessionTypeLabel,
+        session_sequence: sessionSequence,
+        session_sequence_label: sessionSequenceLabel,
+        is_first_session: isClientFirstSession,
+        is_package_first_for_client: isPackageFirstForClient,
+        package_session_number: packageSessionNumber,
+        session_count: sessionCountForType,
+        session_amount: finance.sessionAmount,
+        doctor_wallet: finance.doctorWallet,
+        company_commission: finance.commissionAmount,
+        status: session.status,
+        payout_status: 'not_due'
       });
     }
 
@@ -6141,6 +6294,9 @@ const getPendingPayouts = async (req, res) => {
     const payouts = Object.values(payoutsByDoctor).map((payout) => {
       const pendingDoctorWallet = Math.round(payout.total_doctor_wallet * 100) / 100;
       const companyEarnings = Math.round(payout.total_company_commission * 100) / 100;
+      const notDueDoctorWallet = Math.round(payout.not_due_doctor_wallet * 100) / 100;
+      const notDueCompanyEarnings = Math.round(payout.not_due_company_commission * 100) / 100;
+      const payoutState = pendingDoctorWallet > 0 ? 'pending' : 'not_due';
 
       return {
         id: payout.psychologist_id, // Using psychologist_id as ID for pending payouts
@@ -6148,18 +6304,22 @@ const getPendingPayouts = async (req, res) => {
         psychologist: payout.psychologist,
         total_sessions: payout.total_sessions,
         profile_total_sessions: payout.total_sessions,
-        completed_sessions: payout.total_sessions,
-        upcoming_sessions: null,
+        completed_sessions: payout.completed_sessions,
+        upcoming_sessions: payout.upcoming_sessions,
         cancelled_sessions: null,
         session_counts_by_type: payout.session_counts_by_type,
         total_doctor_wallet: pendingDoctorWallet,
         pending_payout_amount: pendingDoctorWallet,
         total_company_commission: companyEarnings,
-        profile_company_earnings: companyEarnings,
-        profile_gross_revenue: pendingDoctorWallet + companyEarnings,
+        profile_company_earnings: companyEarnings + notDueCompanyEarnings,
+        profile_gross_revenue: pendingDoctorWallet + companyEarnings + notDueDoctorWallet + notDueCompanyEarnings,
         profile_doctor_earnings: pendingDoctorWallet,
         profile_payout_paid: null,
-        profile_payout_not_due: null,
+        profile_payout_not_due: notDueDoctorWallet,
+        not_due_payout: notDueDoctorWallet,
+        not_due_company_earnings: notDueCompanyEarnings,
+        payout_state: payoutState,
+        payment_status: payoutState,
         // For backward compatibility with frontend
         total_commission: companyEarnings,
         net_payout: pendingDoctorWallet,
@@ -6167,7 +6327,7 @@ const getPendingPayouts = async (req, res) => {
       };
     });
     
-    console.log(`✅ Processed ${payouts.length} doctors with completed paid sessions`);
+    console.log(`✅ Processed ${payouts.length} doctors with pending/not-yet-due payout sessions`);
 
     await auditLogger.logAction({
       userId: req.user.id,
