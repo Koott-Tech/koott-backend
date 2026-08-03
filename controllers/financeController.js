@@ -4431,6 +4431,7 @@ const getCommissions = async (req, res) => {
     }
 
     const { psychologistId, month, year, dateFrom, dateTo } = req.query;
+    const listOnly = String(req.query.listOnly ?? 'false').toLowerCase() === 'true';
     const doctorDateBasis = parseFinanceDoctorDateBasis(req.query);
 
     const commissionBookingTimeCol = await getBookingTimeColumnKey(supabaseAdmin);
@@ -4561,56 +4562,6 @@ const getCommissions = async (req, res) => {
       }
     }
 
-    // ─── SINGLE QUERY: all fields use scheduled_date ──────────────────────────
-    // Total Sessions = all sessions scheduled this month
-    // Completed      = sessions scheduled this month that are completed
-    // Pending        = sessions scheduled this month that are still pending
-    // Company Commission + Payouts = all from the same scheduled-this-month set
-    // This ensures: Completed + Pending = Total (always consistent)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    const sessionSelectFields = `id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, completion_date, ${commSessionsBcf} wix_payload, source, package_session_number, session_count`;
-
-    // Derive view-month IST date boundaries
-    let viewMonthStart = null;
-    let viewMonthEnd = null;
-    if (dateFrom && dateTo) {
-      viewMonthStart = dateFrom;
-      viewMonthEnd = dateTo;
-    } else if (month && year) {
-      viewMonthStart = `${year}-${String(month).padStart(2, '0')}-01`;
-      viewMonthEnd   = `${year}-${String(month).padStart(2, '0')}-31`;
-    }
-
-    // Single query: sessions scheduled within the view month
-    let allSessionsQuery = supabaseAdmin
-      .from('sessions')
-      .select(sessionSelectFields)
-      .not('psychologist_id', 'is', null)
-      .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
-
-    if (viewMonthStart && viewMonthEnd) {
-      allSessionsQuery = allSessionsQuery
-        .gte('scheduled_date', viewMonthStart)
-        .lte('scheduled_date', viewMonthEnd);
-    } else if (month && year) {
-      const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-      const endDate   = `${year}-${String(month).padStart(2, '0')}-31`;
-      allSessionsQuery = allSessionsQuery
-        .gte('scheduled_date', startDate)
-        .lte('scheduled_date', endDate);
-    }
-
-    const { data: allSessions } = await allSessionsQuery;
-    const bookedSessionIds = new Set((allSessions || []).map(s => s.id));
-
-    // No separate completed/pending queries needed — all come from allSessions
-    const completedThisMonth = [];
-    const pendingThisMonth = [];
-
-
-
     // Get commission rates for all psychologists
     let commissions = [];
     if (allPsychologistIds.length > 0) {
@@ -4670,6 +4621,195 @@ const getCommissions = async (req, res) => {
         }
       }
     });
+
+    // Build commissions map before any fast return; list-only pages still need edit config.
+    const commissionsMap = {};
+    commissions?.forEach(c => {
+      if (c.psychologist_id) {
+        commissionsMap[c.psychologist_id] = c;
+      }
+    });
+
+    if (listOnly) {
+      const fastCommissions = (psychologists || []).map((psych) => {
+        const commission = commissionsMap[psych.id];
+        const commissionAmounts = commissionAmountsMap[psych.id] || {};
+        const packages = packagePricesMap[psych.id] || [];
+        const individualSessionPrice =
+          parseFloat(psych.individual_session_price ?? individualPriceMap[psych.id] ?? 0) || 0;
+        const packageCommissions = packages.map(pkg => ({
+          ...pkg,
+          commission_amount: parseFloat(commissionAmounts[pkg.type] || commissionAmounts.package || 0)
+        }));
+        const commissionRecord = commissionRecordsMap[psych.id] || {};
+        const companyIndividualCommission = parseFloat(commissionAmounts.individual || 0) || 0;
+        const effectiveDoctorFirstIndividual =
+          (commissionRecord.doctor_commission_first_session !== null && commissionRecord.doctor_commission_first_session !== undefined)
+            ? parseFloat(commissionRecord.doctor_commission_first_session) || 0
+            : Math.max(0, individualSessionPrice - companyIndividualCommission);
+        const effectiveDoctorFollowupIndividual =
+          (commissionRecord.doctor_commission_followup !== null && commissionRecord.doctor_commission_followup !== undefined)
+            ? parseFloat(commissionRecord.doctor_commission_followup) || 0
+            : effectiveDoctorFirstIndividual;
+        const doctorCommissionPackages = commissionRecord.doctor_commission_packages || {};
+        const effectivePackageCommissions = packageCommissions.map((pkg) => {
+          const packageType = pkg.type || 'package';
+          const firstKey = `${packageType}_first_session`;
+          const followupKey = `${packageType}_followup`;
+          const pkgPrice = parseFloat(pkg.price || 0) || 0;
+          const companyPkgCommission = parseFloat(pkg.commission_amount || 0) || 0;
+          const defaultDoctorForPkg = Math.max(0, pkgPrice - companyPkgCommission);
+          return {
+            ...pkg,
+            doctor_commission_first_session:
+              (doctorCommissionPackages[firstKey] !== null && doctorCommissionPackages[firstKey] !== undefined)
+                ? parseFloat(doctorCommissionPackages[firstKey]) || 0
+                : (
+                  (commissionRecord.doctor_commission_first_session_package !== null && commissionRecord.doctor_commission_first_session_package !== undefined)
+                    ? parseFloat(commissionRecord.doctor_commission_first_session_package) || 0
+                    : defaultDoctorForPkg
+                ),
+            doctor_commission_followup:
+              (doctorCommissionPackages[followupKey] !== null && doctorCommissionPackages[followupKey] !== undefined)
+                ? parseFloat(doctorCommissionPackages[followupKey]) || 0
+                : (
+                  (commissionRecord.doctor_commission_followup_package !== null && commissionRecord.doctor_commission_followup_package !== undefined)
+                    ? parseFloat(commissionRecord.doctor_commission_followup_package) || 0
+                    : defaultDoctorForPkg
+                )
+          };
+        });
+
+        return {
+          psychologist_id: psych.id,
+          is_fast_list: true,
+          commission_amounts: commissionAmounts,
+          commission_amount_individual: commissionAmounts.individual || 0,
+          commission_amount_package: commissionAmounts.package || 0,
+          doctor_commission_first_session: effectiveDoctorFirstIndividual,
+          doctor_commission_followup: effectiveDoctorFollowupIndividual,
+          doctor_commission_couple:
+            (doctorCommissionPackages.couple_session !== null && doctorCommissionPackages.couple_session !== undefined)
+              ? parseFloat(doctorCommissionPackages.couple_session) || 0
+              : (
+                (doctorCommissionPackages.cpl_session !== null && doctorCommissionPackages.cpl_session !== undefined)
+                  ? parseFloat(doctorCommissionPackages.cpl_session) || 0
+                  : null
+              ),
+          doctor_commission_individual: commissionRecord.doctor_commission_individual || null,
+          doctor_commission_first_session_package:
+            (commissionRecord.doctor_commission_first_session_package !== null && commissionRecord.doctor_commission_first_session_package !== undefined)
+              ? parseFloat(commissionRecord.doctor_commission_first_session_package) || 0
+              : null,
+          doctor_commission_followup_package:
+            (commissionRecord.doctor_commission_followup_package !== null && commissionRecord.doctor_commission_followup_package !== undefined)
+              ? parseFloat(commissionRecord.doctor_commission_followup_package) || 0
+              : null,
+          doctor_commission_packages: doctorCommissionPackages,
+          package_commissions: effectivePackageCommissions,
+          total_sessions: null,
+          total_sessions_finance: null,
+          pending_sessions: null,
+          upcoming_sessions: null,
+          completed_sessions: null,
+          cancelled_sessions: null,
+          total_revenue: null,
+          gross_revenue: null,
+          total_commission_to_company: null,
+          company_earnings: null,
+          total_to_doctor_wallet: null,
+          doctor_earnings: null,
+          pending_payout: null,
+          payout_pending: null,
+          completed_payout: null,
+          payout_paid: null,
+          not_due_payout: null,
+          payout_not_due: null,
+          monthly_breakdown: [],
+          individual_session_price: individualSessionPrice,
+          package_prices: packages,
+          average_individual_price: null,
+          average_package_price: null,
+          psychologist: {
+            id: psych.id,
+            first_name: psych.first_name,
+            last_name: psych.last_name,
+            email: psych.email,
+            experience_years: psych.experience_years,
+            cover_image_url: psych.cover_image_url
+          }
+        };
+      });
+
+      await auditLogger.logAction({
+        userId: req.user.id,
+        userEmail: req.user.email,
+        userRole,
+        action: 'FINANCE_COMMISSIONS_VIEWED',
+        resource: 'commissions',
+        endpoint: '/api/finance/commissions',
+        method: 'GET',
+        details: { filters: req.query, listOnly: true },
+        ip: req.ip,
+        userAgent: req.headers['user-agent']
+      }).catch(err => console.error('Audit log error:', err));
+
+      return res.json(successResponse({
+        commissions: fastCommissions,
+        filters: {
+          dateBasis: doctorDateBasis,
+          ...(dateFrom && dateTo ? { dateFrom, dateTo } : {}),
+          listOnly: true,
+        },
+      }, 'Doctors listed successfully'));
+    }
+
+    // ─── SINGLE QUERY: all fields use scheduled_date ──────────────────────────
+    // Total Sessions = all sessions scheduled this month
+    // Completed      = sessions scheduled this month that are completed
+    // Pending        = sessions scheduled this month that are still pending
+    // Company Commission + Payouts = all from the same scheduled-this-month set
+    // This ensures: Completed + Pending = Total (always consistent)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const sessionSelectFields = `id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, status, created_at, completion_date, ${commSessionsBcf} wix_payload, source, package_session_number, session_count`;
+
+    // Derive view-month IST date boundaries
+    let viewMonthStart = null;
+    let viewMonthEnd = null;
+    if (dateFrom && dateTo) {
+      viewMonthStart = dateFrom;
+      viewMonthEnd = dateTo;
+    } else if (month && year) {
+      viewMonthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+      viewMonthEnd   = `${year}-${String(month).padStart(2, '0')}-31`;
+    }
+
+    // Single query: sessions scheduled within the view month
+    let allSessionsQuery = supabaseAdmin
+      .from('sessions')
+      .select(sessionSelectFields)
+      .not('psychologist_id', 'is', null)
+      .neq('session_type', 'free_assessment')
+      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
+
+    if (viewMonthStart && viewMonthEnd) {
+      allSessionsQuery = allSessionsQuery
+        .gte('scheduled_date', viewMonthStart)
+        .lte('scheduled_date', viewMonthEnd);
+    } else if (month && year) {
+      const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+      const endDate   = `${year}-${String(month).padStart(2, '0')}-31`;
+      allSessionsQuery = allSessionsQuery
+        .gte('scheduled_date', startDate)
+        .lte('scheduled_date', endDate);
+    }
+
+    const { data: allSessions } = await allSessionsQuery;
+
+    // No separate completed/pending queries needed — all come from allSessions
+    const completedThisMonth = [];
+    const pendingThisMonth = [];
     
     // Get commission history for sessions across ALL three queries
     const allSessionIds = new Set([
@@ -4686,14 +4826,6 @@ const getCommissions = async (req, res) => {
         .in('session_id', sessionIds);
       commissionHistory = history || [];
     }
-
-    // Build commissions map
-    const commissionsMap = {};
-    commissions?.forEach(c => {
-      if (c.psychologist_id) {
-        commissionsMap[c.psychologist_id] = c;
-      }
-    });
 
     // Build commission history map by session_id
     const commissionHistoryMap = {};
