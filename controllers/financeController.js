@@ -2070,7 +2070,7 @@ const getDoctorPayouts = async (req, res) => {
     if (status === 'completed') {
       allSessionsQuery = allSessionsQuery.eq('status', 'completed');
       if (dateFrom && dateTo) {
-        allSessionsQuery = allSessionsQuery.gte('completion_date', dateFrom).lte('completion_date', dateTo);
+        allSessionsQuery = allSessionsQuery.gte('scheduled_date', dateFrom).lte('scheduled_date', dateTo);
       }
     } else if (status === 'pending' && dateFrom && dateTo) {
       allSessionsQuery = allSessionsQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`).lte('created_at', `${dateTo}T23:59:59.999+05:30`);
@@ -2241,10 +2241,13 @@ const getDoctorPayouts = async (req, res) => {
           shouldInclude = true;
         }
       } else if (status === 'completed') {
-        // Completed payouts must be both completed in-range and actually marked paid.
-        const completionDate = s.completion_date || s.original_scheduled_date || s.scheduled_date;
+        // Completed payouts must be both in-range and actually marked paid. Range is keyed on
+        // the SESSION date (when the work happened), matching the pending side — keying it on
+        // completion_date made a session drift into a different month purely because the
+        // therapist marked it complete late.
+        const payoutDate = s.scheduled_date || s.original_scheduled_date || s.completion_date;
         const payoutStatus = String(historyRecord?.payment_status || '').toLowerCase();
-        if (isCompleted && payoutStatus === 'paid' && completionDate && isInDateRange(completionDate)) {
+        if (isCompleted && payoutStatus === 'paid' && payoutDate && isInDateRange(payoutDate)) {
           shouldInclude = true;
         }
       } else {
@@ -5864,8 +5867,12 @@ const getPendingPayouts = async (req, res) => {
       .from('sessions')
       .select(completedSessionSelect)
       .eq('status', 'completed')
-      .gte('completion_date', monthStart)
-      .lte('completion_date', monthEnd)
+      // Window by scheduled_date — the month the session actually HAPPENED. completion_date
+      // only records when someone clicked "complete", so a 24 Jul session marked complete on
+      // 2 Aug was pushed into August's payout and July under-paid. scheduled_date is also
+      // always set, unlike completion_date (NULL on 49 of July's completed sessions).
+      .gte('scheduled_date', monthStart)
+      .lte('scheduled_date', monthEnd)
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment'));
 
@@ -5874,8 +5881,8 @@ const getPendingPayouts = async (req, res) => {
         .from('sessions')
         .select(completedScheduledFallbackSelect)
         .eq('status', 'completed')
-        .gte('completion_date', monthStart)
-        .lte('completion_date', monthEnd)
+        .gte('scheduled_date', monthStart)
+        .lte('scheduled_date', monthEnd)
         .not('psychologist_id', 'is', null)
         .neq('session_type', 'free_assessment'));
     }
@@ -6790,7 +6797,7 @@ const markPayoutAsPaid = async (req, res) => {
     if (explicitSessionIds.length > 0) {
       completedSessionsQuery = completedSessionsQuery.in('id', explicitSessionIds);
     } else {
-      completedSessionsQuery = completedSessionsQuery.gte('completion_date', monthStart).lte('completion_date', monthEnd);
+      completedSessionsQuery = completedSessionsQuery.gte('scheduled_date', monthStart).lte('scheduled_date', monthEnd); // session date — matches the payout screens
     }
 
     ({ data: completedSessions, error: sessionsError } = await completedSessionsQuery);
@@ -6823,7 +6830,7 @@ const markPayoutAsPaid = async (req, res) => {
       if (explicitSessionIds.length > 0) {
         fallbackCompletedSessionsQuery = fallbackCompletedSessionsQuery.in('id', explicitSessionIds);
       } else {
-        fallbackCompletedSessionsQuery = fallbackCompletedSessionsQuery.gte('completion_date', monthStart).lte('completion_date', monthEnd);
+        fallbackCompletedSessionsQuery = fallbackCompletedSessionsQuery.gte('scheduled_date', monthStart).lte('scheduled_date', monthEnd);
       }
 
       ({ data: completedSessions, error: sessionsError } = await fallbackCompletedSessionsQuery);
