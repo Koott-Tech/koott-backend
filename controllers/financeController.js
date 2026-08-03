@@ -1045,7 +1045,7 @@ const getDashboard = async (req, res) => {
         const monthKey = `${date.getFullYear()}-${monthNum < 10 ? '0' : ''}${monthNum}`;
         const monthName = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
         const monthStart = `${monthKey}-01`;
-        const monthEnd = new Date(date.getFullYear(), date.getMonth() + 1, 0).toISOString().split('T')[0];
+        const monthEnd = new Date(Date.UTC(date.getFullYear(), date.getMonth() + 1, 0)).toISOString().split('T')[0];
         
         const monthRevenue = calculateRevenue(sessionsData, monthStart, monthEnd);
         const monthExpenses = calculateExpenses(expensesData, monthStart, monthEnd);
@@ -2143,12 +2143,20 @@ const getDoctorPayouts = async (req, res) => {
     // Get commission history
     const sessionIds = allSessions?.map(s => s.id).filter(Boolean) || [];
     let commissionHistory = [];
-    if (sessionIds.length > 0) {
-      const { data: history } = await supabaseAdmin
+    // Chunk this lookup: a single .in() with every completed session id (973+ UUIDs) overflows
+    // the PostgREST GET URL and returns "Bad Request". The error was discarded here, so the
+    // map came back EMPTY — and since a completed payout requires payment_status === 'paid'
+    // from that map, the Completed tab silently showed ZERO payouts for every doctor.
+    for (let i = 0; i < sessionIds.length; i += 100) {
+      const { data: history, error: historyErr } = await supabaseAdmin
         .from('commission_history')
         .select('session_id, commission_amount, session_amount, payment_status')
-        .in('session_id', sessionIds);
-      commissionHistory = history || [];
+        .in('session_id', sessionIds.slice(i, i + 100));
+      if (historyErr) {
+        console.error('[getDoctorPayouts] commission_history chunk failed:', historyErr.message);
+        continue;
+      }
+      commissionHistory.push(...(history || []));
     }
     
     const commissionHistoryMap = {};
@@ -5682,7 +5690,10 @@ const getPendingPayouts = async (req, res) => {
     
     const monthStr = targetMonth < 10 ? `0${targetMonth}` : String(targetMonth);
     const monthStart = `${targetYear}-${monthStr}-01`;
-    const monthEnd = new Date(targetYear, targetMonth, 0).toISOString().split('T')[0]; // Last day of month
+    // Date.UTC, not local: new Date(y, m, 0) builds midnight LOCAL, and toISOString() then
+    // shifts it back a day in IST (+05:30) — so 31 Jul became '2026-07-30' and the month's
+    // final day was silently dropped from every payout window.
+    const monthEnd = new Date(Date.UTC(targetYear, targetMonth, 0)).toISOString().split('T')[0]; // Last day of month
 
     const getConfiguredPackageDoctorShare = (session, packageMeta, cfg, isFirstSession) => {
       const resolvedSessionCount = Math.max(
@@ -5937,7 +5948,6 @@ const getPendingPayouts = async (req, res) => {
             psychologist_id,
             session_amount,
             commission_amount,
-            session_type,
             payment_status
           `)
         .in('session_id', chunk));
@@ -5946,11 +5956,16 @@ const getPendingPayouts = async (req, res) => {
         String(commissionError.message || '').includes('session_amount') ||
         String(commissionError.message || '').includes('session_type')
       )) {
+        // MUST keep session_amount: commission_history stores the PER-SESSION amount
+        // (e.g. 2166.33 for a ₹6499 3-package), while sessions.price holds the WHOLE
+        // package price. Dropping it made the caller fall back to sessions.price, so a
+        // package's first session paid price − company (₹5833) instead of its ₹1500 share.
         ({ data: historyChunk, error: commissionError } = await supabaseAdmin
           .from('commission_history')
           .select(`
             session_id,
             psychologist_id,
+            session_amount,
             commission_amount,
             payment_status
           `)
@@ -6008,13 +6023,19 @@ const getPendingPayouts = async (req, res) => {
         .map(ch => ch.session_id)
     );
 
-    // Exclude already paid sessions from the list
-    // Also exclude all sessions for psychologists who have a paid payout for this month
-    const unpaidSessions = completedSessionsWithPayments.filter(s => 
-      !paidSessionIds.has(s.id) && !paidPsychologistIds.has(s.psychologist_id)
-    );
+    // Exclude only the sessions that were ACTUALLY paid (payment_status = 'paid').
+    //
+    // This used to also drop every session of any psychologist holding a paid payout for the
+    // month (`paidPsychologistIds`). That hid genuinely unpaid work: after marking a doctor
+    // paid, sessions that were NOT part of that payout — e.g. ones completed later in the
+    // month, or with a null completion_date — disappeared from Pending entirely and could
+    // never be paid. It also leaked across months, because a payout_date of 3 Aug for the
+    // JULY payout matched August too, blanking the doctor's August pending list.
+    // markPayoutAsPaid writes/updates a commission_history row to 'paid' for every session it
+    // settles, so the per-session check is the accurate one.
+    const unpaidSessions = completedSessionsWithPayments.filter(s => !paidSessionIds.has(s.id));
 
-    const unpaidNotDueSessions = visibleNotDueSessions.filter(s => !paidPsychologistIds.has(s.psychologist_id));
+    const unpaidNotDueSessions = visibleNotDueSessions.filter(s => !paidSessionIds.has(s.id));
     
     console.log(`📊 Found ${unpaidSessions.length} unpaid completed sessions and ${unpaidNotDueSessions.length} not-yet-due sessions for ${targetMonth}/${targetYear}`);
 
@@ -6729,7 +6750,8 @@ const markPayoutAsPaid = async (req, res) => {
     } else if (month && year) {
       const monthStr = month < 10 ? `0${month}` : String(month);
       monthStart = `${year}-${monthStr}-01`;
-      monthEnd = new Date(year, month, 0).toISOString().split('T')[0];
+      // Date.UTC — see note above: local-time construction dropped the last day of the month.
+      monthEnd = new Date(Date.UTC(year, month, 0)).toISOString().split('T')[0];
     } else {
       return res.status(400).json(
         errorResponse('Either sessionIds, month/year, or dateFrom/dateTo are required')
@@ -6900,7 +6922,11 @@ const markPayoutAsPaid = async (req, res) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
-      .select(FINANCE_INCOME_SELECT)
+      // NOT FINANCE_INCOME_SELECT — that constant describes the finance_income table
+      // (date, income_source, description, reference_number). Using it here made the insert
+      // fail with "column payouts.date does not exist", which surfaced as a 500 on
+      // POST /finance/payouts/mark-paid. Select the row we just wrote instead.
+      .select('*')
       .single();
 
     if (payoutError) {
