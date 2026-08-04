@@ -143,7 +143,7 @@ async function fetchExistingCommissionHistory(sessionIds) {
     const chunk = sessionIds.slice(i, i + 100);
     const { data, error } = await supabaseAdmin
       .from('commission_history')
-      .select('id, session_id, session_amount, commission_amount, payment_status, created_at, updated_at')
+      .select('id, session_id, session_amount, commission_amount, payment_status, notes, created_at, updated_at')
       .in('session_id', chunk);
 
     if (error) throw error;
@@ -281,6 +281,7 @@ async function main() {
     completedSessionsFound: sessions.length,
     updatedCommissionHistory: 0,
     insertedCommissionHistory: 0,
+    skippedManualEdits: 0,
     updatedSessionDoctorWallet: 0,
     verifiedOnly: DRY_RUN,
     mismatches: [],
@@ -360,12 +361,19 @@ async function main() {
         });
       }
     } else if (existingCommission) {
-      const { error } = await supabaseAdmin
-        .from('commission_history')
-        .update(commissionPayload)
-        .eq('id', existingCommission.id);
-      if (error) throw error;
-      summary.updatedCommissionHistory += 1;
+      // NEVER overwrite a hand-edited row. Finance corrections made in the payout UI are
+      // tagged MANUAL_COMMISSION_EDIT; recomputing them from config silently reverted the
+      // edit, which is why saved values reappeared as the old numbers after a refresh.
+      if (String(existingCommission.notes || '').includes('MANUAL_COMMISSION_EDIT')) {
+        summary.skippedManualEdits = (summary.skippedManualEdits || 0) + 1;
+      } else {
+        const { error } = await supabaseAdmin
+          .from('commission_history')
+          .update(commissionPayload)
+          .eq('id', existingCommission.id);
+        if (error) throw error;
+        summary.updatedCommissionHistory += 1;
+      }
     } else {
       const { error } = await supabaseAdmin
         .from('commission_history')

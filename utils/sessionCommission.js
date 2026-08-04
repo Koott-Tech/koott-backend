@@ -51,9 +51,14 @@ function computeSessionDoctorWallet(session, dc, ch, opts) {
   }
 
   // ── 2. therapist_commission (manually set by admin) ──────────────────────
+  // This column stores the PER-SESSION amount, not a whole-package total, so it must NOT be
+  // divided by session_count. Verified against live data: of 311 package sessions carrying a
+  // value, 273 equal (package_total ÷ N) and ZERO equal the package total.
+  // Dividing it again underpaid every package session that has no commission_history row —
+  // e.g. a ₹1,000/session 9-pack paid ₹1,000/9 = ₹111, and a ₹100 3-pack paid ₹33.
   const tc = parseFloat(s.therapist_commission);
   if (!isNaN(tc) && tc > 0) {
-    return isPackage ? Math.round(tc / totalSessions) : Math.round(tc);
+    return Math.round(tc);
   }
 
   // ── 3. doctor_commissions rates ──────────────────────────────────────────

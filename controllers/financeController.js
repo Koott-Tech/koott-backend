@@ -251,6 +251,10 @@ function getFinancePackageType(session, packageMeta = null) {
 }
 
 /** Non-terminal sessions that still count as “pending fulfilment” on the dashboard card (excludes cancelled). */
+// Marks a commission_history row as hand-edited in the finance UI. Recalculation jobs must
+// skip these rows so a backfill never overwrites a deliberate correction.
+const MANUAL_COMMISSION_EDIT_TAG = 'MANUAL_COMMISSION_EDIT';
+
 const PENDING_SESSION_CARD_STATUSES = new Set([
   'booked',
   'rescheduled',
@@ -2081,13 +2085,30 @@ const getDoctorPayouts = async (req, res) => {
     // Client names for the session-level breakdown table.
     const payoutClientIds = [...new Set((allSessions || []).map((s) => s.client_id).filter(Boolean))];
     const payoutClientNameMap = {};
-    for (let i = 0; i < payoutClientIds.length; i += 100) {
-      const { data: cRows } = await supabaseAdmin
-        .from('clients')
-        .select('id, first_name, last_name')
-        .in('id', payoutClientIds.slice(i, i + 100));
-      (cRows || []).forEach((c) => {
-        payoutClientNameMap[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
+    const payoutClientEmailMap = {};
+    {
+      // clients.email is usually NULL — the address lives on users.email via clients.user_id.
+      const userIdByClient = {};
+      for (let i = 0; i < payoutClientIds.length; i += 100) {
+        const { data: cRows } = await supabaseAdmin
+          .from('clients')
+          .select('id, first_name, last_name, email, user_id')
+          .in('id', payoutClientIds.slice(i, i + 100));
+        (cRows || []).forEach((c) => {
+          payoutClientNameMap[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
+          if (c.email) payoutClientEmailMap[c.id] = c.email;
+          else if (c.user_id) userIdByClient[c.id] = c.user_id;
+        });
+      }
+      const missingUserIds = [...new Set(Object.values(userIdByClient))];
+      const emailByUser = {};
+      for (let i = 0; i < missingUserIds.length; i += 100) {
+        const { data: uRows } = await supabaseAdmin
+          .from('users').select('id, email').in('id', missingUserIds.slice(i, i + 100));
+        (uRows || []).forEach((u) => { if (u.email) emailByUser[u.id] = u.email; });
+      }
+      Object.entries(userIdByClient).forEach(([cid, uid]) => {
+        if (emailByUser[uid]) payoutClientEmailMap[cid] = emailByUser[uid];
       });
     }
 
@@ -2305,6 +2326,9 @@ const getDoctorPayouts = async (req, res) => {
         session_id: s.id,
         session_date: s.scheduled_date,
         client_name: payoutClientNameMap[s.client_id] || '—',
+        // The View Details modal renders these two columns; without them it showed "—".
+        client_email: payoutClientEmailMap[s.client_id] || null,
+        booked_at: getSessionBookingCreatedAtIso(s) || s.created_at || null,
         session_type: sessionType,
         session_sequence: sessionSequence,
         session_sequence_label: sessionSequenceLabel,
@@ -6156,16 +6180,31 @@ const getPendingPayouts = async (req, res) => {
     const pendingScopeSessions = [...unpaidSessions, ...unpaidNotDueSessions];
     const pendingClientIds = [...new Set(pendingScopeSessions.map(s => s.client_id).filter(Boolean))];
     const pendingClientNameMap = {};
+    const pendingClientEmailMap = {};
     if (includeDetails) {
+      // clients.email is usually NULL — the address lives on users.email via clients.user_id.
+      const userIdByClient = {};
       for (let i = 0; i < pendingClientIds.length; i += 100) {
         const { data: cRows } = await supabaseAdmin
           .from('clients')
-          .select('id, first_name, last_name')
+          .select('id, first_name, last_name, email, user_id')
           .in('id', pendingClientIds.slice(i, i + 100));
         (cRows || []).forEach((c) => {
           pendingClientNameMap[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
+          if (c.email) pendingClientEmailMap[c.id] = c.email;
+          else if (c.user_id) userIdByClient[c.id] = c.user_id;
         });
       }
+      const missingUserIds = [...new Set(Object.values(userIdByClient))];
+      const emailByUser = {};
+      for (let i = 0; i < missingUserIds.length; i += 100) {
+        const { data: uRows } = await supabaseAdmin
+          .from('users').select('id, email').in('id', missingUserIds.slice(i, i + 100));
+        (uRows || []).forEach((u) => { if (u.email) emailByUser[u.id] = u.email; });
+      }
+      Object.entries(userIdByClient).forEach(([cid, uid]) => {
+        if (emailByUser[uid]) pendingClientEmailMap[cid] = emailByUser[uid];
+      });
     }
 
     const pendingClientFirstSessions = new Set();
@@ -6488,6 +6527,8 @@ const getPendingPayouts = async (req, res) => {
           session_id: session.id,
           session_date: session.scheduled_date,
           client_name: pendingClientNameMap[session.client_id] || '—',
+          client_email: pendingClientEmailMap[session.client_id] || null,
+          booked_at: getSessionBookingCreatedAtIso(session) || session.created_at || null,
           session_type: sessionTypeForCount,
           session_type_label: sessionTypeLabel,
           session_sequence: sessionSequence,
@@ -6541,6 +6582,8 @@ const getPendingPayouts = async (req, res) => {
           session_id: session.id,
           session_date: session.scheduled_date,
           client_name: pendingClientNameMap[session.client_id] || '—',
+          client_email: pendingClientEmailMap[session.client_id] || null,
+          booked_at: getSessionBookingCreatedAtIso(session) || session.created_at || null,
           session_type: sessionTypeForCount,
           session_type_label: sessionTypeLabel,
           session_sequence: sessionSequence,
@@ -7476,10 +7519,22 @@ const updateSessionCommission = async (req, res) => {
     }
 
     const { sessionId } = req.params;
-    const { commission_amount, session_amount } = req.body;
+    const { commission_amount, session_amount, payout_status } = req.body;
 
     if (commission_amount === undefined || commission_amount === null || isNaN(Number(commission_amount))) {
       return res.status(400).json(errorResponse('commission_amount is required and must be a number'));
+    }
+
+    // Optional per-session payout status. Setting it to 'paid' settles THIS session alone —
+    // it then leaves the Pending tab and appears under Completed, without touching any of the
+    // therapist's other sessions (unlike the whole-month "Mark as Paid" action).
+    let payoutStatusToSet = null;
+    if (payout_status !== undefined && payout_status !== null && payout_status !== '') {
+      const ps = String(payout_status).toLowerCase();
+      if (!['paid', 'pending'].includes(ps)) {
+        return res.status(400).json(errorResponse("payout_status must be 'paid' or 'pending'"));
+      }
+      payoutStatusToSet = ps;
     }
 
     // Fetch session to get session_amount and psychologist_id
@@ -7522,6 +7577,11 @@ const updateSessionCommission = async (req, res) => {
         .update({
           commission_amount: companyCommission,
           session_amount: sessionAmount,
+          // Tag the row so recalculation/backfill jobs leave it alone. Without this, the
+          // next backfill recomputes from config and silently wipes the manual correction —
+          // which is why edits "saved" and then reverted.
+          notes: MANUAL_COMMISSION_EDIT_TAG,
+          ...(payoutStatusToSet ? { payment_status: payoutStatusToSet } : {}),
         })
         .eq('session_id', sessionId));
     } else {
@@ -7534,7 +7594,8 @@ const updateSessionCommission = async (req, res) => {
           payment_id: session.payment_id || null,
           commission_amount: companyCommission,
           session_amount: sessionAmount,
-          payment_status: 'pending',
+          payment_status: payoutStatusToSet || 'pending',
+          notes: MANUAL_COMMISSION_EDIT_TAG,
         }));
     }
 
