@@ -2080,7 +2080,22 @@ const getDoctorPayouts = async (req, res) => {
       allSessionsQuery = allSessionsQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`).lte('created_at', `${dateTo}T23:59:59.999+05:30`);
     }
     
-    const { data: allSessions } = await allSessionsQuery.order('created_at', { ascending: true });
+    // Paginate — the same 1000-row PostgREST cap that was silently truncating the pending
+    // payout scan applies here too (July alone has 1041 completed sessions), which under-
+    // reported every doctor's Completed-tab total.
+    const allSessions = [];
+    {
+      let pageErr = null;
+      for (let offset = 0; ; offset += 1000) {
+        const { data: page, error } = await allSessionsQuery
+          .order('created_at', { ascending: true })
+          .range(offset, offset + 999);
+        if (error) { pageErr = error; break; }
+        allSessions.push(...(page || []));
+        if (!page || page.length < 1000) break;
+      }
+      if (pageErr) console.error('[getDoctorPayouts] session page fetch failed:', pageErr.message);
+    }
 
     // Client names for the session-level breakdown table.
     const payoutClientIds = [...new Set((allSessions || []).map((s) => s.client_id).filter(Boolean))];
@@ -5890,20 +5905,38 @@ const getPendingPayouts = async (req, res) => {
     let completedSessions = null;
     let sessionsError = null;
 
-    let completedScan = supabaseAdmin
-      .from('sessions')
-      .select(completedSessionSelect)
-      .eq('status', 'completed');
-    if (onlyPsychologistId) completedScan = completedScan.eq('psychologist_id', onlyPsychologistId);
-    ({ data: completedSessions, error: sessionsError } = await completedScan
-      // Window by scheduled_date — the month the session actually HAPPENED. completion_date
-      // only records when someone clicked "complete", so a 24 Jul session marked complete on
-      // 2 Aug was pushed into August's payout and July under-paid. scheduled_date is also
-      // always set, unlike completion_date (NULL on 49 of July's completed sessions).
-      .gte('scheduled_date', monthStart)
-      .lte('scheduled_date', monthEnd)
-      .not('psychologist_id', 'is', null)
-      .neq('session_type', 'free_assessment'));
+    // Paginate: PostgREST caps a plain select at 1000 rows. July alone has 1041 completed
+    // sessions, so the unpaginated scan silently dropped 41 of them — every doctor's payout
+    // total was under-reported, and the shortfall moved around as data changed.
+    const fetchAllPages = async (buildQuery) => {
+      const out = [];
+      for (let offset = 0; ; offset += 1000) {
+        const { data, error } = await buildQuery().range(offset, offset + 999);
+        if (error) return { data: out, error };
+        out.push(...(data || []));
+        if (!data || data.length < 1000) break;
+      }
+      return { data: out, error: null };
+    };
+
+    // Window by scheduled_date — the month the session actually HAPPENED. completion_date
+    // only records when someone clicked "complete", so a 24 Jul session marked complete on
+    // 2 Aug was pushed into August's payout and July under-paid. scheduled_date is also
+    // always set, unlike completion_date (NULL on 49 of July's completed sessions).
+    const buildCompletedScan = () => {
+      let q = supabaseAdmin
+        .from('sessions')
+        .select(completedSessionSelect)
+        .eq('status', 'completed')
+        .gte('scheduled_date', monthStart)
+        .lte('scheduled_date', monthEnd)
+        .not('psychologist_id', 'is', null)
+        .neq('session_type', 'free_assessment')
+        .order('scheduled_date', { ascending: true });
+      if (onlyPsychologistId) q = q.eq('psychologist_id', onlyPsychologistId);
+      return q;
+    };
+    ({ data: completedSessions, error: sessionsError } = await fetchAllPages(buildCompletedScan));
 
     if (sessionsError && String(sessionsError.message || '').includes('cover_image_url')) {
       ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
@@ -5938,16 +5971,20 @@ const getPendingPayouts = async (req, res) => {
 
     let notDueSessions = null;
     let notDueError = null;
-    let notDueScan = supabaseAdmin
-      .from('sessions')
-      .select(notDueSessionSelect)
-      .in('status', Array.from(PENDING_SESSION_CARD_STATUSES));
-    if (onlyPsychologistId) notDueScan = notDueScan.eq('psychologist_id', onlyPsychologistId);
-    ({ data: notDueSessions, error: notDueError } = await notDueScan
-      .gte('scheduled_date', monthStart)
-      .lte('scheduled_date', monthEnd)
-      .not('psychologist_id', 'is', null)
-      .neq('session_type', 'free_assessment'));
+    const buildNotDueScan = () => {
+      let q = supabaseAdmin
+        .from('sessions')
+        .select(notDueSessionSelect)
+        .in('status', Array.from(PENDING_SESSION_CARD_STATUSES))
+        .gte('scheduled_date', monthStart)
+        .lte('scheduled_date', monthEnd)
+        .not('psychologist_id', 'is', null)
+        .neq('session_type', 'free_assessment')
+        .order('scheduled_date', { ascending: true });
+      if (onlyPsychologistId) q = q.eq('psychologist_id', onlyPsychologistId);
+      return q;
+    };
+    ({ data: notDueSessions, error: notDueError } = await fetchAllPages(buildNotDueScan));
 
     if (notDueError && String(notDueError.message || '').includes('cover_image_url')) {
       ({ data: notDueSessions, error: notDueError } = await supabaseAdmin
@@ -5980,7 +6017,7 @@ const getPendingPayouts = async (req, res) => {
     for (let i = 0; i < sessionIds.length; i += 100) historyChunks.push(sessionIds.slice(i, i + 100));
     const historySelect = listOnly
       ? 'session_id, payment_status'
-      : 'session_id, psychologist_id, session_amount, commission_amount, payment_status';
+      : 'session_id, psychologist_id, session_amount, commission_amount, payment_status, notes';
     const historyResults = await Promise.all(historyChunks.map((chunk) =>
       supabaseAdmin.from('commission_history').select(historySelect).in('session_id', chunk)
     ));
@@ -6359,8 +6396,13 @@ const getPendingPayouts = async (req, res) => {
 
       let sessionAmount = parseFloat(commission?.session_amount ?? session.price ?? 0) || 0;
       let commissionAmount = parseFloat(commission?.commission_amount ?? 0) || 0;
+      // A ₹0 package follow-up normally ignores its ledger row (the stored amount is a stale
+      // 0 and the per-session share must come from config). But a row edited by hand in the
+      // payout UI is authoritative — discarding it made manual edits "save" and then revert
+      // to the computed value on the next page load.
+      const isManuallyEdited = String(commission?.notes || '').includes(MANUAL_COMMISSION_EDIT_TAG);
       const commissionForWallet =
-        isPackageSession && sessionAmount <= 0
+        isPackageSession && sessionAmount <= 0 && !isManuallyEdited
           ? null
           : (commission || null);
       let doctorWallet = computeSessionDoctorWallet(
