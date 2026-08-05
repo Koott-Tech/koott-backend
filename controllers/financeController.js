@@ -257,6 +257,12 @@ const MANUAL_COMMISSION_EDIT_TAG = 'MANUAL_COMMISSION_EDIT';
 
 const PENDING_SESSION_CARD_STATUSES = new Set([
   'booked',
+  // A handful of rows carry a literal 'pending' status (e.g. sessions transferred between
+  // therapists). It means the same thing as a past-due 'booked' row — which the admin and
+  // finance UIs already both render as "pending" — but leaving it out of this set dropped
+  // those sessions from the payout scan entirely: absent from the payouts table, from View
+  // Details and from the Excel export, so the therapist was never paid for them.
+  'pending',
   'rescheduled',
   'reschedule_requested',
   'no_show',
@@ -499,7 +505,7 @@ const getDashboard = async (req, res) => {
       let sessionsQuery = supabaseAdmin
         .from('sessions')
         .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-        .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+        .in('status', ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
         .neq('session_type', 'free_assessment');
 
       // Optimization: If not all-time, filter from start of year to ensure we get enough data for MTD/QTD/YTD cards
@@ -518,7 +524,7 @@ const getDashboard = async (req, res) => {
         let fbQuery1 = supabaseAdmin
           .from('sessions')
           .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+          .in('status', ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
           .neq('session_type', 'free_assessment');
         if (!allTimeMode) {
           fbQuery1 = fbQuery1.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -530,7 +536,7 @@ const getDashboard = async (req, res) => {
         let fbQuery2 = supabaseAdmin
           .from('sessions')
           .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-          .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+          .in('status', ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
           .neq('session_type', 'free_assessment');
         if (!allTimeMode) {
           fbQuery2 = fbQuery2.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -543,7 +549,7 @@ const getDashboard = async (req, res) => {
           let fbQuery3 = supabaseAdmin
             .from('sessions')
             .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, session_type, created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-            .in('status', ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+            .in('status', ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
             .neq('session_type', 'free_assessment');
           if (!allTimeMode) {
             fbQuery3 = fbQuery3.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -595,7 +601,7 @@ const getDashboard = async (req, res) => {
         // If no date filter provided (fromDate/toDate are null), include all sessions
         if (!fromDate || !toDate) {
           // Include all statuses where payment was made (these sessions exist only after successful payment)
-          const paidStatuses = ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'];
+          const paidStatuses = ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'];
           return paidStatuses.includes(s.status);
         }
 
@@ -611,7 +617,7 @@ const getDashboard = async (req, res) => {
         if (!dateStr || dateStr < fromDate || dateStr > toDate) return false;
         
         // Include all statuses where payment was made (these sessions exist only after successful payment)
-        const paidStatuses = ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'];
+        const paidStatuses = ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'];
         return paidStatuses.includes(s.status);
       });
       const total = filtered.reduce((sum, s) => sum + getSessionFinanceRevenueAmount(s), 0);
@@ -895,7 +901,7 @@ const getDashboard = async (req, res) => {
     // Include all statuses where payment was made (sessions exist only after successful payment)
     const shouldIncludeInRevenue = (s) => {
       if (!s) return false;
-      const paidStatuses = ['completed', 'booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'];
+      const paidStatuses = ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'];
       return paidStatuses.includes(s.status);
     };
 
@@ -1114,7 +1120,7 @@ const getDashboard = async (req, res) => {
           .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
           .not('psychologist_id', 'is', null)
           .neq('session_type', 'free_assessment')
-          .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+          .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
           .in('psychologist_id', allPsychIds);
 
         if (!allTimeMode) {
@@ -1135,7 +1141,7 @@ const getDashboard = async (req, res) => {
             .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
             .not('psychologist_id', 'is', null)
             .neq('session_type', 'free_assessment')
-            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+            .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
             .in('psychologist_id', allPsychIds);
           if (!allTimeMode) {
             allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -1148,7 +1154,7 @@ const getDashboard = async (req, res) => {
             .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, wix_payload, source')
             .not('psychologist_id', 'is', null)
             .neq('session_type', 'free_assessment')
-            .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+            .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
             .in('psychologist_id', allPsychIds);
           if (!allTimeMode) {
             allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -1160,7 +1166,7 @@ const getDashboard = async (req, res) => {
               .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, created_at, updated_at, completion_date, package_session_number, session_count, wix_payload, source')
               .not('psychologist_id', 'is', null)
               .neq('session_type', 'free_assessment')
-              .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+              .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
               .in('psychologist_id', allPsychIds);
             if (!allTimeMode) {
               allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
@@ -2068,7 +2074,7 @@ const getDoctorPayouts = async (req, res) => {
       .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count')
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'])
+      .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'])
       .in('psychologist_id', allPsychIds);
 
     if (status === 'completed') {
@@ -2835,7 +2841,7 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
           .from('sessions')
           .select('id, client_id, created_at, scheduled_date, status, session_type, package_id')
           .in('client_id', clientIds.slice(i, i + 100))
-          .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+          .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
           .neq('session_type', 'free_assessment');
         historyRows.push(...(hist || []));
       }
@@ -2906,7 +2912,7 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
 
     const dc = activeDc;
     const TERMINAL_UNPAID = ['cancelled', 'refunded', 'deleted'];
-    const NOT_DUE_PAYOUT_STATUSES = new Set(['booked', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
+    const NOT_DUE_PAYOUT_STATUSES = new Set(['booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
 
     // A package is paid on its first session, but the therapist earns on every session of it.
     // So the company's real profit on a package = package price − the therapist's commission
@@ -3097,7 +3103,7 @@ const getDoctorBookings = async (req, res) => {
       )
       .eq('psychologist_id', psychologistId)
       .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded']);
+      .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded']);
 
     if (dateFrom) {
       if (normalizedDateBasis === 'booked') {
@@ -3345,7 +3351,7 @@ const getSessionDetails = async (req, res) => {
         .from('sessions')
         .select('id, created_at')
         .eq('client_id', session.client_id)
-        .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+        .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
         .lt('created_at', session.created_at)
         .limit(1);
       isFirstSession = !earlierSessions?.length;
@@ -4841,7 +4847,7 @@ const getCommissions = async (req, res) => {
       .select(sessionSelectFields)
       .not('psychologist_id', 'is', null)
       .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
+      .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
 
     if (viewMonthStart && viewMonthEnd) {
       allSessionsQuery = allSessionsQuery
@@ -6260,7 +6266,7 @@ const getPendingPayouts = async (req, res) => {
           .from('sessions')
           .select('id, client_id, created_at, scheduled_date, status, session_type, package_id')
           .in('client_id', pendingClientIds.slice(i, i + 100))
-          .in('status', ['booked', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
+          .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded'])
           .neq('session_type', 'free_assessment');
         historyRows.push(...(hist || []));
       }
@@ -6491,7 +6497,12 @@ const getPendingPayouts = async (req, res) => {
       const isPackageFirstForClient = isPackageForRate
         ? (session.package_id ? pendingFirstPackages.has(session.package_id) : isClientFirstSession)
         : false;
-      const rateIsFirstSession = isPackageForRate ? isPackageFirstForClient : isClientFirstSession;
+      // A hand-set First/Follow-up (stored as |SEQ:… on the ledger row) wins over the
+      // derived value, so the label matches what finance chose in the payout UI.
+      const seqTag = /\|SEQ:(first|followup)/.exec(String(commissionMap[session.id]?.notes || ''));
+      const rateIsFirstSession = seqTag
+        ? seqTag[1] === 'first'
+        : (isPackageForRate ? isPackageFirstForClient : isClientFirstSession);
       const sessionSequence = rateIsFirstSession ? 'first' : 'followup';
       const sessionSequenceLabel = rateIsFirstSession ? 'First' : 'Follow-up';
       
@@ -6606,7 +6617,12 @@ const getPendingPayouts = async (req, res) => {
       const isPackageFirstForClient = isPackageForRate
         ? (session.package_id ? pendingFirstPackages.has(session.package_id) : isClientFirstSession)
         : false;
-      const rateIsFirstSession = isPackageForRate ? isPackageFirstForClient : isClientFirstSession;
+      // A hand-set First/Follow-up (stored as |SEQ:… on the ledger row) wins over the
+      // derived value, so the label matches what finance chose in the payout UI.
+      const seqTag = /\|SEQ:(first|followup)/.exec(String(commissionMap[session.id]?.notes || ''));
+      const rateIsFirstSession = seqTag
+        ? seqTag[1] === 'first'
+        : (isPackageForRate ? isPackageFirstForClient : isClientFirstSession);
       const sessionSequence = rateIsFirstSession ? 'first' : 'followup';
       const sessionSequenceLabel = rateIsFirstSession ? 'First' : 'Follow-up';
       const {
@@ -7571,7 +7587,18 @@ const updateSessionCommission = async (req, res) => {
     }
 
     const { sessionId } = req.params;
-    const { commission_amount, session_amount, payout_status } = req.body;
+    const { commission_amount, session_amount, payout_status, session_sequence } = req.body;
+
+    // Optional First / Follow-up override. The UI can't know the therapist's rate card, so it
+    // just sends the sequence and the server derives the doctor amount from doctor_commissions.
+    let sequenceOverride = null;
+    if (session_sequence !== undefined && session_sequence !== null && session_sequence !== '') {
+      const sq = String(session_sequence).toLowerCase();
+      if (!['first', 'followup'].includes(sq)) {
+        return res.status(400).json(errorResponse("session_sequence must be 'first' or 'followup'"));
+      }
+      sequenceOverride = sq;
+    }
 
     if (commission_amount === undefined || commission_amount === null || isNaN(Number(commission_amount))) {
       return res.status(400).json(errorResponse('commission_amount is required and must be a number'));
@@ -7614,6 +7641,36 @@ const updateSessionCommission = async (req, res) => {
 
     const doctorWallet = sessionAmount - companyCommission;
 
+    // Derive the doctor amount for the requested sequence, overriding whatever the UI sent.
+    let effectiveCompany = companyCommission;
+    if (sequenceOverride) {
+      const { data: cfgRow } = await supabaseAdmin
+        .from('doctor_commissions')
+        .select('doctor_commission_first_session, doctor_commission_followup, doctor_commission_packages')
+        .eq('psychologist_id', session.psychologist_id)
+        .eq('is_active', true)
+        .limit(1);
+      const cfg = cfgRow?.[0];
+      if (cfg) {
+        const packages = cfg.doctor_commission_packages || {};
+        const n = Math.max(1, parseInt(session.session_count, 10) || 1);
+        const isPkg = n > 1 || String(session.session_type || '').toLowerCase().includes('package');
+        let doctorForSequence;
+        if (isPkg) {
+          const key = sequenceOverride === 'first' ? `package_${n}_first_session` : `package_${n}_followup`;
+          const total = parseFloat(packages[key] ?? packages[`package_${n}_first_session`] ?? 0) || 0;
+          doctorForSequence = total > 0 ? total / n : null;
+        } else {
+          doctorForSequence = parseFloat(
+            sequenceOverride === 'first' ? cfg.doctor_commission_first_session : cfg.doctor_commission_followup
+          );
+        }
+        if (Number.isFinite(doctorForSequence)) {
+          effectiveCompany = Math.round((sessionAmount - doctorForSequence) * 100) / 100;
+        }
+      }
+    }
+
     // Check if commission_history row already exists
     const { data: existing } = await supabaseAdmin
       .from('commission_history')
@@ -7627,12 +7684,12 @@ const updateSessionCommission = async (req, res) => {
       ({ error: upsertError } = await supabaseAdmin
         .from('commission_history')
         .update({
-          commission_amount: companyCommission,
+          commission_amount: effectiveCompany,
           session_amount: sessionAmount,
           // Tag the row so recalculation/backfill jobs leave it alone. Without this, the
           // next backfill recomputes from config and silently wipes the manual correction —
           // which is why edits "saved" and then reverted.
-          notes: MANUAL_COMMISSION_EDIT_TAG,
+          notes: MANUAL_COMMISSION_EDIT_TAG + (sequenceOverride ? `|SEQ:${sequenceOverride}` : ''),
           ...(payoutStatusToSet ? { payment_status: payoutStatusToSet } : {}),
         })
         .eq('session_id', sessionId));
@@ -7644,10 +7701,10 @@ const updateSessionCommission = async (req, res) => {
           session_id: sessionId,
           psychologist_id: session.psychologist_id,
           payment_id: session.payment_id || null,
-          commission_amount: companyCommission,
+          commission_amount: effectiveCompany,
           session_amount: sessionAmount,
           payment_status: payoutStatusToSet || 'pending',
-          notes: MANUAL_COMMISSION_EDIT_TAG,
+          notes: MANUAL_COMMISSION_EDIT_TAG + (sequenceOverride ? `|SEQ:${sequenceOverride}` : ''),
         }));
     }
 
