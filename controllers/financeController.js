@@ -6007,7 +6007,14 @@ const getPendingPayouts = async (req, res) => {
     if (sessionsError) throw sessionsError;
     
     // Get commission_history for these completed sessions
-    const sessionIds = completedSessionsWithPayments.map(s => s.id);
+    // Include NOT-DUE sessions too. A booked session whose time has passed shows as "pending"
+    // in the UI and can be edited there, but its commission_history row was never loaded here
+    // (this list covered completed sessions only) — so the saved edit was invisible on read
+    // and the amount recomputed from config, i.e. the edit appeared to revert.
+    const sessionIds = [...new Set([
+      ...completedSessionsWithPayments.map(s => s.id),
+      ...(notDueSessions || []).map(s => s.id),
+    ])].filter(Boolean);
     let commissionHistory = null;
     let commissionError = null;
     commissionHistory = [];
@@ -6608,7 +6615,10 @@ const getPendingPayouts = async (req, res) => {
         packageSessionNumber,
         sessionCountForType
       } = getSessionTypeMeta(session);
-      const finance = getPendingSessionFinance(session, null, rateIsFirstSession, psychId);
+      // Pass the ledger row when one exists. This was hard-coded to null, so a NOT-DUE
+      // session (a booked session past its time — the UI labels it "pending") always
+      // recomputed from config and silently discarded any hand-edited commission.
+      const finance = getPendingSessionFinance(session, commissionMap[session.id] || null, rateIsFirstSession, psychId);
 
       doctorPayout.total_sessions += 1;
       doctorPayout.upcoming_sessions += 1;
