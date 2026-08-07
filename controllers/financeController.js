@@ -6522,6 +6522,14 @@ const getPendingPayouts = async (req, res) => {
         let doctorCommission = 0;
         if (isPackage) {
           doctorCommission = getConfiguredPackageDoctorShare(session, packagesMap[session.package_id], cfg, rateIsFirstSession);
+        } else if (isCoupleSessionLike(session)) {
+          // A COUPLE session is not billed at the individual rate. This branch only ever looked
+          // at doctor_commission_first_session / _followup, so a couple session with no ledger
+          // row was paid the individual follow-up rate — and because the synthetic commission
+          // row below takes priority in computeSessionDoctorWallet, the correct couple logic
+          // further down never got a chance to run. That made the payout page disagree with the
+          // doctor's own breakdown (e.g. ₹1300 instead of ₹1750).
+          doctorCommission = getConfiguredCoupleDoctorShare(cfg);
         } else {
           doctorCommission = rateIsFirstSession
             ? (parseFloat(cfg.doctor_commission_first_session || cfg.doctor_commission_followup || 0) || 0)

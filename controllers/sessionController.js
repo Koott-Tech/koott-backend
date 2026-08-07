@@ -406,8 +406,11 @@ const getAllSessions = async (req, res) => {
       // then require ALL words to appear in the combined name, so "aswathy" finds every Aswathy
       // while "aswathy raman" narrows to just her.
       const terms = searchTerm.split(/\s+/).map((t) => t.trim()).filter(Boolean);
-      const anyWord = (cols) =>
-        cols.flatMap((c) => terms.map((t) => `${c}.ilike.%${t}%`)).join(',');
+      // Fetch candidates on the LONGEST word only, then narrow in memory. Matching every word
+      // blows the row cap when a name contains a short one — "Anagha Baiju T" would also match
+      // `%T%` across thousands of clients, pushing the real match outside the limit.
+      const pivot = terms.reduce((a, b) => (b.length > a.length ? b : a), terms[0] || '');
+      const anyWord = (cols) => cols.map((c) => `${c}.ilike.%${pivot}%`).join(',');
       const matchesAllWords = (...parts) => {
         const hay = parts.filter(Boolean).join(' ').toLowerCase();
         return terms.every((t) => hay.includes(t.toLowerCase()));

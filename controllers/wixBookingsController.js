@@ -1106,6 +1106,64 @@ async function listWixBookings(req, res) {
       return effective === normalizedStatus;
     };
 
+    // wix_bookings.client_full_name is a DENORMALISED copy taken at sync time. It can be stale
+    // or plain wrong — 75 bookings disagree with the client record their session points at — so
+    // searching a client's real name found nothing while their email worked. Resolve the term
+    // against the actual clients/users tables and pull those bookings in by id too.
+    // Words are matched individually then required together, so "anagha" finds every Anagha
+    // while "anagha baiju t" narrows to one.
+    let searchBookingIds = [];
+    const rawSearchTerm = typeof search === 'string' ? search.trim().replace(/,/g, '') : '';
+    if (rawSearchTerm) {
+      try {
+        const words = rawSearchTerm.split(/\s+/).map((w) => w.trim()).filter(Boolean);
+        // Fetch candidates on the LONGEST word only, then narrow in memory. Matching on every
+        // word blew the row cap whenever a name contained a short one — "Anagha Baiju T" made
+        // the query also match `%T%`, which hits thousands of clients, so the real match fell
+        // outside the limit and the search found nothing.
+        const pivot = words.reduce((a, b) => (b.length > a.length ? b : a), words[0] || '');
+        const pivotClause = (cols) => cols.map((c) => `${c}.ilike.%${pivot}%`).join(',');
+        const hasAllWords = (...parts) => {
+          const hay = parts.filter(Boolean).join(' ').toLowerCase();
+          return words.every((w) => hay.includes(w.toLowerCase()));
+        };
+
+        const [clientsRes, usersRes] = await Promise.all([
+          supabaseAdmin.from('clients').select('id, first_name, last_name')
+            .or(pivotClause(['first_name', 'last_name'])).limit(500),
+          supabaseAdmin.from('users').select('id').ilike('email', `%${rawSearchTerm}%`).limit(100),
+        ]);
+
+        const clientIds = new Set(
+          (clientsRes.data || []).filter((c) => hasAllWords(c.first_name, c.last_name)).map((c) => c.id)
+        );
+        const userIds = (usersRes.data || []).map((u) => u.id).filter(Boolean);
+        if (userIds.length) {
+          const { data: byUser } = await supabaseAdmin
+            .from('clients').select('id').in('user_id', userIds).limit(300);
+          (byUser || []).forEach((c) => c?.id && clientIds.add(c.id));
+        }
+
+        if (clientIds.size) {
+          const ids = [...clientIds];
+          const found = new Set();
+          for (let i = 0; i < ids.length; i += 100) {
+            const { data } = await supabaseAdmin
+              .from('sessions').select('wix_booking_id')
+              .in('client_id', ids.slice(i, i + 100))
+              .not('wix_booking_id', 'is', null);
+            (data || []).forEach((r) => r.wix_booking_id && found.add(r.wix_booking_id));
+          }
+          // Cap: these ids go into a PostgREST `or` string, which has a practical length limit.
+          searchBookingIds = [...found].slice(0, 300);
+        }
+      } catch (err) {
+        // Never fail the whole listing because the name lookup broke — fall back to the
+        // mirror-only match, which is what this endpoint did before.
+        console.warn('[getWixBookings] client name resolution failed:', err.message || err);
+      }
+    }
+
     const applyBaseFilters = (query) => {
       let next = query;
 
@@ -1129,9 +1187,19 @@ async function listWixBookings(req, res) {
       if (term) {
         const esc = term.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
         const pattern = `%${esc}%`;
-        next = next.or(
-          `client_email.ilike.${pattern},client_full_name.ilike.${pattern},client_first_name.ilike.${pattern},therapist_name.ilike.${pattern},title.ilike.${pattern}`
-        );
+        const clauses = [
+          `client_email.ilike.${pattern}`,
+          `client_full_name.ilike.${pattern}`,
+          `client_first_name.ilike.${pattern}`,
+          `therapist_name.ilike.${pattern}`,
+          `title.ilike.${pattern}`,
+        ];
+        // Bookings whose LINKED CLIENT matches the term, even when the mirror's copy of the
+        // name is stale or wrong.
+        if (searchBookingIds.length) {
+          clauses.push(`wix_booking_id.in.(${searchBookingIds.map((id) => `"${id}"`).join(',')})`);
+        }
+        next = next.or(clauses.join(','));
       }
 
       if (normalizedStatusFilter && normalizedStatusFilter !== 'all' && !needsRuntimeStatusFilter) {
