@@ -11,6 +11,7 @@ const { processNewWixSessions, processOneSession } = require('../services/wixMee
 const { linkPackageSessions } = require('../services/wixPackageLinkerService');
 const { fetchSessionInfoBatch } = require('../services/wixOrderEnrichmentService');
 const { hydrateBareTherapistBookings } = require('../utils/wixBookingPayloadHydration');
+const { notifySessionTransfer } = require('../utils/sessionTransferNotifier');
 
 const DEFAULT_WIX_SYNC_LIMIT = Number.parseInt(
   process.env.WIX_DISCOVER_BOOKING_LIMIT || '100',
@@ -2470,22 +2471,48 @@ async function bookWixNextSession(req, res) {
       await supabaseAdmin.from('sessions').update({ package_group_id: packageGroupId, package_session_number: linkedSession.package_session_number || 1 }).eq('id', linkedSession.id);
       await supabaseAdmin.from('wix_bookings').update({ package_group_id: packageGroupId }).eq('wix_booking_id', wixRow.wix_booking_id);
     }
-    const inactivePackageStatuses = new Set(['cancelled', 'deleted', 'refunded', 'rescheduled']);
+    // 'rescheduled' is NOT an inactive status. A rescheduled session is a live, upcoming
+    // session that merely moved — unlike cancelled/deleted/refunded, it still occupies its
+    // slot in the package. Counting it as inactive meant a package whose only session had
+    // been rescheduled found NO active rows, fell through to `nextSessionNumber = 1`, and
+    // created a DUPLICATE session 1 — charged at the FULL package price, because price is
+    // only applied to session 1 — while the original rescheduled row stayed exactly where
+    // it was. That is how one package ended up billed twice with two calendar events.
+    const inactivePackageStatuses = new Set(['cancelled', 'deleted', 'refunded']);
     let nextSessionNumber = (wixRow.package_session_number || 1) + 1;
+    let livePackageRows = [];
     if (packageGroupId) {
       const { data: existingSessions } = await supabaseAdmin
         .from('sessions')
-        .select('package_session_number, status')
+        .select('id, package_session_number, status')
         .eq('package_group_id', packageGroupId);
-      const activeSessionNumbers = (existingSessions || [])
-        .filter((row) => !inactivePackageStatuses.has(String(row.status || '').toLowerCase()))
+      livePackageRows = (existingSessions || [])
+        .filter((row) => !inactivePackageStatuses.has(String(row.status || '').toLowerCase()));
+      const activeSessionNumbers = livePackageRows
         .map((row) => parseInt(row.package_session_number, 10))
         .filter((num) => Number.isFinite(num) && num > 0);
       if (activeSessionNumbers.length > 0) {
         nextSessionNumber = Math.max(...activeSessionNumbers) + 1;
+      } else if (livePackageRows.length > 0) {
+        // Live sessions exist but none carries a usable number — continue after them.
+        // Never restart at 1 while the package still has live rows.
+        nextSessionNumber = livePackageRows.length + 1;
       } else {
         nextSessionNumber = 1;
       }
+    }
+
+    // Defence in depth: refuse to mint a number this package already has live. Without this,
+    // any future miscount silently duplicates a session (and re-charges it, if it lands on 1).
+    const clash = livePackageRows.find(
+      (row) => parseInt(row.package_session_number, 10) === nextSessionNumber
+    );
+    if (clash) {
+      return res.status(409).json({
+        success: false,
+        error: `This package already has a live session ${nextSessionNumber}. Reschedule that session instead of booking a new one.`,
+        data: { conflicting_session_id: clash.id, package_session_number: nextSessionNumber },
+      });
     }
     const totalSessions = wixRow.session_count
       || wixRow.payload?.creditsAvailable
@@ -2651,7 +2678,7 @@ async function transferWixBooking(req, res) {
     // 1. Fetch the wix booking (only real columns)
     const { data: booking, error: fetchErr } = await supabaseAdmin
       .from('wix_bookings')
-      .select('id, wix_booking_id, therapist_name, client_full_name, client_first_name, client_email, client_phone, session_type, start_time, end_time, payload')
+      .select('id, wix_booking_id, therapist_name, client_full_name, client_first_name, client_email, client_phone, session_type, title, start_time, end_time, payload')
       .eq('id', id)
       .maybeSingle();
 
@@ -2676,7 +2703,9 @@ async function transferWixBooking(req, res) {
     if (booking.wix_booking_id) {
       const { data } = await supabaseAdmin
         .from('sessions')
-        .select(`id, psychologist_id, google_calendar_event_id, google_meet_link${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
+        // scheduled_date/time and client_id are needed for the transfer notification: the email
+        // reports the FINAL slot and, when the dialog also moved it, the previous one.
+        .select(`id, psychologist_id, client_id, status, scheduled_date, scheduled_time, google_calendar_event_id, google_meet_link${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
         .eq('wix_booking_id', booking.wix_booking_id)
         .maybeSingle();
       linkedSession = data || null;
@@ -2787,6 +2816,16 @@ async function transferWixBooking(req, res) {
         end_time: new Date(new Date(newStartTimeIso).getTime() + durationMin * 60000).toISOString(),
       } : {}),
     };
+    // `title` also carries the therapist name (2836 of 2857 rows have title === therapist_name),
+    // and the Discovery search matches on it. Leaving it behind on a transfer meant the booking
+    // kept surfacing under the OLD therapist's name: searching "Aswathy Raman" returned sessions
+    // now belonging to Thaniya, Aswathy Balan and Prijitha. Only rewrite it when it was in fact
+    // the old therapist's name, so a genuine service title is never clobbered.
+    const oldTitle = String(booking.title || '').trim();
+    const oldTherapistName = String(booking.therapist_name || '').trim();
+    if (oldTitle && oldTherapistName && oldTitle.toLowerCase() === oldTherapistName.toLowerCase()) {
+      wbUpdates.title = newPsychName;
+    }
 
     const { error: wbErr } = await supabaseAdmin.from('wix_bookings').update(wbUpdates).eq('id', booking.id);
     if (wbErr) return res.status(500).json({ success: false, error: wbErr.message });
@@ -2816,7 +2855,58 @@ async function transferWixBooking(req, res) {
       if (hasOrigPsychCol && !linkedSession.original_psychologist_id) {
         sessionUpdates.original_psychologist_id = linkedSession.psychologist_id;
       }
+      // A transfer that also moves the slot is a reschedule. This used to leave the status
+      // untouched, so a session whose therapist AND time had both changed still showed as
+      // plain "booked" in the admin list. Mirrors adminController.updateSession.
+      const slotMoved = Boolean(
+        (sessionUpdates.scheduled_date && sessionUpdates.scheduled_date !== linkedSession.scheduled_date) ||
+        (sessionUpdates.scheduled_time &&
+          String(sessionUpdates.scheduled_time).slice(0, 5) !== String(linkedSession.scheduled_time || '').slice(0, 5))
+      );
+      if (slotMoved && !['completed', 'cancelled', 'refunded', 'no_show', 'noshow'].includes(
+        String(linkedSession.status || '').toLowerCase()
+      )) {
+        sessionUpdates.status = 'rescheduled';
+        sessionUpdates.reminder_sent = false;
+      }
       await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
+
+      // Tell the client and the new therapist. This path sent NOTHING before, so a client
+      // could have their therapist and time changed without ever being told. Non-fatal: the
+      // transfer is already applied and must not be rolled back by a mail failure.
+      try {
+        let clientEmail = booking.client_email || null;
+        if (!clientEmail && linkedSession.client_id) {
+          const { data: cRow } = await supabaseAdmin
+            .from('clients').select('email, user_id').eq('id', linkedSession.client_id).maybeSingle();
+          clientEmail = cRow?.email || null;
+          if (!clientEmail && cRow?.user_id) {
+            const { data: uRow } = await supabaseAdmin
+              .from('users').select('email').eq('id', cRow.user_id).maybeSingle();
+            clientEmail = uRow?.email || null;
+          }
+        }
+        const { data: oldPsych } = linkedSession.psychologist_id
+          ? await supabaseAdmin.from('psychologists')
+              .select('first_name, last_name').eq('id', linkedSession.psychologist_id).maybeSingle()
+          : { data: null };
+
+        await notifySessionTransfer({
+          clientName: booking.client_full_name || booking.client_first_name || 'Client',
+          clientEmail,
+          oldPsychologistName: oldPsych ? `${oldPsych.first_name || ''} ${oldPsych.last_name || ''}`.trim() : null,
+          newPsychologistName: newPsychName,
+          newPsychologistEmail: newPsych.email || null,
+          sessionDate: sessionUpdates.scheduled_date || linkedSession.scheduled_date,
+          sessionTime: sessionUpdates.scheduled_time || linkedSession.scheduled_time,
+          oldSessionDate: linkedSession.scheduled_date,
+          oldSessionTime: linkedSession.scheduled_time,
+          meetLink: newMeetData.meetLink || linkedSession.google_meet_link || null,
+          label: 'transferWixBooking',
+        });
+      } catch (notifyErr) {
+        console.error('[transferWixBooking] transfer notification failed (non-fatal):', notifyErr.message || notifyErr);
+      }
     }
 
     // 8. Remove the Wix-native event from the OLD therapist's calendar at the old slot.

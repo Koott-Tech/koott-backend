@@ -2245,6 +2245,175 @@ The Koott Team
     }
   }
 
+  /**
+   * Session moved to a different therapist. Goes to BOTH the client and the new therapist —
+   * `isPsychologist` only changes the wording, never the facts.
+   *
+   * The transfer dialog can also change the date/time, so `sessionDate`/`sessionTime` are the
+   * FINAL slot; pass `oldSessionDate`/`oldSessionTime` only when they actually differ and the
+   * email will show the reschedule as well.
+   */
+  async sendTransferNotification({
+    to,
+    clientName,
+    oldPsychologistName,
+    newPsychologistName,
+    sessionDate,
+    sessionTime,
+    oldSessionDate = null,
+    oldSessionTime = null,
+    meetLink = null,
+    isPsychologist = false
+  }) {
+    try {
+      const formatDateLong = (dateStr) => {
+        if (!dateStr) return '';
+        if (!/^\d{4}-\d{2}-\d{2}/.test(String(dateStr))) return String(dateStr);
+        const d = new Date(`${String(dateStr).slice(0, 10)}T00:00:00+05:30`);
+        if (Number.isNaN(d.getTime())) return String(dateStr);
+        return d.toLocaleDateString('en-IN', {
+          weekday: 'long', month: 'long', day: 'numeric', timeZone: 'Asia/Kolkata'
+        });
+      };
+
+      const formattedDate = formatDateLong(sessionDate);
+      const formattedTime = formatTimeFromString(sessionTime);
+      const slotChanged = Boolean(
+        oldSessionDate && oldSessionTime &&
+        (String(oldSessionDate).slice(0, 10) !== String(sessionDate).slice(0, 10) ||
+          String(oldSessionTime).slice(0, 5) !== String(sessionTime).slice(0, 5))
+      );
+      const formattedOldDate = slotChanged ? formatDateLong(oldSessionDate) : '';
+      const formattedOldTime = slotChanged ? formatTimeFromString(oldSessionTime) : '';
+
+      const recipientName = isPsychologist ? newPsychologistName : clientName;
+      const intro = isPsychologist
+        ? `A session with <strong>${clientName}</strong> has been transferred to you${oldPsychologistName ? ` from <strong>${oldPsychologistName}</strong>` : ''}.`
+        : `Your session has been transferred${oldPsychologistName ? ` from <strong>${oldPsychologistName}</strong>` : ''} to <strong>${newPsychologistName}</strong>.`;
+      const contactEmail = 'hey@koott.com';
+      const contactPhone = '+91-9539007766';
+
+      const mailOptions = {
+        from: {
+          name: 'Koott',
+          address: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'care@koott.in'
+        },
+        replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'care@koott.in',
+        to,
+        subject: slotChanged ? 'Session Transferred & Rescheduled' : 'Session Transferred',
+        html: `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          </head>
+          <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f7fa;">
+            <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f7fa;">
+              <tr>
+                <td style="padding: 20px 10px;">
+                  <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                    <tr>
+                      <td style="background: linear-gradient(135deg, #3d985c 0%, #5a4a8a 100%); padding: 30px 40px; text-align: center;">
+                        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse; margin: 0 auto;">
+                          <tr>
+                            <td align="center" style="padding-bottom: 15px;">
+                              <img src="${PRODUCTION_SITE_URL}/logo.png" alt="Koott" width="60" height="60" border="0" style="display: block; max-width: 60px; width: 60px; height: auto; margin: 0 auto;" />
+                            </td>
+                          </tr>
+                          <tr>
+                            <td align="center">
+                              <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 600;">${slotChanged ? 'Session Transferred &amp; Rescheduled' : 'Session Transferred'}</h1>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+
+                    <tr>
+                      <td style="padding: 30px 20px;">
+                        <h2 style="color: #1a202c; margin: 0 0 20px 0; font-size: 24px; font-weight: 600;">Hello ${recipientName},</h2>
+
+                        <p style="color: #4a5568; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">${intro}</p>
+
+                        <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                          <tr>
+                            <td style="padding: 0 0 20px 0;">
+                              <h3 style="color: #3d985c; margin: 0 0 20px 0; font-size: 20px; font-weight: 600;">Session Details</h3>
+                              <table role="presentation" style="width: 100%; border-collapse: collapse;">
+                                <tr>
+                                  <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Therapist:</strong></td>
+                                  <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${newPsychologistName}</td>
+                                </tr>
+                                ${isPsychologist ? `
+                                <tr>
+                                  <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Client:</strong></td>
+                                  <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${clientName}</td>
+                                </tr>` : ''}
+                                <tr>
+                                  <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Date:</strong></td>
+                                  <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${formattedDate}</td>
+                                </tr>
+                                <tr>
+                                  <td style="padding: 8px 0; color: #4a5568; font-size: 15px;"><strong style="color: #2d3748;">Time:</strong></td>
+                                  <td style="padding: 8px 0; color: #2d3748; font-size: 15px; text-align: right;">${formattedTime}</td>
+                                </tr>
+                              </table>
+                            </td>
+                          </tr>
+                        </table>
+
+                        ${slotChanged ? `
+                        <p style="color: #744210; font-size: 14px; line-height: 1.8; margin: 0 0 30px 0; padding: 15px; background-color: #fffaf0; border-left: 4px solid #f6ad55; border-radius: 4px;">
+                          <strong>⏰ The date/time has also changed.</strong><br>
+                          Previously: ${formattedOldDate} at ${formattedOldTime}
+                        </p>` : ''}
+
+                        ${meetLink ? `
+                        <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px 0;">
+                          <tr>
+                            <td style="padding: 0 0 20px 0; text-align: center;">
+                              <a href="${meetLink}" target="_blank" style="display: inline-block; background: #3d985c; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px;">
+                                Join Session
+                              </a>
+                              <p style="color: #718096; font-size: 13px; margin: 12px 0 0 0;">This is a new meeting link — please use this one.</p>
+                            </td>
+                          </tr>
+                        </table>` : ''}
+
+                        <p style="color: #4a5568; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">If you have any questions, please contact us at <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a></p>
+
+                        <p style="color: #2d3748; font-size: 15px; margin: 0;">
+                          Best regards,<br>
+                          <strong style="color: #3d985c;">The Koott Team</strong>
+                        </p>
+                      </td>
+                    </tr>
+
+                    <tr>
+                      <td style="background: #f7fafc; padding: 25px 40px; text-align: center; border-top: 1px solid #e2e8f0;">
+                        <p style="color: #718096; font-size: 13px; margin: 0; line-height: 1.6;">
+                          This is an automated message. Please do not reply to this email.<br>
+                          If you have any questions, please contact <a href="mailto:${contactEmail}" style="color: #3d985c; text-decoration: none;">${contactEmail}</a> or <a href="https://wa.me/919539007766" style="color: #3d985c; text-decoration: none;">${contactPhone}</a>
+                        </p>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </body>
+          </html>
+        `
+      };
+
+      return await this.transporter.sendMail(this.addEmailHeaders(mailOptions));
+    } catch (error) {
+      console.error('Error sending transfer notification:', error);
+      throw error;
+    }
+  }
+
   async sendNoShowNotification({
     to,
     clientName,

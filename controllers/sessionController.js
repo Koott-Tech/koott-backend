@@ -19,6 +19,7 @@ const {
   getPsychologistDisplayName,
 } = require('../utils/sessionTitleFormatter');
 const { assertClientPackageHasAvailableSlot } = require('../services/packageService');
+const { notifySessionTransfer } = require('../utils/sessionTransferNotifier');
 const { getMeetEventDurationMinutes } = require('../utils/sessionMeetDuration');
 const {
   enrichSessionRowDisplayFields,
@@ -399,6 +400,19 @@ const getAllSessions = async (req, res) => {
       const nameClientIds = new Set();
       const psychologistIds = new Set();
 
+      // Names are split across first_name/last_name, and each column was matched on its own —
+      // so a FULL name never matched anything ("aswathy raman" is in neither column by itself)
+      // and every multi-word search silently returned zero sessions. Match each word separately,
+      // then require ALL words to appear in the combined name, so "aswathy" finds every Aswathy
+      // while "aswathy raman" narrows to just her.
+      const terms = searchTerm.split(/\s+/).map((t) => t.trim()).filter(Boolean);
+      const anyWord = (cols) =>
+        cols.flatMap((c) => terms.map((t) => `${c}.ilike.%${t}%`)).join(',');
+      const matchesAllWords = (...parts) => {
+        const hay = parts.filter(Boolean).join(' ').toLowerCase();
+        return terms.every((t) => hay.includes(t.toLowerCase()));
+      };
+
       const [matchedUsersRes, matchedClientsRes, matchedPsychologistsRes] = await Promise.all([
         supabaseAdmin
           .from('users')
@@ -407,15 +421,24 @@ const getAllSessions = async (req, res) => {
           .limit(100),
         supabaseAdmin
           .from('clients')
-          .select('id')
-          .or(`first_name.ilike.%${searchTerm}%,last_name.ilike.%${searchTerm}%,child_name.ilike.%${searchTerm}%`)
-          .limit(100),
+          .select('id, first_name, last_name, child_name')
+          .or(anyWord(['first_name', 'last_name', 'child_name']))
+          .limit(300),
         supabaseAdmin
           .from('psychologists')
-          .select('id')
-          .or(`first_name.ilike.%${searchTerm}%,last_name.ilike.%${searchTerm}%`)
-          .limit(100),
+          .select('id, first_name, last_name')
+          .or(anyWord(['first_name', 'last_name']))
+          .limit(300),
       ]);
+      // Narrow the any-word candidates down to rows containing every word.
+      if (matchedClientsRes.data) {
+        matchedClientsRes.data = matchedClientsRes.data.filter((r) =>
+          matchesAllWords(r.first_name, r.last_name) || matchesAllWords(r.child_name));
+      }
+      if (matchedPsychologistsRes.data) {
+        matchedPsychologistsRes.data = matchedPsychologistsRes.data.filter((r) =>
+          matchesAllWords(r.first_name, r.last_name));
+      }
 
       const matchedUserIds = (matchedUsersRes.data || []).map((row) => row.id).filter(Boolean);
       if (matchedUserIds.length) {
@@ -1454,18 +1477,29 @@ const rescheduleSession = async (req, res) => {
       );
     }
 
-    // Check if new time slot is already booked
-    const { data: existingSession } = await supabaseAdmin
+    // Check if new time slot is already booked.
+    // scheduled_time is TEXT: the stored value is 'HH:MM:SS' while new_time arrives as 'HH:MM',
+    // so comparing the raw value matched nothing and the guard never fired. Match both shapes,
+    // and don't use .single() — it reports "2+ rows" as an error with data=null, i.e. as though
+    // the slot were free.
+    const normalizedNewTime = formatTime(new_time);
+    const { data: existingSessions, error: conflictError } = await supabaseAdmin
       .from('sessions')
       .select('id')
       .eq('psychologist_id', session.psychologist_id)
-      .eq('scheduled_date', new_date)
-      .eq('scheduled_time', new_time)
-      .in('status', ['booked', 'rescheduled'])
-      .neq('id', sessionId)
-      .single();
+      .eq('scheduled_date', formatDate(new_date))
+      .in('scheduled_time', [normalizedNewTime, normalizedNewTime.slice(0, 5)])
+      .in('status', ['booked', 'scheduled', 'confirmed', 'reschedule_requested', 'rescheduled'])
+      .neq('id', sessionId);
 
-    if (existingSession) {
+    if (conflictError) {
+      console.error('Reschedule slot conflict lookup failed:', conflictError.message);
+      return res.status(500).json(
+        errorResponse('Could not verify slot availability. Please try again.')
+      );
+    }
+
+    if (existingSessions && existingSessions.length) {
       return res.status(400).json(
         errorResponse('This time slot is already booked')
       );
@@ -2841,6 +2875,17 @@ async function transferSession(req, res) {
     if (hasOrigPsychCol && !session.original_psychologist_id) {
       updates.original_psychologist_id = session.psychologist_id;
     }
+    // A transfer that also moves the slot is a reschedule — same rule as the Wix path and
+    // adminController.updateSession, so the admin list doesn't keep showing "booked".
+    if (
+      (new_date || new_time) &&
+      (formatDate(finalDate) !== session.scheduled_date ||
+        formatTime(finalTime).slice(0, 5) !== String(session.scheduled_time || '').slice(0, 5)) &&
+      !['completed', 'cancelled', 'refunded', 'no_show', 'noshow'].includes(String(session.status || '').toLowerCase())
+    ) {
+      updates.status = 'rescheduled';
+      updates.reminder_sent = false;
+    }
 
     // Record optional differential payment (transfer fee) if provided
     if (transfer_fee_amount) {
@@ -2918,32 +2963,24 @@ async function transferSession(req, res) {
           }
         }
 
-        // Send Email to Client, New Therapist, and Admin
-        await emailService.sendSessionConfirmation({
+        // Email the client and the NEW therapist that the session was transferred.
+        // This used to send a generic "session confirmation", which never said the therapist
+        // had changed — the client just got what looked like a duplicate booking mail. Uses
+        // the same shared notifier as the Wix transfer path so the two cannot diverge.
+        const oldPsychForMail = Array.isArray(session.psychologist) ? session.psychologist[0] : session.psychologist;
+        await notifySessionTransfer({
           clientName,
-          psychologistName,
-          clientEmail: clientEmail || 'client@placeholder.com',
-          psychologistEmail: newPsych.email || 'psychologist@placeholder.com',
-          scheduledDate: formatDate(finalDate),
-          scheduledTime: formatTime(finalTime),
+          clientEmail,
+          oldPsychologistName: oldPsychForMail ? getPsychologistDisplayName(oldPsychForMail) : null,
+          newPsychologistName: psychologistName,
+          newPsychologistEmail: newPsych.email || null,
           sessionDate: formatDate(finalDate),
           sessionTime: formatTime(finalTime),
-          googleMeetLink: meetLink,
+          oldSessionDate: session.scheduled_date,
+          oldSessionTime: session.scheduled_time,
           meetLink,
-          googleCalendarEventId: newMeetData.eventId,
-          sessionId: session.id,
-          price: paymentRow?.amount ?? 0,
-          amount: paymentRow?.amount ?? 0,
-          status: session.status || 'booked',
-          psychologistId: new_psychologist_id,
-          clientId: session.client_id,
-          packageInfo,
-          durationMinutes: getMeetEventDurationMinutes(packageInfo?.packageType),
-          receiptId: null,
-          receiptNumber: null,
-          receiptPdfBuffer: null
+          label: 'transferSession',
         });
-        console.log('✅ [transferSession] Session confirmation emails sent');
 
         // Send WhatsApp to Client
         if (client?.phone_number && meetLink) {

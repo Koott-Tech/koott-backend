@@ -22,6 +22,40 @@ const {
 const emailService = require('../utils/emailService');
 const { generateCertificate } = require('../utils/certificateService');
 
+/** Statuses that still occupy a therapist's slot (a cancelled/no-show/completed row does not). */
+const SLOT_OCCUPYING_STATUSES = ['booked', 'scheduled', 'confirmed', 'reschedule_requested', 'rescheduled'];
+
+/**
+ * Find another session already sitting in a therapist's slot.
+ *
+ * `sessions.scheduled_time` is TEXT, not a `time` column, so '22:00' and '22:00:00' are two
+ * different strings to Postgres and existing rows hold both shapes. Every caller must compare
+ * against BOTH forms — matching only the raw request value ('22:00') silently found nothing
+ * and let a session be moved on top of one already booked at '22:00:00'.
+ *
+ * Returns the conflicting rows (empty array when the slot is free). Deliberately does not use
+ * .single()/.maybeSingle(): those turn "2+ rows matched" into a PostgREST error with data=null,
+ * which reads as "no conflict" and disables the guard exactly when a slot is already doubled up.
+ */
+async function findSlotConflicts(psychologistId, date, time, { excludeSessionId = null } = {}) {
+  if (!psychologistId || !date || !time) return [];
+  const hhmmss = formatTime(String(time));
+  const hhmm = hhmmss.slice(0, 5);
+
+  let query = supabaseAdmin
+    .from('sessions')
+    .select('id, client_id, scheduled_date, scheduled_time, status')
+    .eq('psychologist_id', psychologistId)
+    .eq('scheduled_date', formatDate(date))
+    .in('scheduled_time', [hhmmss, hhmm])
+    .in('status', SLOT_OCCUPYING_STATUSES);
+  if (excludeSessionId) query = query.neq('id', excludeSessionId);
+
+  const { data, error } = await query;
+  if (error) throw error; // fail closed — never treat a lookup failure as "slot is free"
+  return data || [];
+}
+
 async function writeSessionDeliveryMarkers(sessionId, fields) {
   if (!sessionId || !fields || Object.keys(fields).length === 0) return;
   try {
@@ -3964,12 +3998,40 @@ const updateSession = async (req, res) => {
     const effectiveDate = scheduled_date || currentSession.scheduled_date;
     const effectiveTime = scheduled_time || currentSession.scheduled_time;
     const scheduleChanged = (
-      (scheduled_date && scheduled_date !== currentSession.scheduled_date) ||
-      (scheduled_time && scheduled_time !== currentSession.scheduled_time)
+      (scheduled_date && formatDate(scheduled_date) !== currentSession.scheduled_date) ||
+      // Compare normalised: the UI may send '22:00' where the row holds '22:00:00', which read
+      // as a change on every save and needlessly moved the calendar event each time.
+      (scheduled_time && formatTime(scheduled_time) !== formatTime(currentSession.scheduled_time || ''))
     );
     const isSessionWithMeet = ['booked', 'rescheduled', 'reschedule_requested', 'scheduled', 'confirmed'].includes(
       (status || currentSession.status)?.toLowerCase?.() || status || currentSession.status
     );
+
+    // Refuse to move a session onto a slot the therapist already has taken. This endpoint is
+    // what the admin bookings page uses to reschedule, and it had no conflict check at all —
+    // so a session could be dropped on top of an existing one, leaving the therapist with two
+    // sessions (and therefore two calendar events) in the same slot.
+    if ((scheduleChanged || doctorChanged) && isSessionWithMeet && effectiveDate && effectiveTime) {
+      let slotConflicts;
+      try {
+        slotConflicts = await findSlotConflicts(
+          psychologist_id || originalPsychId,
+          effectiveDate,
+          effectiveTime,
+          { excludeSessionId: sessionId }
+        );
+      } catch (conflictErr) {
+        console.error('[Admin] Slot conflict lookup failed:', conflictErr.message);
+        return res.status(500).json(errorResponse('Could not verify slot availability. Please try again.'));
+      }
+      if (slotConflicts.length) {
+        return res.status(409).json(
+          errorResponse('This therapist already has a session at that date and time.', {
+            conflicting_session_ids: slotConflicts.map((s) => s.id),
+          })
+        );
+      }
+    }
 
     let adminRescheduleMeetMinutes = 50;
     if (currentSession.session_type === 'free_assessment') {
@@ -4207,8 +4269,11 @@ const updateSession = async (req, res) => {
 
     if (psychologist_id) updateData.psychologist_id = psychologist_id;
     if (client_id) updateData.client_id = client_id;
-    if (scheduled_date) updateData.scheduled_date = scheduled_date;
-    if (scheduled_time) updateData.scheduled_time = scheduled_time;
+    if (scheduled_date) updateData.scheduled_date = formatDate(scheduled_date);
+    // Normalise to HH:MM:SS. scheduled_time is a TEXT column, so writing the raw 'HH:MM' the UI
+    // sends left the table holding two different spellings of the same time — and every slot
+    // lookup that compares the column by equality then missed half the rows.
+    if (scheduled_time) updateData.scheduled_time = formatTime(scheduled_time);
     if (session_type !== undefined) updateData.session_type = session_type || null;
     if (session_count !== undefined) {
       updateData.session_count = (session_count === null || session_count === '') ? null : parseInt(session_count, 10);
@@ -5137,16 +5202,17 @@ const bookPackageNextSession = async (req, res) => {
 
     const formattedDate = formatDate(scheduled_date);
     const formattedTime = formatTime(scheduled_time);
-    const { data: existingSession } = await supabaseAdmin
-      .from('sessions')
-      .select('id')
-      .eq('psychologist_id', psychologistId)
-      .eq('scheduled_date', formattedDate)
-      .eq('scheduled_time', formattedTime)
-      .in('status', ['booked', 'scheduled', 'reschedule_requested', 'rescheduled'])
-      .maybeSingle();
+    let existingSlotSessions;
+    try {
+      existingSlotSessions = await findSlotConflicts(psychologistId, formattedDate, formattedTime);
+    } catch (conflictErr) {
+      console.error('[bookPackageNextSession] Slot conflict lookup failed:', conflictErr.message);
+      return res.status(500).json(
+        errorResponse('Could not verify slot availability. Please try again.')
+      );
+    }
 
-    if (existingSession) {
+    if (existingSlotSessions.length) {
       return res.status(409).json(
         errorResponse('This time slot was just booked by another user. Please select another time.')
       );
