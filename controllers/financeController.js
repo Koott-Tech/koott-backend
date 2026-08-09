@@ -255,6 +255,70 @@ function getFinancePackageType(session, packageMeta = null) {
 // skip these rows so a backfill never overwrites a deliberate correction.
 const MANUAL_COMMISSION_EDIT_TAG = 'MANUAL_COMMISSION_EDIT';
 
+/**
+ * Fetch rows for a list of ids, chunked AND concurrent.
+ *
+ * A single `.in()` with hundreds of UUIDs overflows the PostgREST GET URL, so these lookups
+ * must be chunked — but they were also `await`ed one chunk at a time, stacking a full network
+ * round-trip per 100 ids. Render and Supabase are separate hosts, so each one costs ~100ms:
+ * the finance sessions page spent 9 of its 16 round-trips inside two such loops.
+ *
+ * Same chunking, same results, issued in parallel.
+ */
+/**
+ * Page through a PostgREST query until exhausted.
+ *
+ * PostgREST returns at most 1000 rows per response and silently ignores a larger `.limit()`,
+ * so any "fetch everything" query quietly truncates once a table passes 1000 rows — which is
+ * how the finance dashboard ended up reporting totals for only part of the year.
+ *
+ * Takes a FACTORY, not a built query: a builder cannot be re-ranged after it has run.
+ */
+async function fetchAllPagesOf(buildQuery, pageSize = 1000) {
+  const first = await buildQuery().range(0, pageSize - 1);
+  if (first.error) return { data: [], error: first.error };
+  const head = first.data || [];
+  // Short read → that was everything, one round-trip total.
+  if (head.length < pageSize) return { data: head, error: null };
+
+  // More to come. Paging sequentially would add a full round-trip per 1000 rows; ask how many
+  // there are and fetch the rest CONCURRENTLY, so the wall time stays ~2 round-trips whatever
+  // the row count. Capped so a runaway query can't fan out unboundedly.
+  const { count } = await buildQuery().select('id', { count: 'exact', head: true });
+  const total = Number.isFinite(count) ? count : head.length + pageSize;
+  const pages = Math.min(Math.ceil(total / pageSize), 25);
+  if (pages <= 1) return { data: head, error: null };
+
+  const rest = await Promise.all(
+    Array.from({ length: pages - 1 }, (_, i) =>
+      buildQuery().range((i + 1) * pageSize, (i + 2) * pageSize - 1))
+  );
+  const out = [...head];
+  let error = null;
+  for (const r of rest) {
+    if (r.error && !error) error = r.error;
+    if (r.data) out.push(...r.data);
+  }
+  return { data: out, error };
+}
+
+async function selectByIdsChunked(table, columns, column, ids, chunkSize = 100) {
+  const unique = [...new Set((ids || []).filter(Boolean))];
+  if (!unique.length) return { data: [], error: null };
+  const chunks = [];
+  for (let i = 0; i < unique.length; i += chunkSize) chunks.push(unique.slice(i, i + chunkSize));
+  const results = await Promise.all(
+    chunks.map((chunk) => supabaseAdmin.from(table).select(columns).in(column, chunk))
+  );
+  const data = [];
+  let error = null;
+  for (const r of results) {
+    if (r.error && !error) error = r.error;
+    if (r.data) data.push(...r.data);
+  }
+  return { data, error };
+}
+
 const PENDING_SESSION_CARD_STATUSES = new Set([
   'booked',
   // A handful of rows carry a literal 'pending' status (e.g. sessions transferred between
@@ -502,22 +566,24 @@ const getDashboard = async (req, res) => {
       let sessions = null;
       let sessionsError = null;
       const dashBcf = appendBookingTimeSelectFragment(dashBookingTimeCol);
-      let sessionsQuery = supabaseAdmin
-        .from('sessions')
-        .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
-        .in('status', ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
-        .neq('session_type', 'free_assessment');
+      // Built fresh per page: a PostgREST builder cannot be safely re-ranged after execution.
+      //
+      // This used to end in `.limit(5000)`, which does NOT do what it looks like — PostgREST
+      // caps a response at 1000 rows regardless. The dashboard therefore aggregated only the
+      // newest 1000 of 3000 matching sessions, so every revenue and session total silently
+      // excluded everything booked before ~12 Jul 2026. Paging covers the full range.
+      const buildDashSessionsQuery = () => {
+        let q = supabaseAdmin
+          .from('sessions')
+          .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
+          .in('status', ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+          .neq('session_type', 'free_assessment');
+        // Not all-time: from the start of the year, enough for the MTD/QTD/YTD cards.
+        if (!allTimeMode) q = q.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+        return q.order('created_at', { ascending: false });
+      };
 
-      // Optimization: If not all-time, filter from start of year to ensure we get enough data for MTD/QTD/YTD cards
-      // without hitting the default 1000-row limit on old data.
-      if (!allTimeMode) {
-        sessionsQuery = sessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
-      }
-      
-      // Order by latest first and increase limit to avoid missing recent bookings
-      sessionsQuery = sessionsQuery.order('created_at', { ascending: false }).limit(5000);
-
-      ({ data: sessions, error: sessionsError } = await sessionsQuery);
+      ({ data: sessions, error: sessionsError } = await fetchAllPagesOf(buildDashSessionsQuery));
 
       // Legacy schema fallback: sessions.payment_id not present
       if (sessionsError && String(sessionsError.message || '').includes('payment_id')) {
@@ -2588,32 +2654,24 @@ const getSessions = async (req, res) => {
     // Chunk these `.in()` lookups in batches of 100. A single `.in()` with hundreds of
     // UUIDs overflows the PostgREST GET URL and the whole request fails ("fetch failed"),
     // which silently dropped ALL client/therapist names for FK-based rows.
-    for (let i = 0; i < psychologistIds.length; i += 100) {
-      const { data: psychData } = await supabaseAdmin
-        .from('psychologists')
-        .select('id, first_name, last_name')
-        .in('id', psychologistIds.slice(i, i + 100));
-      if (psychData) psychologists.push(...psychData);
-    }
-
-    for (let i = 0; i < clientIds.length; i += 100) {
-      const { data: clientData } = await supabaseAdmin
-        .from('clients')
-        .select('id, first_name, last_name, child_name, email, phone_number')
-        .in('id', clientIds.slice(i, i + 100));
-      if (clientData) clients.push(...clientData);
-    }
+    // Both lookups are independent — run them (and their chunks) concurrently.
+    const [psychRes, clientRes] = await Promise.all([
+      selectByIdsChunked('psychologists', 'id, first_name, last_name', 'id', psychologistIds),
+      selectByIdsChunked('clients', 'id, first_name, last_name, child_name, email, phone_number', 'id', clientIds),
+    ]);
+    psychologists.push(...(psychRes.data || []));
+    clients.push(...(clientRes.data || []));
 
     // Wix rows have null client_id/psychologist_id — their client & therapist live in the
     // wix_bookings mirror's flat columns (exactly what the admin Wix Discovery page reads).
     // Batch-fetch them so finance rows show the same name/email/phone/therapist.
     const wixBookingIds = [...new Set(sessionsData.map(s => s?.wix_booking_id).filter(Boolean))];
     const wixMirrorMap = {};
-    for (let i = 0; i < wixBookingIds.length; i += 100) {
-      const { data: wbRows } = await supabaseAdmin
-        .from('wix_bookings')
-        .select('wix_booking_id, client_full_name, client_first_name, client_last_name, client_email, client_phone, therapist_name')
-        .in('wix_booking_id', wixBookingIds.slice(i, i + 100));
+    {
+      const { data: wbRows } = await selectByIdsChunked(
+        'wix_bookings',
+        'wix_booking_id, client_full_name, client_first_name, client_last_name, client_email, client_phone, therapist_name',
+        'wix_booking_id', wixBookingIds);
       (wbRows || []).forEach(r => { wixMirrorMap[r.wix_booking_id] = r; });
     }
 

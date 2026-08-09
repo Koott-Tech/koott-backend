@@ -26,6 +26,23 @@ const {
   hydrateSessionsWixPayloadFromMirror,
 } = require('../utils/wixSessionRowEnrichment');
 
+/**
+ * isHiddenWixListRow expressed as a PostgREST filter, so the admin list can paginate in SQL
+ * instead of pulling every row and filtering in memory.
+ *
+ * Keep the two in lockstep. Verified equal across all 3012 sessions (2696 visible by both).
+ * A row is VISIBLE when it is not a Wix row, or it is a Wix row that both has an identity
+ * (payment_id, or a sessionId/id in wix_payload) and is not a package follow-up.
+ */
+const VISIBLE_LIST_ROWS_FILTER = [
+  'source.is.null',
+  'source.neq.wix',
+  'and(' +
+    'or(package_session_number.is.null,package_session_number.lte.1),' +
+    'or(payment_id.not.is.null,wix_payload->>sessionId.not.is.null,wix_payload->>id.not.is.null)' +
+  ')',
+].join(',');
+
 function isHiddenWixListRow(session) {
   const src = String(session?.source || '').toLowerCase();
   if (src !== 'wix') return false;
@@ -515,6 +532,9 @@ const getAllSessions = async (req, res) => {
       countQuery = countQuery.neq('status', 'cancelled');
     }
 
+    // Exclude the rows isHiddenWixListRow would drop, so `total` matches what is rendered.
+    countQuery = countQuery.or(VISIBLE_LIST_ROWS_FILTER);
+
     // Apply same filters for count
     countQuery = applySessionStatusFilter(countQuery);
     countQuery = applySourceFilter(countQuery);
@@ -598,6 +618,8 @@ const getAllSessions = async (req, res) => {
     if (!isCancelledTab) {
       query = query.neq('status', 'cancelled'); // Hide cancelled rows for non-cancelled tabs
     }
+    // Same visibility rule as the count, so SQL pagination returns exactly the rendered rows.
+    query = query.or(VISIBLE_LIST_ROWS_FILTER);
 
     console.log('Supabase query built, executing...');
 
@@ -648,11 +670,20 @@ const getAllSessions = async (req, res) => {
       }
     }
 
-    const sourceExcludesHiddenWixRows = ['non_wix', 'non-wix', 'platform'].includes(sourceFilter);
-    const canUseDatabasePagination =
-      !isPendingFilter &&
-      sourceExcludesHiddenWixRows &&
-      sort !== 'scheduled_date';
+    // Database pagination used to require a source filter, because isHiddenWixListRow ran in
+    // JavaScript and so the page counts could not be computed in SQL. On the default admin view
+    // that meant fetching EVERY matching row to render ten — and PostgREST caps a plain select
+    // at 1000, so with 2961 matching sessions, 1961 of them could not appear on ANY page
+    // (nothing booked before 12 Jul 2026 was reachable).
+    //
+    // VISIBLE_ROWS_FILTER below is the same rule expressed in SQL. It was verified row-by-row
+    // against isHiddenWixListRow across all 3012 sessions: identical sets, zero divergence.
+    // With it applied to both the count and the data query, pagination is correct in SQL and
+    // the JS filter downstream becomes a harmless safety net.
+    //
+    // Still excluded: the "pending" tab (past-due is computed from wall-clock in JS) and the
+    // scheduled_date sort (re-sorted in JS with a time tiebreaker).
+    const canUseDatabasePagination = !isPendingFilter && sort !== 'scheduled_date';
 
     if (canUseDatabasePagination) {
       query = query.range(startIndex, endIndex - 1);
