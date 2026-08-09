@@ -5259,6 +5259,72 @@ const bookPackageNextSession = async (req, res) => {
       },
     };
 
+    // ── wix_bookings MIRROR ──────────────────────────────────────────────────
+    // Create the mirror row BEFORE the session (sessions.wix_booking_id FKs to it), exactly as
+    // bookWixNextSession does. Without it these sessions had no wix_booking_id at all, so the
+    // Wix Discovery page could only surface them through its unpaginated "platform sessions"
+    // side-channel — where they were silently dropped (a 6-session package showed 1/6 and 5/6
+    // while 2/6, 3/6 and 4/6 vanished). With a mirror they are ordinary Wix rows: paginated,
+    // searchable, and visible like every other booking.
+    const syntheticWixBookingId = `admin_manual_${Date.now()}`;
+    try {
+      const [{ data: mirrorClient }, { data: mirrorPsych }] = await Promise.all([
+        supabaseAdmin.from('clients').select('first_name, last_name, phone_number, email, user_id').eq('id', client_id).maybeSingle(),
+        supabaseAdmin.from('psychologists').select('first_name, last_name').eq('id', psychologistId).maybeSingle(),
+      ]);
+      let mirrorEmail = mirrorClient?.email || null;
+      if (!mirrorEmail && mirrorClient?.user_id) {
+        const { data: u } = await supabaseAdmin.from('users').select('email').eq('id', mirrorClient.user_id).maybeSingle();
+        mirrorEmail = u?.email || null;
+      }
+      const clientFullName = `${mirrorClient?.first_name || ''} ${mirrorClient?.last_name || ''}`.trim() || null;
+      const therapistName = `${mirrorPsych?.first_name || ''} ${mirrorPsych?.last_name || ''}`.trim() || null;
+      const startIso = new Date(`${formattedDate}T${formattedTime}+05:30`);
+      const durationMin = getMeetEventDurationMinutes(clientPackage.package?.package_type);
+
+      const { error: mirrorError } = await supabaseAdmin.from('wix_bookings').insert({
+        wix_booking_id: syntheticWixBookingId,
+        wix_session_id: syntheticWixBookingId,
+        status: 'booked',
+        session_type: sessionTypeForPackage,
+        session_count: totalSessionsCount,
+        package_session_number: nextSessionNumber,
+        package_group_id: inheritedGroupId,
+        therapist_name: therapistName,
+        // `title` mirrors therapist_name — the Discovery search matches on it.
+        title: therapistName,
+        client_full_name: clientFullName,
+        client_first_name: mirrorClient?.first_name || null,
+        client_last_name: mirrorClient?.last_name || null,
+        client_email: mirrorEmail,
+        client_phone: mirrorClient?.phone_number || null,
+        start_time: Number.isNaN(startIso.getTime()) ? null : startIso.toISOString(),
+        end_time: Number.isNaN(startIso.getTime()) ? null : new Date(startIso.getTime() + durationMin * 60000).toISOString(),
+        price: '0', // follow-ups are already paid for by session 1
+        locally_modified: true,
+        payload: {
+          bookingType: sessionTypeForPackage,
+          packageType: clientPackage.package?.package_type || null,
+          planSessionNumber: nextSessionNumber,
+          creditsAvailable: totalSessionsCount,
+          isAdminManual: true,
+          manualBooking: true,
+        },
+        created_at: nowIso,
+        updated_at: nowIso,
+        synced_at: nowIso,
+      });
+      if (mirrorError) {
+        // Non-fatal: better a session with no mirror than no session at all. It will still work
+        // everywhere except the Discovery listing.
+        console.warn('[bookPackageNextSession] wix_bookings mirror insert failed (non-fatal):', mirrorError.message);
+      } else {
+        sessionData.wix_booking_id = syntheticWixBookingId;
+      }
+    } catch (mirrorErr) {
+      console.warn('[bookPackageNextSession] wix_bookings mirror skipped (non-fatal):', mirrorErr.message || mirrorErr);
+    }
+
     const { data: session, error: sessionError } = await supabaseAdmin
       .from('sessions')
       .insert([sessionData])
