@@ -87,12 +87,46 @@ function computeSessionDoctorWallet(session, dc, ch, opts) {
       ? [...firstKeys, ...followupKeys]
       : (isFirst === false ? [...followupKeys, ...firstKeys] : [...followupKeys, ...firstKeys]);
 
-    let totalPackageCommission = parseFloat(
-      orderedKeys.reduce((value, key) => {
-        if (value != null) return value;
-        return Object.prototype.hasOwnProperty.call(pkgPackages, key) ? pkgPackages[key] : dc[key];
-      }, null) ?? 0
-    );
+    const pickTotal = (keys) => keys.reduce((value, key) => {
+      if (value != null) return value;
+      return Object.prototype.hasOwnProperty.call(pkgPackages, key) ? pkgPackages[key] : dc[key];
+    }, null);
+
+    let totalPackageCommission = parseFloat(pickTotal(orderedKeys) ?? 0);
+
+    /**
+     * Per-session split.
+     *
+     * The stored package totals are NOT flat multiples — the rate sheet builds a "first"
+     * package as one session at the first-session rate plus the rest at the follow-up rate
+     * (Thaniya's 3-pack: 1250 + 1300 + 1300 = 3850). Dividing that total equally gave every
+     * session 1283.33: a rate the sheet never specifies, and fractions on screen for a
+     * business whose prices are whole rupees.
+     *
+     * So recover the two per-session rates from the two totals:
+     *     follow-up/session = package_N_followup / N
+     *     first/session     = package_N_first_session - follow-up/session * (N - 1)
+     * then pay session 1 the first rate and sessions 2..N the follow-up rate. The package
+     * total still reconciles exactly, and every amount comes out whole.
+     *
+     * Only the client's FIRST package has a first-rate session; a repeat package is all
+     * follow-ups, which is exactly what package_N_followup / N already encodes.
+     */
+    const followupTotalRaw = parseFloat(pickTotal(followupKeys) ?? NaN);
+    const firstTotalRaw = parseFloat(pickTotal(firstKeys) ?? NaN);
+    if (
+      totalSessions > 1 &&
+      Number.isFinite(followupTotalRaw) && followupTotalRaw > 0 &&
+      Number.isFinite(firstTotalRaw) && firstTotalRaw > 0
+    ) {
+      const followupPerSession = followupTotalRaw / totalSessions;
+      const firstPerSession = firstTotalRaw - followupPerSession * (totalSessions - 1);
+      const positionIsFirst = (parseInt(s.package_session_number, 10) || 1) <= 1;
+      // A first-rate session exists only in the client's first package, and only at position 1.
+      const useFirstRate = isFirst === true && positionIsFirst;
+      const chosen = useFirstRate ? firstPerSession : followupPerSession;
+      if (Number.isFinite(chosen) && chosen >= 0) return Math.max(0, Math.round(chosen));
+    }
 
     if ((!totalPackageCommission || totalPackageCommission <= 0) && isCoupleSession) {
       const couplePerSession = parseFloat(pkgPackages.couple_session ?? pkgPackages.cpl_session ?? dc.doctor_commission_individual ?? 0);

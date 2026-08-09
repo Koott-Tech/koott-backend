@@ -5781,11 +5781,27 @@ const getPendingPayouts = async (req, res) => {
             cfg?.doctor_commission_first_session_package ??
             0
           );
+      // Per-session split — see the note in utils/sessionCommission.js. The stored totals are
+      // not flat multiples: a "first" package is one session at the first-session rate plus the
+      // rest at the follow-up rate (3850 = 1250 + 1300 + 1300). Dividing equally produced
+      // 1283.33 per session — a rate the sheet never specifies, and the source of the decimals
+      // on the payout screen. Recover the two per-session rates from the two totals instead.
+      const fTotal = parseFloat(firstTotal) || 0;
+      const fuTotal = parseFloat(followupTotal) || 0;
+      if (resolvedSessionCount > 1 && fTotal > 0 && fuTotal > 0) {
+        const followupPerSession = fuTotal / resolvedSessionCount;
+        const firstPerSession = fTotal - followupPerSession * (resolvedSessionCount - 1);
+        // A first-rate session exists only in the client's first package, at position 1.
+        const useFirstRate = isFirstSession === true && packageNumber <= 1;
+        const chosen = useFirstRate ? firstPerSession : followupPerSession;
+        if (Number.isFinite(chosen) && chosen >= 0) return Math.max(0, Math.round(chosen));
+      }
+
       const configuredTotal = isFirstSession === true
         ? firstTotal
         : (isFirstSession === false ? followupTotal : (packageNumber <= 1 ? firstTotal : followupTotal));
 
-      return Math.max(0, (parseFloat(configuredTotal) || 0) / resolvedSessionCount);
+      return Math.max(0, Math.round((parseFloat(configuredTotal) || 0) / resolvedSessionCount));
     };
 
     const getConfiguredCoupleDoctorShare = (cfg) => {
