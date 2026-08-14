@@ -16,12 +16,20 @@ class SessionReminderService {
 
   /**
    * Start the session reminder service
-   * Runs every hour to check for sessions and free assessments in the next 1 hour (0-1 hour from now)
+   * Runs every hour to check for sessions in the next 2 hours.
    */
   start() {
     console.log('🔔 Starting Session Reminder Service...');
-    
-    // Run every hour at minute 0 (e.g., 1:00, 2:00, 3:00, etc.)
+
+    // Run shortly after boot too. Production hosts can restart between cron ticks; waiting
+    // up to an hour meant reminders could be missed before the first scheduled run.
+    setTimeout(() => {
+      this.checkAndSendReminders().catch((err) => {
+        console.error('❌ Initial session reminder check failed:', err);
+      });
+    }, 30 * 1000);
+
+    // Run every hour in IST. The startup check above covers deploy/restart gaps.
     cron.schedule('0 * * * *', async () => {
       if (this.isRunning) {
         console.log('⏭️  Session reminder check already running, skipping...');
@@ -29,9 +37,9 @@ class SessionReminderService {
       }
       
       await this.checkAndSendReminders();
-    });
+    }, { timezone: 'Asia/Kolkata' });
 
-    console.log('✅ Session Reminder Service scheduled (runs every hour)');
+    console.log('✅ Session Reminder Service scheduled (runs every hour, Asia/Kolkata)');
   }
 
   /**
@@ -133,7 +141,7 @@ class SessionReminderService {
         });
       }
 
-      // Filter sessions that are in the next 1 hour (0 to 1 hour from now) and haven't received reminders yet
+      // Filter sessions that are in the next 2 hours and haven't received reminders yet
       const reminderSessions = (sessions || []).filter(session => {
         if (!session.scheduled_time) return false;
         
@@ -150,7 +158,7 @@ class SessionReminderService {
         return timeDiffMinutes >= 0 && timeDiffMinutes <= 120;
       });
 
-      console.log(`🔔 Found ${reminderSessions.length} sessions in the next 1 hour requiring reminders`);
+      console.log(`🔔 Found ${reminderSessions.length} sessions in the next 2 hours requiring reminders`);
       
       // Log details of sessions that will receive reminders
       if (reminderSessions.length > 0) {
@@ -198,14 +206,14 @@ class SessionReminderService {
     try {
 
 
-      // ATOMIC CHECK AND LOCK: Try to update reminder_sent from false to true
+      // ATOMIC CHECK AND LOCK: Try to update reminder_sent from false/null to true
       // This acts as a distributed lock - only one process can successfully update
       // If update affects 0 rows, it means reminder_sent was already true (or another process got there first)
       const { data: updateData, error: lockError } = await supabaseAdmin
         .from('sessions')
         .update({ reminder_sent: true })
         .eq('id', session.id)
-        .eq('reminder_sent', false) // Only update if it's currently false
+        .or('reminder_sent.eq.false,reminder_sent.is.null')
         .select('id')
         .single();
 
@@ -520,4 +528,3 @@ class SessionReminderService {
 // Export singleton instance
 const sessionReminderService = new SessionReminderService();
 module.exports = sessionReminderService;
-

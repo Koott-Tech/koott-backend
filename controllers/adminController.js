@@ -598,6 +598,15 @@ const createRecordOnlyPackage = async (req, res) => {
       if (!timePattern.test(t)) {
         return res.status(400).json(errorResponse(`Record ${i + 1}: invalid time (expected HH:MM)`));
       }
+
+      const status = String(r.status || '').toLowerCase();
+      const isLiveFutureStatus = ['booked', 'rescheduled'].includes(status);
+      const scheduledAt = new Date(`${r.scheduled_date}T${t}:00+05:30`);
+      if (isLiveFutureStatus && !Number.isNaN(scheduledAt.getTime()) && scheduledAt.getTime() > Date.now()) {
+        return res.status(400).json(errorResponse(
+          `Record ${i + 1}: record-only is only for already-happened sessions. Use Create Manual Booking or Book Next Session for future ${status} sessions so calendar, Meet, email, and WhatsApp are created.`
+        ));
+      }
     }
 
     // Resolve client (by id or user_id).

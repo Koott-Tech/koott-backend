@@ -423,9 +423,16 @@ async function processOneSession(session, tempPassword = null) {
         date: session.scheduled_date,
         time: session.scheduled_time,
         meetLink: meetLink,
-      }).then(async () => {
-        await writeMarker(session.id, { whatsapp_sent_at: new Date().toISOString(), whatsapp_error: null });
-        console.log(`${LOG_PREFIX} ✅ WhatsApp booking_confirmation_v1 sent to client ${clientPhone.slice(0, 6)}****`);
+      }).then(async (result) => {
+        if (result?.success === true) {
+          await writeMarker(session.id, { whatsapp_sent_at: new Date().toISOString(), whatsapp_error: null });
+          console.log(`${LOG_PREFIX} ✅ WhatsApp booking_confirmation_v1 queued for client ${clientPhone.slice(0, 6)}****`);
+          return;
+        }
+        const msg = result?.reason || result?.error?.message || JSON.stringify(result?.error || result || {});
+        await writeMarker(session.id, { whatsapp_error: msg || 'send failed' });
+        await alertDeliveryFailure('WhatsApp', session, clientPhone, msg, { clientName, psychologistName });
+        console.warn(`${LOG_PREFIX} ⚠️ Client WhatsApp rejected for session ${session.id} (non-blocking):`, msg);
       }).catch(async err => {
         const msg = err?.message || String(err);
         await writeMarker(session.id, { whatsapp_error: msg });
