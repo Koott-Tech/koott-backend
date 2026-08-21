@@ -1,3 +1,4 @@
+const { correctEmailDomain } = require('./emailDomainCorrection');
 const nodemailer = require('nodemailer');
 const { resolveSessionDurationMinutes } = require('./sessionMeetDuration');
 
@@ -77,6 +78,23 @@ class EmailService {
    * @returns {Object} Enhanced mail options with headers
    */
   addEmailHeaders(mailOptions) {
+    // Last line of defence for mistyped provider domains. Every send in this service passes
+    // through here, so correcting it once covers confirmations, reschedules, cancellations,
+    // receipts and one-off mails — not just the booking flow. A recognised typo like
+    // "gmai.com" would otherwise be accepted by SMTP and bounce silently, leaving the client
+    // with nothing while the system reported success.
+    const to = mailOptions?.to;
+    if (typeof to === 'string' && to) {
+      // `to` may be a comma-separated list; correct each address independently.
+      const parts = to.split(',').map((a) => a.trim()).filter(Boolean);
+      const fixed = parts.map((a) => {
+        const r = correctEmailDomain(a);
+        if (r.corrected) console.warn(`[email] corrected recipient domain: ${r.from} -> ${r.to}`);
+        return r.email;
+      });
+      const joined = fixed.join(', ');
+      if (joined !== to) mailOptions = { ...mailOptions, to: joined };
+    }
     return {
       ...mailOptions,
       replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_FROM || 'hey@koott.com',

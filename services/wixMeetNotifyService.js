@@ -17,6 +17,7 @@ const { addMinutesToTime } = require('../utils/helpers');
 const { resolveSessionDurationMinutes } = require('../utils/sessionMeetDuration');
 const emailService = require('../utils/emailService');
 const interaktService = require('../utils/interaktService');
+const { correctEmailDomain } = require('../utils/emailDomainCorrection');
 const {
   buildKoottSessionDescription,
   buildKoottSessionTitle,
@@ -69,7 +70,21 @@ function isTransientDeliveryError(errorMsg) {
       || /\b421\b|\b45[0-9]\b|\b4\.\d\.\d\b/.test(m)
       || /etimedout|econnreset|econnrefused|esockettimedout|socket hang up|network/.test(m)
       || /too many|rate limit|throttl/.test(m)
+      // Provider returned a body we could not parse (interaktService/whatsappService emit
+      // exactly "Invalid response" from the JSON.parse catch) — that is an HTML error page or
+      // an empty body from the gateway, i.e. a provider-side blip. It was falling through to
+      // the "bad contact" branch, so a perfectly valid number got reported as the client's
+      // fault: +40749940580 (Romania) parses clean and was still blamed.
+      || /invalid response/.test(m)
+      || /unexpected token|json at position|not valid json/.test(m)
+      || /\b(502|503|504|bad gateway|service unavailable|gateway time)/.test(m)
   );
+}
+
+/** A failure that retrying cannot heal — the contact itself is wrong. */
+function isBadContactError(errorMsg) {
+  const m = String(errorMsg || '').toLowerCase();
+  return /invalid_phone|invalid phone|no-recipient|no recipient|not a valid|unsubscrib|opt(ed)?[ -]out/.test(m);
 }
 
 async function alertDeliveryFailure(channel, session, recipient, errorMsg, ctx = {}) {
@@ -104,7 +119,11 @@ async function alertDeliveryFailure(channel, session, recipient, errorMsg, ctx =
       </table>
       <p>${transient
         ? `<b>Provider-side issue, not a bad contact.</b> This kept failing across retries — the recipient's ${channel === 'WhatsApp' ? 'number' : 'address'} looks fine, so check the ${channel === 'WhatsApp' ? 'Interakt' : 'email/SMTP'} provider status. It will keep retrying automatically.`
-        : `Fix the client's ${channel === 'WhatsApp' ? 'phone number' : 'email'} and it will retry automatically on the next sync.`}</p>`;
+        : isBadContactError(errorMsg)
+          ? `The ${channel === 'WhatsApp' ? 'phone number' : 'email address'} on record is not usable. Fix it on the client's profile — the next retry sweep will pick it up automatically.`
+          // Don't guess. Blaming the contact for an unrecognised provider error is how a valid
+          // Romanian number ended up reported as "fix the client's phone number".
+          : `<b>Unrecognised failure — do not assume the contact is wrong.</b> Check the reason above against the ${channel === 'WhatsApp' ? 'Interakt' : 'email/SMTP'} provider before changing anything on the client's profile. It will be retried automatically; if it keeps failing you'll get an escalation.`}</p>`;
     await emailService.sendEmail({ to: NOTIFY_FAILURE_ALERT_EMAIL, subject, html });
     await supabaseAdmin.from('sessions').update({ notification_alert_sent: true }).eq('id', session.id);
     console.log(`${LOG_PREFIX} 📨 ${channel} failure alert sent to ${NOTIFY_FAILURE_ALERT_EMAIL} for session ${session.id}`);
@@ -233,7 +252,9 @@ async function processOneSession(session, tempPassword = null) {
   // Wix-only clients it can be missing — fall back to the clients row and finally to the
   // contact info Wix sent on the booking payload, so a confirmation always has a target.
   const wixClient = (session.wix_payload && session.wix_payload.client) || {};
-  const clientEmail = clientUserData?.email || clientDetails.email || wixClient.email || null;
+  // `let`: a recognised provider typo is corrected below before anything is sent, and every
+  // downstream use (emailData, hadRecipient, logging) must see the corrected address.
+  let clientEmail = clientUserData?.email || clientDetails.email || wixClient.email || null;
   const clientPhone = clientDetails.phone_number || wixClient.phone || null;
 
   // ── Duration ──────────────────────────────────────────────────────────
@@ -381,6 +402,18 @@ async function processOneSession(session, tempPassword = null) {
       tempPassword: tempPassword,
     };
 
+    // Clients mistype their own address — "gmai.com", "gmil.com", "yahooo.com". SMTP accepts
+    // those, so the send reports success and the mail bounces silently; the client simply never
+    // hears from us. Correct unmistakable provider typos and deliver to the real address rather
+    // than failing quietly. Only exact, known misspellings are touched; an unrecognised domain
+    // is left exactly as entered.
+    const emailFix = correctEmailDomain(clientEmail);
+    if (emailFix.corrected) {
+      console.warn(`${LOG_PREFIX} ✉️ corrected client email domain for session ${session.id}: ${emailFix.from} -> ${emailFix.to}`);
+      clientEmail = emailFix.email;
+      emailData.clientEmail = emailFix.email;
+    }
+
     // Send the combined confirmation email and HONOUR its delivery result.
     const emailResult = await emailService.sendSessionConfirmation(emailData);
     const clientEmailDelivered = emailResult?.clientEmailSent === true;
@@ -496,7 +529,12 @@ async function processPendingNotifications() {
     .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, google_calendar_event_id, notified_at, wix_payload, source, price, amount')
     .is('notified_at', null)
     .eq('status', 'booked')
-    .eq('source', 'wix')
+    // NO source filter. This used to be `.eq('source','wix')`, which meant admin-created
+    // bookings (source NULL) had no safety net at all: 14 upcoming sessions sat with
+    // notified_at NULL and were skipped on every sweep, so anything their creation-time send
+    // missed stayed missing forever. The wix-only restriction belongs on the ESCALATION query
+    // below (where alerting on never-attempted admin rows caused false alarms), not on the
+    // retry itself. processOneSession's atomic claim still prevents double sends.
     .gte('scheduled_date', todayIso)
     .gte('created_at', sinceIso)
     .limit(50);
@@ -559,7 +597,116 @@ async function processPendingNotifications() {
     }
   }
 
-  return { processed, errors };
+  // ── WhatsApp-only retries ────────────────────────────────────────────────────────────
+  // The sweep above only selects `notified_at IS NULL`, but notified_at is stamped BEFORE the
+  // sends (to stop concurrent runs creating duplicate Meet links) and WhatsApp is explicitly
+  // best-effort — so a session whose email succeeded and WhatsApp failed keeps notified_at set
+  // and was never retried by anything. The failure alert nevertheless promised "it will retry
+  // automatically on the next sync", which was simply untrue: one client's confirmation was
+  // dropped permanently.
+  //
+  // Retry those directly, bounded so nothing loops forever:
+  //   - a real attempt failed (whatsapp_error set, whatsapp_sent_at still null)
+  //   - the error is not a known-bad contact (retrying a bad number never heals)
+  //   - future sessions only, booked, created in the last 14 days, 25 per sweep
+  //
+  // ATTEMPT CAP. This sweep runs with the Wix sync every 10 minutes, so "retry until the
+  // session date passes" would mean ~430 sends for a single stuck message. Retries stop at
+  // WHATSAPP_MAX_RETRIES, counted in sessions.whatsapp_retry_count.
+  //
+  // If that column has not been migrated yet the count comes back undefined; we then fall back
+  // to time-spacing (only retry a row untouched for 60+ minutes), which bounds it to ~1/hour
+  // instead of 1/10min. Same graceful-degradation approach as the other marker columns.
+  let waRetried = 0;
+  if (await markersAvailable()) {
+    const WHATSAPP_MAX_RETRIES = 5;
+    const RETRY_SPACING_MS = 60 * 60 * 1000;
+
+    let waStuck = null;
+    ({ data: waStuck } = await supabaseAdmin
+      .from('sessions')
+      .select('id, client_id, psychologist_id, scheduled_date, scheduled_time, google_meet_link, whatsapp_error, wix_booking_id, updated_at, whatsapp_retry_count')
+      .is('whatsapp_sent_at', null)
+      .not('whatsapp_error', 'is', null)
+      .eq('status', 'booked')
+      .gte('scheduled_date', todayIso)
+      .gte('created_at', sinceIso)
+      .lt('whatsapp_retry_count', WHATSAPP_MAX_RETRIES)
+      .limit(25));
+
+    // Column not migrated yet — re-run without it and rely on time-spacing below.
+    let countColumnMissing = false;
+    if (!waStuck) {
+      countColumnMissing = true;
+      ({ data: waStuck } = await supabaseAdmin
+        .from('sessions')
+        .select('id, client_id, psychologist_id, scheduled_date, scheduled_time, google_meet_link, whatsapp_error, wix_booking_id, updated_at')
+        .is('whatsapp_sent_at', null)
+        .not('whatsapp_error', 'is', null)
+        .eq('status', 'booked')
+        .gte('scheduled_date', todayIso)
+        .gte('created_at', sinceIso)
+        .limit(25));
+    }
+
+    for (const s of (waStuck || [])) {
+      if (isBadContactError(s.whatsapp_error)) continue; // retrying will not help
+      // Space attempts. Always applied, so even with the counter we never hammer the provider
+      // 6 times in an hour; without the counter this is the only bound.
+      const lastTouched = s.updated_at ? new Date(s.updated_at).getTime() : 0;
+      if (Date.now() - lastTouched < RETRY_SPACING_MS) continue;
+      const attempt = (Number(s.whatsapp_retry_count) || 0) + 1;
+      if (!countColumnMissing && attempt > WHATSAPP_MAX_RETRIES) continue;
+      try {
+        const { data: c } = await supabaseAdmin
+          .from('clients').select('first_name, last_name, phone_number').eq('id', s.client_id).maybeSingle();
+        const { data: p } = await supabaseAdmin
+          .from('psychologists').select('first_name, last_name').eq('id', s.psychologist_id).maybeSingle();
+        let phone = c?.phone_number || null;
+        if (!phone && s.wix_booking_id) {
+          const { data: wb } = await supabaseAdmin
+            .from('wix_bookings').select('client_phone').eq('wix_booking_id', s.wix_booking_id).maybeSingle();
+          phone = wb?.client_phone || null;
+        }
+        if (!phone) continue;
+
+        const clientName = `${c?.first_name || ''} ${c?.last_name || ''}`.trim() || 'Client';
+        const psychologistName = `${p?.first_name || ''} ${p?.last_name || ''}`.trim() || 'your therapist';
+        const result = await interaktService.sendBookingConfirmation(phone, {
+          clientName, psychologistName,
+          date: s.scheduled_date, time: s.scheduled_time, meetLink: s.google_meet_link,
+        });
+
+        if (result?.success === true) {
+          await writeMarker(s.id, { whatsapp_sent_at: new Date().toISOString(), whatsapp_error: null });
+          waRetried++;
+          console.log(`${LOG_PREFIX} ✅ WhatsApp retry succeeded for session ${s.id} (attempt ${attempt})`);
+        } else {
+          const msg = result?.reason || result?.error?.message || JSON.stringify(result?.error || {});
+          // Record the attempt so the cap advances. writeMarker issues a plain UPDATE, so an
+          // unknown column would fail the WHOLE write and lose the error message with it —
+          // include the counter only once we know the migration has been applied.
+          const marker = { whatsapp_error: msg || 'send failed' };
+          if (!countColumnMissing) marker.whatsapp_retry_count = attempt;
+          await writeMarker(s.id, marker);
+          const givingUp = !countColumnMissing && attempt >= WHATSAPP_MAX_RETRIES;
+          // Only alert on the LAST attempt. Alerting on every failure would mean an email per
+          // retry; alerting on none would hide a permanently undelivered confirmation.
+          if (givingUp) {
+            await alertDeliveryFailure('WhatsApp', s, phone, `${msg} (gave up after ${attempt} retries)`, {
+              clientName, psychologistName, escalated: true,
+            });
+          }
+          console.warn(`${LOG_PREFIX} ⚠️ WhatsApp retry ${attempt}/${WHATSAPP_MAX_RETRIES} failed for session ${s.id}: ${msg}${givingUp ? ' — giving up' : ''}`);
+        }
+      } catch (err) {
+        console.error(`${LOG_PREFIX} WhatsApp retry error for session ${s.id}:`, err.message || err);
+      }
+    }
+    if (waRetried) console.log(`${LOG_PREFIX} WhatsApp retry sweep recovered ${waRetried} session(s)`);
+  }
+
+  return { processed, errors, whatsappRetried: waRetried };
 }
 
 /**
