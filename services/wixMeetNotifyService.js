@@ -529,6 +529,14 @@ async function processPendingNotifications() {
     .select('id, wix_booking_id, client_id, psychologist_id, scheduled_date, scheduled_time, status, session_type, package_id, google_meet_link, google_calendar_event_id, notified_at, wix_payload, source, price, amount')
     .is('notified_at', null)
     .eq('status', 'booked')
+    // Do not re-notify a booking that already went out. notified_at alone is NOT a reliable
+    // "already sent" flag: none of the booking flows (paymentController, clientController,
+    // adminController) stamp it, so a session notified at creation still has notified_at NULL.
+    // Dropping the source filter below therefore exposed admin/website bookings to a SECOND
+    // confirmation from this sweep — the client and therapist would each get two emails and
+    // two WhatsApps. The per-channel markers are the real evidence of a completed send.
+    .is('email_sent_at', null)
+    .is('whatsapp_sent_at', null)
     // NO source filter. This used to be `.eq('source','wix')`, which meant admin-created
     // bookings (source NULL) had no safety net at all: 14 upcoming sessions sat with
     // notified_at NULL and were skipped on every sweep, so anything their creation-time send

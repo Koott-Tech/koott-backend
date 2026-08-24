@@ -2289,7 +2289,15 @@ const handleRescheduleRequest = async (req, res) => {
 const completeSession = async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const { summary, report, summary_notes, completion_date } = req.body;
+    const {
+      summary, report, summary_notes, completion_date,
+      // Captured in the completion popup — previously kept in the therapists' own
+      // "Koott-26 Sessions" spreadsheets. Session-level:
+      condition, client_status, to_operation,
+      // Client-level: asked ONCE (the popup only shows these when the client record is
+      // missing them), then reused for every later session.
+      client_sex, client_pronouns, client_age,
+    } = req.body;
     const userId = req.user.id;
     const userRole = req.user.role;
     const isAdmin = ['admin', 'superadmin'].includes(userRole);
@@ -2357,6 +2365,12 @@ const completeSession = async (req, res) => {
       updated_at: new Date().toISOString()
     };
 
+    // Only write what was actually supplied, so completing a session from a client that
+    // doesn't send these fields (admin panel, older app build) can never blank them.
+    if (typeof condition === 'string' && condition.trim()) updateData.condition = condition.trim();
+    if (typeof client_status === 'string' && client_status.trim()) updateData.client_status = client_status.trim();
+    if (typeof to_operation === 'string' && to_operation.trim()) updateData.to_operation = to_operation.trim();
+
     // Add completion_date if provided (for finance dashboard filtering)
     // If not provided, use scheduled_date as default
     if (completion_date) {
@@ -2369,6 +2383,35 @@ const completeSession = async (req, res) => {
     // Report: for non-free-assessment, set to trimmed value or empty (optional for admin)
     if (!isFreeAssessment) {
       updateData.report = (report && report.trim()) || '';
+    }
+
+    // Client-level details (sex / pronouns / age) describe the PERSON, not the session, so they
+    // are stored on the client and asked only once. Never overwrite an existing value — the
+    // popup hides these fields when they're already known, so anything arriving here is a
+    // first-time capture. Non-fatal: a completion must not fail over a demographic field.
+    const clientPatch = {};
+    if (typeof client_sex === 'string' && client_sex.trim()) clientPatch.sex = client_sex.trim();
+    if (typeof client_pronouns === 'string' && client_pronouns.trim()) clientPatch.pronouns = client_pronouns.trim();
+    const parsedAge = parseInt(client_age, 10);
+    if (Number.isFinite(parsedAge) && parsedAge > 0 && parsedAge < 130) clientPatch.age = parsedAge;
+    if (Object.keys(clientPatch).length && session.client_id) {
+      try {
+        const { data: existing } = await supabaseAdmin
+          .from('clients').select('sex, pronouns, age').eq('id', session.client_id).maybeSingle();
+        // Fill only the blanks.
+        const toWrite = {};
+        for (const [k, v] of Object.entries(clientPatch)) {
+          if (existing && (existing[k] === null || existing[k] === undefined || existing[k] === '')) toWrite[k] = v;
+          else if (!existing) toWrite[k] = v;
+        }
+        if (Object.keys(toWrite).length) {
+          toWrite.updated_at = new Date().toISOString();
+          const { error: cErr } = await supabaseAdmin.from('clients').update(toWrite).eq('id', session.client_id);
+          if (cErr) console.warn('[completeSession] client detail save skipped:', cErr.message);
+        }
+      } catch (cEx) {
+        console.warn('[completeSession] client detail save failed (non-fatal):', cEx.message || cEx);
+      }
     }
 
     // Update session with completion data

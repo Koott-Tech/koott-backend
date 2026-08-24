@@ -5172,7 +5172,7 @@ const bookPackageNextSession = async (req, res) => {
     // showing on earlier sessions of the package.
     const { data: packageSessions } = await supabaseAdmin
       .from('sessions')
-      .select('id, status, package_group_id')
+      .select('id, status, package_group_id, session_type')
       .eq('package_id', clientPackage.package.id)
       .eq('client_id', client_id);
 
@@ -5231,7 +5231,16 @@ const bookPackageNextSession = async (req, res) => {
     // (completedCount + bookedCount were computed above from packageSessions.)
     const nextSessionNumber = completedCount + bookedCount + 1;
     const packageType = String(clientPackage.package?.package_type || '').toLowerCase();
-    const isCouplePackage = packageType.includes('couple');
+    // A package's type must match the sessions already in it. Deriving it ONLY from
+    // packages.package_type mistyped the follow-ups of a couple package whose catalogue row
+    // isn't marked couple: sessions 1 and 2 came from Wix as 'couple', but Book Next wrote
+    // session 3 as 'package'. That is not cosmetic — computeSessionDoctorWallet picks the rate
+    // from session_type, so the therapist was paid the individual-package rate (Irene: ₹200
+    // instead of ₹400 on a 3-session couple package), and the row rendered as "Pkg (3/3)"
+    // inside a package otherwise labelled "Couple Pkg".
+    const siblingIsCouple = (packageSessions || []).some((row) =>
+      /couple|cpl/i.test(String(row?.session_type || '')));
+    const isCouplePackage = packageType.includes('couple') || siblingIsCouple;
     const sessionTypeForPackage = isCouplePackage ? 'couple' : 'package';
 
     const fallbackMeetLink = 'https://meet.google.com/new?hs=122&authuser=0';
