@@ -8,6 +8,35 @@
  * Wix can expose this via tags, bookedEntity.type, or a known keyword in the title.
  * Returns a normalised lowercase string like "individual", "package", "class", or null.
  */
+/**
+ * Is this an UNPAID "pay in person" Wix booking?
+ *
+ * Wix reports an offline/unpaid order as paymentState UNDEFINED with paymentVendorName
+ * "inPerson" — the client chose to pay in person and hasn't. That is NOT the same as a
+ * plan-credit booking, but the two were conflated: any `inPerson` + UNDEFINED order was
+ * classed as "paid via package credits", so unpaid bookings were ingested at full price and
+ * turned into real sessions. 141 such sessions exist, worth INR 226,671.
+ *
+ * A genuine plan-credit booking consumes credits, so it carries pricingPlanInfo/subscriptionId
+ * or leaves nothing owing. An unpaid one still has a balance AND an unsettled order status —
+ * that combination is what distinguishes them.
+ */
+function isUnpaidInPersonBooking(b) {
+  const pd = b?.paymentDetails || {};
+  const state = String(pd.state || b?.paymentState || '').toUpperCase();
+  if (state !== 'UNDEFINED') return false;
+  // Real plan credits are never "unpaid" — they were bought up front.
+  if (b?.pricingPlanInfo || b?.subscriptionId) return false;
+
+  const first = (pd.wixPayMultipleDetails && pd.wixPayMultipleDetails[0]) || {};
+  const vendor = String(first.paymentVendorName || b?.paymentVendorName || '').toLowerCase();
+  if (vendor !== 'inperson') return false;
+
+  const owed = parseFloat(pd.balance?.finalPrice?.amount ?? first.orderAmount ?? 0) || 0;
+  const orderUnsettled = String(first.orderStatus || '').toUpperCase() !== 'COMPLETE';
+  return owed > 0 && orderUnsettled;
+}
+
 function sessionTypeFromBooking(b) {
   if (!b) return 'individual';
 
@@ -80,7 +109,8 @@ function sessionTypeFromBooking(b) {
     b.paymentVendorName || ''
   ).toLowerCase();
   const _pState = (b.paymentState || b.paymentDetails?.state || '').toUpperCase();
-  const isPlanCredit = !!(b.pricingPlanInfo || b.subscriptionId || b.isPlanCreditBooking ||
+  const isPlanCredit = !isUnpaidInPersonBooking(b) && !!(
+    b.pricingPlanInfo || b.subscriptionId || b.isPlanCreditBooking ||
     (_vendor === 'inperson' && _pState === 'UNDEFINED'));
 
   if (isPlanCredit) {
@@ -206,12 +236,12 @@ function discoverRowToDb(booking) {
   const _vendor = (b.paymentDetails?.wixPayMultipleDetails?.[0]?.paymentVendorName || '').toLowerCase();
   const _hasEmptyBalance = !b.paymentDetails?.balance?.finalPrice?.amount;
   const _status = String(b.status || '').toUpperCase();
-  const isPlanCreditBooking =
+  const isPlanCreditBooking = !isUnpaidInPersonBooking(b) && (
     b.isPlanCreditBooking === true ||
     (paymentState === 'UNDEFINED' && !b.pricingPlanInfo && (
       _vendor === 'inperson' ||
       (!_vendor && _hasEmptyBalance && (!b.amountReceived || parseFloat(b.amountReceived) === 0) && _status === 'CONFIRMED')
-    ));
+    )));
   const isZeroPayment = !isPlanCreditBooking && (paymentState === 'UNDEFINED' || paymentState === 'FREE' || parseFloat(finalPriceAmount || '-1') === 0);
 
   // For plan-credit bookings use the raw session rate (b.price or rate.amount) as the price
@@ -340,12 +370,12 @@ function discoverRowToSessionDb(booking) {
   const _sv = (b.paymentDetails?.wixPayMultipleDetails?.[0]?.paymentVendorName || '').toLowerCase();
   const _sb = !b.paymentDetails?.balance?.finalPrice?.amount;
   const _ss = String(b.status || '').toUpperCase();
-  const isPlanCreditBooking =
+  const isPlanCreditBooking = !isUnpaidInPersonBooking(b) && (
     b.isPlanCreditBooking === true ||
     (paymentState === 'UNDEFINED' && !b.pricingPlanInfo && (
       _sv === 'inperson' ||
       (!_sv && _sb && (!b.amountReceived || parseFloat(b.amountReceived) === 0) && _ss === 'CONFIRMED')
-    ));
+    )));
   const isZeroPayment = !isPlanCreditBooking && (paymentState === 'UNDEFINED' || paymentState === 'FREE' || parseFloat(finalPaid || '-1') === 0);
 
   const amount = isZeroPayment ? 0 : parseAmount(
@@ -388,6 +418,7 @@ function discoverRowToSessionDb(booking) {
 }
 
 module.exports = {
+  isUnpaidInPersonBooking,
   discoverRowToDb,
   discoverRowToSessionDb,
   normalizeWixStatusToSessionStatus,

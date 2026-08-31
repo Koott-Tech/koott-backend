@@ -3,7 +3,7 @@ const { getBookingTimeColumnKey, hasOriginalPsychologistColumn, hasNotificationM
 const meetLinkService = require('../utils/meetLinkService');
 const googleCalendarService = require('../utils/googleCalendarService');
 const { fetchWixDiscover, extractBookingsList } = require('../utils/wixDiscoverClient');
-const { discoverRowToDb, discoverRowToSessionDb, wixBookingCreatedIso } = require('../utils/wixBookingMapper');
+const { discoverRowToDb, discoverRowToSessionDb, wixBookingCreatedIso, isUnpaidInPersonBooking } = require('../utils/wixBookingMapper');
 const { resolveClientsForBookings } = require('../services/wixClientResolverService');
 const { linkPackageSessions: linkWixBookingsPackages } = require('../services/wixPackageLinkingService');
 const { resolvePsychologistsForBookings } = require('../services/wixPsychologistResolverService');
@@ -204,9 +204,17 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
   }
 
   // Drop unpaid bookings at the raw level — Wix UNDEFINED status = payment not completed
+  // Despite the name this only ever checked the BOOKING status, never whether the client
+  // actually paid — so "pay in person" orders that were never settled came through as normal
+  // confirmed bookings and became real sessions on the dashboard. Wix shows them as Unpaid.
   const paidBookings = listToSync.filter(b => {
     const s = String(b?.status || '').trim().toUpperCase();
-    return s !== 'UNDEFINED' && s !== '';
+    if (s === 'UNDEFINED' || s === '') return false;
+    if (isUnpaidInPersonBooking(b)) {
+      console.log(`[wix.sync] skipping unpaid in-person booking ${b?.id || '(no id)'} — nothing collected`);
+      return false;
+    }
+    return true;
   });
 
   const deduped = dedupeBookings(paidBookings);
@@ -745,11 +753,13 @@ async function performWixSync(options = {}) {
     };
   }
 
-  let rows = dedupedHydratedBookings
+  const payableBookings = dedupedHydratedBookings.filter((b) => !isUnpaidInPersonBooking(b));
+
+  let rows = payableBookings
     .map(discoverRowToDb)
     .filter(Boolean)
     .map((row) => Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined)));
-  const sessionRows = dedupedHydratedBookings
+  const sessionRows = payableBookings
     .map(discoverRowToSessionDb)
     .filter(Boolean)
     .map((row) => Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined)));
