@@ -11,6 +11,16 @@ const {
 } = require('../utils/sessionBookingCreatedAt');
 
 /** Rows counted for dashboard “total sessions / bookings”; excludes cancelled (soft-deleted) and refunded. */
+/**
+ * Session statuses the therapist is PAID for.
+ *
+ * A no-show is the client failing to attend: the therapist held the slot, showed up and lost
+ * the hour, so the work is owed exactly as if the session had run. It used to sit in the
+ * "not due" bucket alongside genuinely-unearned future bookings, which meant a therapist was
+ * never paid for a client's absence.
+ */
+const PAYABLE_SESSION_STATUSES = ['completed', 'no_show', 'noshow'];
+
 const FINANCE_BOOKING_TOTAL_STATUSES = [
   'completed',
   'booked',
@@ -2970,7 +2980,9 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
 
     const dc = activeDc;
     const TERMINAL_UNPAID = ['cancelled', 'refunded', 'deleted'];
-    const NOT_DUE_PAYOUT_STATUSES = new Set(['booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow']);
+    // A no-show is earned work (client didn't attend, therapist still held the slot), so it is
+    // payable rather than "not due" — see PAYABLE_SESSION_STATUSES.
+    const NOT_DUE_PAYOUT_STATUSES = new Set(['booked', 'pending', 'rescheduled', 'reschedule_requested']);
 
     // A package is paid on its first session, but the therapist earns on every session of it.
     // So the company's real profit on a package = package price − the therapist's commission
@@ -3035,7 +3047,7 @@ const buildDoctorFinanceProfilePayload = async (psychologistId, { dateFrom, date
       // A ₹0 session (package credit / follow-up) shows ₹0 — never a negative. Its therapist
       // cost is already netted against whichever session was paid.
       const c = clientById.get(s.client_id);
-      const isCompleted = status === 'completed';
+      const isCompleted = PAYABLE_SESSION_STATUSES.includes(status);
       const payment = s.payment_id ? paymentById.get(s.payment_id) : null;
       const paymentParams = typeof payment?.razorpay_params === 'string'
         ? (() => { try { return JSON.parse(payment.razorpay_params); } catch { return null; } })()
@@ -6007,7 +6019,7 @@ const getPendingPayouts = async (req, res) => {
       let q = supabaseAdmin
         .from('sessions')
         .select(completedSessionSelect)
-        .eq('status', 'completed')
+        .in('status', PAYABLE_SESSION_STATUSES)
         .gte('scheduled_date', monthStart)
         .lte('scheduled_date', monthEnd)
         .not('psychologist_id', 'is', null)
@@ -6022,7 +6034,7 @@ const getPendingPayouts = async (req, res) => {
       ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
         .from('sessions')
         .select(completedScheduledFallbackSelect)
-        .eq('status', 'completed')
+        .in('status', PAYABLE_SESSION_STATUSES)
         .gte('scheduled_date', monthStart)
         .lte('scheduled_date', monthEnd)
         .not('psychologist_id', 'is', null)
@@ -6034,7 +6046,7 @@ const getPendingPayouts = async (req, res) => {
       ({ data: completedSessions, error: sessionsError } = await supabaseAdmin
         .from('sessions')
         .select(completedSessionFallbackSelect)
-        .eq('status', 'completed')
+        .in('status', PAYABLE_SESSION_STATUSES)
         .gte('scheduled_date', monthStart)
         .lte('scheduled_date', monthEnd)
         .not('psychologist_id', 'is', null)
@@ -6055,7 +6067,10 @@ const getPendingPayouts = async (req, res) => {
       let q = supabaseAdmin
         .from('sessions')
         .select(notDueSessionSelect)
-        .in('status', Array.from(PENDING_SESSION_CARD_STATUSES))
+        // No-shows moved to the payable scan above; excluding them here keeps each session in
+        // exactly one bucket instead of being counted as both owed and not-yet-due.
+        .in('status', Array.from(PENDING_SESSION_CARD_STATUSES).filter(
+          (st) => !PAYABLE_SESSION_STATUSES.includes(st)))
         .gte('scheduled_date', monthStart)
         .lte('scheduled_date', monthEnd)
         .not('psychologist_id', 'is', null)

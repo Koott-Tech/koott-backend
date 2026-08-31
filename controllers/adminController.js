@@ -4016,6 +4016,34 @@ const updateSession = async (req, res) => {
       (status || currentSession.status)?.toLowerCase?.() || status || currentSession.status
     );
 
+    // A COMPLETED session must not have its slot moved.
+    //
+    // Nothing used to stop it: 330 completed sessions have had their date/time changed. Most
+    // were harmless, but one (Najwa / Ranina, 22 Jul) had already been PAID in the July payout
+    // and was then moved to 27 Aug — so it vanished from the month whose money settled it and
+    // reappeared in August pre-marked Paid, which no one had settled. The work is done and the
+    // commission may already be out the door; the slot is history at that point.
+    //
+    // Reopening is still possible — send status back to 'booked' in the same request, which is
+    // an explicit, deliberate act rather than a silent side effect of editing the date.
+    const isCurrentlyCompleted = String(currentSession.status || '').toLowerCase() === 'completed';
+    const reopeningSession = status && String(status).toLowerCase() !== 'completed';
+    if (isCurrentlyCompleted && scheduleChanged && !reopeningSession) {
+      return res.status(409).json(
+        errorResponse(
+          'This session is already marked completed, so its date and time cannot be changed. Reopen it first (set the status back to Booked) if it genuinely needs to move.',
+          {
+            code: 'SESSION_ALREADY_COMPLETED',
+            sessionId,
+            currentDate: currentSession.scheduled_date,
+            currentTime: currentSession.scheduled_time,
+            requestedDate: scheduled_date ? formatDate(scheduled_date) : null,
+            requestedTime: scheduled_time ? formatTime(scheduled_time) : null,
+          }
+        )
+      );
+    }
+
     // Refuse to move a session onto a slot the therapist already has taken. This endpoint is
     // what the admin bookings page uses to reschedule, and it had no conflict check at all —
     // so a session could be dropped on top of an existing one, leaving the therapist with two
@@ -4371,6 +4399,40 @@ const updateSession = async (req, res) => {
     if (updateError) {
       console.error('Error updating session:', updateError);
       return res.status(500).json(errorResponse('Failed to update session'));
+    }
+
+    // Record WHO changed a session, and what actually changed.
+    //
+    // The audit log covered finance page VIEWS but not a single session mutation, so when a
+    // paid session was silently moved to another month there was no way to find out who did
+    // it or when. Only real changes are logged, each as before -> after, so the trail stays
+    // readable instead of one entry per save.
+    {
+      const auditLogger = require('../utils/auditLogger');
+      const AUDITED_FIELDS = [
+        'scheduled_date', 'scheduled_time', 'status', 'psychologist_id', 'client_id',
+        'price', 'therapist_commission', 'session_type', 'session_count',
+        'package_session_number', 'package_id', 'package_group_id',
+      ];
+      const changes = {};
+      AUDITED_FIELDS.forEach((field) => {
+        if (!(field in updateData)) return;
+        const before = currentSession?.[field] ?? null;
+        const after = updatedSession?.[field] ?? updateData[field] ?? null;
+        if (String(before ?? '') !== String(after ?? '')) {
+          changes[field] = { from: before, to: after };
+        }
+      });
+
+      if (Object.keys(changes).length) {
+        await auditLogger.logRequest(req, 'ADMIN_SESSION_UPDATED', 'session', sessionId, {
+          changes,
+          slotMoved: Boolean(changes.scheduled_date || changes.scheduled_time),
+          wasCompleted: isCurrentlyCompleted,
+          clientId: currentSession?.client_id || null,
+          psychologistId: currentSession?.psychologist_id || null,
+        }).catch((err) => console.error('[admin.updateSession] audit log failed:', err.message));
+      }
     }
 
     // No-show reschedule fee: record the additional payment collected before rescheduling
