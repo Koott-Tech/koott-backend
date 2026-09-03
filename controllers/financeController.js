@@ -291,23 +291,22 @@ async function fetchAllPagesOf(buildQuery, pageSize = 1000) {
   // Short read → that was everything, one round-trip total.
   if (head.length < pageSize) return { data: head, error: null };
 
-  // More to come. Paging sequentially would add a full round-trip per 1000 rows; ask how many
-  // there are and fetch the rest CONCURRENTLY, so the wall time stays ~2 round-trips whatever
-  // the row count. Capped so a runaway query can't fan out unboundedly.
-  const { count } = await buildQuery().select('id', { count: 'exact', head: true });
-  const total = Number.isFinite(count) ? count : head.length + pageSize;
-  const pages = Math.min(Math.ceil(total / pageSize), 25);
-  if (pages <= 1) return { data: head, error: null };
-
-  const rest = await Promise.all(
-    Array.from({ length: pages - 1 }, (_, i) =>
-      buildQuery().range((i + 1) * pageSize, (i + 2) * pageSize - 1))
-  );
+  // More to come. This used to ask for an exact count and fan the remaining pages out
+  // concurrently — but the count query re-`select`s a builder that already has a select and an
+  // order applied, and when it comes back undefined the fallback assumed just ONE more page.
+  // Every caller then silently aggregated ~2000 of 3768 rows: the finance dashboard reported
+  // INR 0 for August and roughly half of July.
+  //
+  // Page until a short read instead. Nothing to get wrong, and a handful of extra round-trips
+  // is cheap next to reporting the wrong revenue.
   const out = [...head];
   let error = null;
-  for (const r of rest) {
-    if (r.error && !error) error = r.error;
-    if (r.data) out.push(...r.data);
+  for (let page = 1; page < 50; page += 1) {
+    const r = await buildQuery().range(page * pageSize, (page + 1) * pageSize - 1);
+    if (r.error) { error = r.error; break; }
+    const rows = r.data || [];
+    out.push(...rows);
+    if (rows.length < pageSize) break;
   }
   return { data: out, error };
 }
@@ -605,7 +604,7 @@ const getDashboard = async (req, res) => {
         if (!allTimeMode) {
           fbQuery1 = fbQuery1.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
         }
-        ({ data: sessions, error: sessionsError } = await fbQuery1.order('created_at', { ascending: false }).limit(5000));
+        ({ data: sessions, error: sessionsError } = await fbQuery1.order('created_at', { ascending: false }));
       }
       // Optional column until migration applies — still derives booking time from wix_payload / created_at
       if (sessionsError && /booking_created_at/i.test(String(sessionsError.message || ''))) {
@@ -617,7 +616,7 @@ const getDashboard = async (req, res) => {
         if (!allTimeMode) {
           fbQuery2 = fbQuery2.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
         }
-        ({ data: sessions, error: sessionsError } = await fbQuery2.order('created_at', { ascending: false }).limit(5000));
+        ({ data: sessions, error: sessionsError } = await fbQuery2.order('created_at', { ascending: false }));
         if (
           sessionsError &&
           String(sessionsError.message || '').includes('payment_id')
@@ -630,7 +629,7 @@ const getDashboard = async (req, res) => {
           if (!allTimeMode) {
             fbQuery3 = fbQuery3.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
           }
-          ({ data: sessions, error: sessionsError } = await fbQuery3.order('created_at', { ascending: false }).limit(5000));
+          ({ data: sessions, error: sessionsError } = await fbQuery3.order('created_at', { ascending: false }));
         }
       }
 
@@ -1191,18 +1190,26 @@ const getDashboard = async (req, res) => {
         // IMPORTANT: Don't filter by scheduled_date here - we need all sessions to properly calculate
         // pending payouts (based on payment date) and completed payouts (based on completion date)
         // We'll filter in the processing loop based on different criteria for each metric
-        let allSessionsQuery = supabaseAdmin
-          .from('sessions')
-          .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
-          .not('psychologist_id', 'is', null)
-          .neq('session_type', 'free_assessment')
-          .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
-          .in('psychologist_id', allPsychIds);
-
-        if (!allTimeMode) {
-          allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
-        }
-        allSessionsQuery = allSessionsQuery.order('created_at', { ascending: true }).limit(5000);
+        // Built FRESH per page. `.limit(5000)` here was a lie — PostgREST caps a response at
+        // 1000 rows and ignores anything larger — and because the order was ASCENDING this
+        // returned the OLDEST 1000 of 3768 sessions. Every recent month therefore aggregated
+        // to zero: August reported INR 0 against an actual INR 1.43M.
+        //
+        // Re-using one builder does not fix it either: a PostgREST builder cannot be re-ranged
+        // after it has run, so a factory that closes over a single query silently pages over
+        // the same rows. fetchAllPagesOf needs a genuinely new builder each call.
+        const buildAllSessionsQuery = () => {
+          let q = supabaseAdmin
+            .from('sessions')
+            .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
+            .not('psychologist_id', 'is', null)
+            .neq('session_type', 'free_assessment')
+            .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
+            .in('psychologist_id', allPsychIds);
+          if (!allTimeMode) q = q.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
+          return q.order('created_at', { ascending: true });
+        };
+        let allSessionsQuery = buildAllSessionsQuery();
         
         // Fetch all relevant sessions - we'll filter by different date criteria in the processing loop:
         // - Pending payouts: Filter by created_at (payment date) within date range
@@ -1210,7 +1217,7 @@ const getDashboard = async (req, res) => {
         // - Revenue: Filter by scheduled_date within date range
         let allSessions = null;
         let allSessionsError = null;
-        ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }));
+        ({ data: allSessions, error: allSessionsError } = await fetchAllPagesOf(buildAllSessionsQuery));
         if (allSessionsError && String(allSessionsError.message || '').includes('payment_id')) {
           allSessionsQuery = supabaseAdmin
             .from('sessions')
@@ -1222,7 +1229,8 @@ const getDashboard = async (req, res) => {
           if (!allTimeMode) {
             allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
           }
-          ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }).limit(5000));
+          ({ data: allSessions, error: allSessionsError } =
+            await fetchAllPagesOf(() => allSessionsQuery.order('created_at', { ascending: true })));
         }
         if (allSessionsError && /booking_created_at/i.test(String(allSessionsError.message || ''))) {
           allSessionsQuery = supabaseAdmin
@@ -1235,7 +1243,8 @@ const getDashboard = async (req, res) => {
           if (!allTimeMode) {
             allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
           }
-          ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }).limit(5000));
+          ({ data: allSessions, error: allSessionsError } =
+            await fetchAllPagesOf(() => allSessionsQuery.order('created_at', { ascending: true })));
           if (allSessionsError && String(allSessionsError.message || '').includes('payment_id')) {
             allSessionsQuery = supabaseAdmin
               .from('sessions')
@@ -1247,7 +1256,8 @@ const getDashboard = async (req, res) => {
             if (!allTimeMode) {
               allSessionsQuery = allSessionsQuery.gte('created_at', `${ytdFrom}T00:00:00+05:30`);
             }
-            ({ data: allSessions, error: allSessionsError } = await allSessionsQuery.order('created_at', { ascending: true }).limit(5000));
+            ({ data: allSessions, error: allSessionsError } =
+            await fetchAllPagesOf(() => allSessionsQuery.order('created_at', { ascending: true })));
           }
         }
         if (allSessionsError) throw allSessionsError;
@@ -2130,14 +2140,24 @@ const getDoctorPayouts = async (req, res) => {
     }
 
     const { dateFrom, dateTo, status } = req.query; // status: 'pending' or 'completed'
+    // listOnly: the Completed TABLE only renders a name and two totals, but this endpoint was
+    // always building session_details for every doctor — 391 KB and ~2.4 s to paint a 23-row
+    // list. The breakdown popup already re-fetches on open when session_details is empty, so
+    // the table can ask for the cheap shape.
+    const listOnly = String(req.query.listOnly ?? 'false').toLowerCase() === 'true';
+    // onlyPsychologistId: the popup needs ONE doctor's breakdown, and used to recompute the
+    // entire roster to find it. Scoping the scan is the same win as on the pending side.
+    const onlyPsychologistId = String(req.query.psychologistId || '').trim() || null;
 
     // Get all psychologists (exclude assessment specialist)
     const assessmentPsychId = process.env.ASSESSMENT_PSYCHOLOGIST_ID || '00000000-0000-0000-0000-000000000000';
-    const { data: psychologists } = await supabaseAdmin
+    let psychQuery = supabaseAdmin
       .from('psychologists')
       .select('id, first_name, last_name, email')
       .neq('id', assessmentPsychId);
-    
+    if (onlyPsychologistId) psychQuery = psychQuery.eq('id', onlyPsychologistId);
+    const { data: psychologists } = await psychQuery;
+
     const allPsychIds = psychologists?.map(p => p.id).filter(Boolean) || [];
     
     if (allPsychIds.length === 0) {
@@ -2183,27 +2203,39 @@ const getDoctorPayouts = async (req, res) => {
     const payoutClientIds = [...new Set((allSessions || []).map((s) => s.client_id).filter(Boolean))];
     const payoutClientNameMap = {};
     const payoutClientEmailMap = {};
-    {
+    // Only the session-level breakdown shows client names/emails, so listOnly skips these
+    // round trips altogether. Chunks run in parallel: they were sequential, so ~500 clients
+    // cost 5 serial trips before the first byte of the response could be computed.
+    if (!listOnly) {
       // clients.email is usually NULL — the address lives on users.email via clients.user_id.
       const userIdByClient = {};
+      const clientChunks = [];
       for (let i = 0; i < payoutClientIds.length; i += 100) {
-        const { data: cRows } = await supabaseAdmin
-          .from('clients')
-          .select('id, first_name, last_name, email, user_id')
-          .in('id', payoutClientIds.slice(i, i + 100));
+        clientChunks.push(
+          supabaseAdmin
+            .from('clients')
+            .select('id, first_name, last_name, email, user_id')
+            .in('id', payoutClientIds.slice(i, i + 100))
+        );
+      }
+      (await Promise.all(clientChunks)).forEach(({ data: cRows }) => {
         (cRows || []).forEach((c) => {
           payoutClientNameMap[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
           if (c.email) payoutClientEmailMap[c.id] = c.email;
           else if (c.user_id) userIdByClient[c.id] = c.user_id;
         });
-      }
+      });
       const missingUserIds = [...new Set(Object.values(userIdByClient))];
       const emailByUser = {};
+      const userChunks = [];
       for (let i = 0; i < missingUserIds.length; i += 100) {
-        const { data: uRows } = await supabaseAdmin
-          .from('users').select('id, email').in('id', missingUserIds.slice(i, i + 100));
-        (uRows || []).forEach((u) => { if (u.email) emailByUser[u.id] = u.email; });
+        userChunks.push(
+          supabaseAdmin.from('users').select('id, email').in('id', missingUserIds.slice(i, i + 100))
+        );
       }
+      (await Promise.all(userChunks)).forEach(({ data: uRows }) => {
+        (uRows || []).forEach((u) => { if (u.email) emailByUser[u.id] = u.email; });
+      });
       Object.entries(userIdByClient).forEach(([cid, uid]) => {
         if (emailByUser[uid]) payoutClientEmailMap[cid] = emailByUser[uid];
       });
@@ -2265,16 +2297,25 @@ const getDoctorPayouts = async (req, res) => {
     // the PostgREST GET URL and returns "Bad Request". The error was discarded here, so the
     // map came back EMPTY — and since a completed payout requires payment_status === 'paid'
     // from that map, the Completed tab silently showed ZERO payouts for every doctor.
-    for (let i = 0; i < sessionIds.length; i += 100) {
-      const { data: history, error: historyErr } = await supabaseAdmin
-        .from('commission_history')
-        .select('session_id, commission_amount, session_amount, payment_status')
-        .in('session_id', sessionIds.slice(i, i + 100));
-      if (historyErr) {
-        console.error('[getDoctorPayouts] commission_history chunk failed:', historyErr.message);
-        continue;
+    // Chunks are independent, so fire them together: July's 1041 sessions meant ELEVEN
+    // sequential round trips, and this map gates the whole Completed tab.
+    {
+      const historyChunks = [];
+      for (let i = 0; i < sessionIds.length; i += 100) {
+        historyChunks.push(
+          supabaseAdmin
+            .from('commission_history')
+            .select('session_id, commission_amount, session_amount, payment_status')
+            .in('session_id', sessionIds.slice(i, i + 100))
+        );
       }
-      commissionHistory.push(...(history || []));
+      (await Promise.all(historyChunks)).forEach(({ data: history, error: historyErr }) => {
+        if (historyErr) {
+          console.error('[getDoctorPayouts] commission_history chunk failed:', historyErr.message);
+          return;
+        }
+        commissionHistory.push(...(history || []));
+      });
     }
     
     const commissionHistoryMap = {};
@@ -2418,7 +2459,9 @@ const getDoctorPayouts = async (req, res) => {
       }
       payoutsByDoctor[s.psychologist_id].session_counts_by_type[sessionType] += 1;
       
-      // Add session detail
+      // Add session detail (skipped for listOnly — the table never reads these, and building
+      // them is what made this response 391 KB)
+      if (listOnly) continue;
       payoutsByDoctor[s.psychologist_id].session_details.push({
         session_id: s.id,
         session_date: s.scheduled_date,
@@ -6987,8 +7030,8 @@ const markPayoutAsPaid = async (req, res) => {
       );
     }
 
-    // Get pending payout data for this psychologist and date range using
-    // completion_date so mark-paid matches the payout views exactly.
+    // Get pending payout data for this psychologist and date range using the
+    // session date so mark-paid matches the payout views exactly.
     let completedSessions = null;
     let sessionsError = null;
 
@@ -7107,17 +7150,68 @@ const markPayoutAsPaid = async (req, res) => {
       commissionMap[ch.session_id] = ch;
     });
 
+    const calculatePayoutLedger = (session, existingCommission = null) => {
+      const totalSessions = Math.max(1, parseInt(session.session_count, 10) || 1);
+      const isPackageSession =
+        !!session.package_id ||
+        totalSessions > 1 ||
+        String(session.session_type || '').toLowerCase().includes('package');
+      const existingSessionAmount = parseFloat(existingCommission?.session_amount ?? NaN);
+      const existingCommissionAmount = parseFloat(existingCommission?.commission_amount ?? NaN);
+
+      // Keep already-valid ledger rows. This preserves finance edits while still repairing
+      // old package follow-up rows that were saved as ₹0 gross / negative company commission.
+      if (
+        existingCommission &&
+        Number.isFinite(existingSessionAmount) &&
+        Number.isFinite(existingCommissionAmount) &&
+        existingSessionAmount > 0 &&
+        existingCommissionAmount >= 0
+      ) {
+        return {
+          session_amount: existingSessionAmount,
+          commission_amount: existingCommissionAmount,
+        };
+      }
+
+      const doctorWallet = computeSessionDoctorWallet(session, activeDc, null) || 0;
+      const rawSessionAmount = parseFloat(session.price ?? session.amount ?? 0) || 0;
+
+      if (isPackageSession) {
+        const amountConfig =
+          activeDc?.commission_amounts && typeof activeDc.commission_amounts === 'object'
+            ? activeDc.commission_amounts
+            : {};
+        const packageType = getFinancePackageType(session, null);
+        const fallbackPackageType = `package_${totalSessions}`;
+        const configuredCompanyTotal = parseFloat(
+          amountConfig?.[packageType] ??
+          amountConfig?.[fallbackPackageType] ??
+          amountConfig?.package ??
+          activeDc?.commission_amount_package ??
+          0
+        ) || 0;
+        const companyPerSession = configuredCompanyTotal > 0
+          ? configuredCompanyTotal / totalSessions
+          : Math.max(0, (rawSessionAmount / totalSessions) - doctorWallet);
+        const sessionAmount = doctorWallet + companyPerSession;
+
+        return {
+          session_amount: Math.round(sessionAmount * 100) / 100,
+          commission_amount: Math.round(companyPerSession * 100) / 100,
+        };
+      }
+
+      return {
+        session_amount: rawSessionAmount,
+        commission_amount: Math.round(Math.max(0, rawSessionAmount - doctorWallet) * 100) / 100,
+      };
+    };
+
     completedSessionsInRange.forEach(session => {
       let commission = commissionMap[session.id];
       
-      if (!commission) {
-        const sessionAmount = parseFloat(session.price ?? session.amount ?? 0) || 0;
-        const doctorWallet = computeSessionDoctorWallet(session, activeDc, null) || 0;
-        commission = {
-          session_amount: sessionAmount,
-          commission_amount: sessionAmount - doctorWallet
-        };
-      }
+      commission = calculatePayoutLedger(session, commission);
 
       const sessionAmount = parseFloat(commission.session_amount || 0);
       const commissionAmount = parseFloat(commission.commission_amount || 0);
@@ -7181,17 +7275,35 @@ const markPayoutAsPaid = async (req, res) => {
       // Don't throw - payout is already created, just log the error
     }
 
+    for (const session of completedSessionsInRange.filter((s) => existingCommissionSessionIds.has(s.id))) {
+      const ledger = calculatePayoutLedger(session, commissionMap[session.id]);
+      const { error: ledgerUpdateError } = await supabaseAdmin
+        .from('commission_history')
+        .update({
+          session_amount: ledger.session_amount,
+          commission_amount: ledger.commission_amount,
+          payment_id: session.payment_id || null,
+          payment_status: 'paid',
+          updated_at: new Date().toISOString()
+        })
+        .eq('session_id', session.id)
+        .eq('psychologist_id', psychologist_id);
+
+      if (ledgerUpdateError) {
+        console.error('Error normalizing paid commission ledger:', ledgerUpdateError);
+      }
+    }
+
     const missingCommissionRows = completedSessionsInRange
       .filter((session) => !existingCommissionSessionIds.has(session.id))
       .map((session) => {
-        const sessionAmount = parseFloat(session.price ?? session.amount ?? 0) || 0;
-        const doctorWallet = computeSessionDoctorWallet(session, activeDc, null) || 0;
+        const ledger = calculatePayoutLedger(session, null);
         return {
           psychologist_id,
           session_id: session.id,
           payment_id: session.payment_id || null,
-          session_amount: sessionAmount,
-          commission_amount: sessionAmount - doctorWallet,
+          session_amount: ledger.session_amount,
+          commission_amount: ledger.commission_amount,
           payment_status: 'paid',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
@@ -7697,10 +7809,6 @@ const updateSessionCommission = async (req, res) => {
       sequenceOverride = sq;
     }
 
-    if (commission_amount === undefined || commission_amount === null || isNaN(Number(commission_amount))) {
-      return res.status(400).json(errorResponse('commission_amount is required and must be a number'));
-    }
-
     // Optional per-session payout status. Setting it to 'paid' settles THIS session alone —
     // it then leaves the Pending tab and appears under Completed, without touching any of the
     // therapist's other sessions (unlike the whole-month "Mark as Paid" action).
@@ -7711,6 +7819,20 @@ const updateSessionCommission = async (req, res) => {
         return res.status(400).json(errorResponse("payout_status must be 'paid' or 'pending'"));
       }
       payoutStatusToSet = ps;
+    }
+
+    // Changing ONLY the payout status (or only the first/follow-up flag) must not require the
+    // caller to resend the split. The Completed-payout tab's "move back to pending" action
+    // sends just the status, so this rejected it with a 400 and the change appeared to do
+    // nothing. Must sit AFTER payoutStatusToSet is assigned — reading it earlier is a
+    // temporal-dead-zone throw, which turned the 400 into a 500.
+    const isStatusOnlyEdit =
+      (commission_amount === undefined || commission_amount === null || commission_amount === '') &&
+      (payoutStatusToSet !== null || sequenceOverride !== null);
+
+    if (!isStatusOnlyEdit &&
+        (commission_amount === undefined || commission_amount === null || isNaN(Number(commission_amount)))) {
+      return res.status(400).json(errorResponse('commission_amount is required and must be a number'));
     }
 
     // Fetch session to get session_amount and psychologist_id
@@ -7727,7 +7849,23 @@ const updateSessionCommission = async (req, res) => {
     const sessionAmount = session_amount === undefined || session_amount === null || session_amount === ''
       ? (parseFloat(session.price ?? session.amount ?? 0) || 0)
       : Number(session_amount);
-    const companyCommission = Number(commission_amount);
+    // On a status-only edit keep whatever split is already recorded, so flipping paid/pending
+    // can never silently rewrite the money to 0.
+    let priorCommission = null;
+    if (isStatusOnlyEdit) {
+      const { data: priorRow } = await supabaseAdmin
+        .from('commission_history')
+        .select('commission_amount')
+        .eq('session_id', sessionId)
+        .maybeSingle();
+      priorCommission = priorRow ? Number(priorRow.commission_amount) : null;
+      if (!Number.isFinite(priorCommission)) {
+        return res.status(400).json(
+          errorResponse('No existing commission record to update — send commission_amount as well.')
+        );
+      }
+    }
+    const companyCommission = isStatusOnlyEdit ? priorCommission : Number(commission_amount);
 
     if (!Number.isFinite(sessionAmount) || sessionAmount < 0) {
       return res.status(400).json(errorResponse('session_amount must be a valid non-negative number'));
