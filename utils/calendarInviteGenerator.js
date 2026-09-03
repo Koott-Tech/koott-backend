@@ -29,22 +29,23 @@ function generateCalendarInvite(sessionData) {
   const sessionDateTime = new Date(`${sessionDate}T${sessionTime}+05:30`);
   const endDateTime = new Date(sessionDateTime.getTime() + (duration * 60000));
 
-  // Format dates for iCalendar in IST timezone (YYYYMMDDTHHMMSS)
-  const formatICalDateIST = (date) => {
-    // Format the date in IST timezone without converting to UTC
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const seconds = String(date.getSeconds()).padStart(2, '0');
-    
-    return `${year}${month}${day}T${hours}${minutes}${seconds}`;
-  };
+  /**
+   * iCalendar UTC form: YYYYMMDDTHHMMSSZ.
+   *
+   * sessionDateTime already holds the correct absolute instant (parsed from the IST wall
+   * clock above), so emitting it in UTC lets every calendar app convert it to the VIEWER's
+   * own timezone: 3:00 pm for a client in India, 1:30 pm in Dubai, 9:30 am in London. One
+   * invite, correct everywhere — no per-client timezone handling needed on our side.
+   *
+   * The previous version built the string from date.getFullYear()/getHours(), which are
+   * SERVER-local fields, and then tagged it `TZID=Asia/Kolkata`. On Render (UTC) that wrote
+   * the UTC clock under an IST label, so every invite landed exactly 5h30m early.
+   */
+  const formatICalDateUTC = (date) => date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
-  const startDate = formatICalDateIST(sessionDateTime);
-  const endDate = formatICalDateIST(endDateTime);
-  const createdDate = formatICalDateIST(new Date());
+  const startDate = formatICalDateUTC(sessionDateTime);
+  const endDate = formatICalDateUTC(endDateTime);
+  const createdDate = formatICalDateUTC(new Date());
 
   // When no Meet link yet, avoid showing "undefined" — use a clear placeholder
   const meetText = meetLink && String(meetLink).trim() ? meetLink : 'Join link will be shared separately';
@@ -61,20 +62,11 @@ function generateCalendarInvite(sessionData) {
     'PRODID:-//Koott//Therapy Sessions//EN',
     'CALSCALE:GREGORIAN',
     'METHOD:REQUEST',
-    'BEGIN:VTIMEZONE',
-    'TZID:Asia/Kolkata',
-    'BEGIN:STANDARD',
-    'DTSTART:19700101T000000',
-    'TZOFFSETFROM:+0530',
-    'TZOFFSETTO:+0530',
-    'TZNAME:IST',
-    'END:STANDARD',
-    'END:VTIMEZONE',
     'BEGIN:VEVENT',
     `UID:${uid}`,
     `DTSTAMP:${createdDate}`,
-    `DTSTART;TZID=Asia/Kolkata:${startDate}`,
-    `DTEND;TZID=Asia/Kolkata:${endDate}`,
+    `DTSTART:${startDate}`,
+    `DTEND:${endDate}`,
     `SUMMARY:${sessionTitle}`,
     `DESCRIPTION:Online therapy session scheduled through Koott.\\n\\n` +
     `Client: ${clientName}\\n` +
@@ -154,13 +146,14 @@ function generateGoogleCalendarLink(sessionData) {
   const sessionDateTime = new Date(`${sessionDate}T${sessionTime}+05:30`);
   const endDateTime = new Date(sessionDateTime.getTime() + (duration * 60000));
 
-  // Format for Google Calendar in IST (YYYYMMDDTHHMMSS without Z for local time)
-  const formatGoogleDateIST = (date) => {
-    return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z/, '');
-  };
+  // Google reads a bare YYYYMMDDTHHMMSS as the VIEWER's local time, so stripping the "Z"
+  // handed it the UTC clock to display as-is — 5h30m early for an Indian client. Keeping the
+  // Z marks the value as UTC, and Google renders it in whatever timezone the viewer's
+  // calendar is set to, which is what we want for overseas clients.
+  const formatGoogleDateUTC = (date) => date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
-  const startDate = formatGoogleDateIST(sessionDateTime);
-  const endDate = formatGoogleDateIST(endDateTime);
+  const startDate = formatGoogleDateUTC(sessionDateTime);
+  const endDate = formatGoogleDateUTC(endDateTime);
 
   const meetText = meetLink && String(meetLink).trim() ? meetLink : 'Join link will be shared separately';
   const title = encodeURIComponent(buildKoottSessionTitle({ clientName, psychologistName }));

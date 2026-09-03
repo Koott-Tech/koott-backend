@@ -336,6 +336,11 @@ async function processOneSession(session, tempPassword = null) {
   let meetResult = { success: false, meetLink: null };
   const masterFallback = process.env.MASTER_FALLBACK_MEET_LINK || 'https://meet.google.com/ovr-qpsi-mwr';
   let finalMeetLink = session.google_meet_link || masterFallback;
+  // Tracked so the confirmation email knows a real Google Calendar invite already exists.
+  // Without it emailService treats this as an API-less booking and attaches its own .ics +
+  // "Add to Google Calendar" button, giving the client a SECOND, duplicate event on top of
+  // the official invite. Every other sendSessionConfirmation caller already passes this.
+  let finalCalendarEventId = session.google_calendar_event_id || null;
 
   if (DISABLE_AUTO_GOOGLE_MEET_ON_BOOKING) {
     console.log(`${LOG_PREFIX} Google Meet auto-scheduling temporarily disabled for session ${session.id}`);
@@ -351,6 +356,7 @@ async function processOneSession(session, tempPassword = null) {
 
     // ── Save Meet link to session ─────────────────────────────────────────
     finalMeetLink = meetResult.meetLink || session.google_meet_link || masterFallback;
+    finalCalendarEventId = meetResult.eventId || null;
 
     // Try full update first; fall back to just google_meet_link if extra columns don't exist
       let { error: updateError } = await supabaseAdmin
@@ -395,6 +401,7 @@ async function processOneSession(session, tempPassword = null) {
       sessionTime: session.scheduled_time,
       durationMinutes: meetDurationMinutes,
       meetLink: meetLink,
+      googleCalendarEventId: finalCalendarEventId,
       price: session.price ?? session.amount,
       status: session.status,
       psychologistId: session.psychologist_id,
