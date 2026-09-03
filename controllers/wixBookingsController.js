@@ -6,7 +6,7 @@ const { fetchWixDiscover, extractBookingsList } = require('../utils/wixDiscoverC
 const { discoverRowToDb, discoverRowToSessionDb, wixBookingCreatedIso, isUnpaidInPersonBooking } = require('../utils/wixBookingMapper');
 const { resolveClientsForBookings } = require('../services/wixClientResolverService');
 const { linkPackageSessions: linkWixBookingsPackages } = require('../services/wixPackageLinkingService');
-const { resolvePsychologistsForBookings } = require('../services/wixPsychologistResolverService');
+const { resolvePsychologistsForBookings, nameMatchKey } = require('../services/wixPsychologistResolverService');
 const { processNewWixSessions, processOneSession } = require('../services/wixMeetNotifyService');
 const { linkPackageSessions } = require('../services/wixPackageLinkerService');
 const { fetchSessionInfoBatch } = require('../services/wixOrderEnrichmentService');
@@ -1644,7 +1644,13 @@ async function backfillWixClients(req, res) {
  */
 async function listWixTherapists(req, res) {
   try {
-    const pageSize = Math.min(2000, Math.max(200, parseInt(String(req.query.page_size || '2000'), 10) || 2000));
+    // PostgREST caps every response at 1000 rows, so a page_size above that is a trap: asking
+    // for .range(0, 1999) returns 1000 rows, the loop sees 1000 < 2000, concludes it reached the
+    // end and stops — scanning only the first 1000 of the mirror while reporting a complete scan.
+    // Booking counts came out a third of the truth and therapists whose rows sat past the first
+    // page were reported as "missing from the mirror". Keep the page at or below the cap.
+    const PAGE_LIMIT = 1000;
+    const pageSize = Math.min(PAGE_LIMIT, Math.max(200, parseInt(String(req.query.page_size || String(PAGE_LIMIT)), 10) || PAGE_LIMIT));
     const maxBookingsParsed = req.query.max_bookings != null ? parseInt(String(req.query.max_bookings), 10) : NaN;
     const maxBookings =
       Number.isFinite(maxBookingsParsed) && maxBookingsParsed > 0
@@ -1734,7 +1740,7 @@ async function listWixTherapists(req, res) {
       const staffSample = discover?.json?.sections?.staff?.sample;
       if (Array.isArray(staffSample)) {
         for (const s of staffSample) {
-          const n = String(s?.name || '').trim().toLowerCase();
+          const n = nameMatchKey(s?.name);
           const e = String(s?.email || '').trim().toLowerCase();
           if (n && e) staffEmailByName.set(n, e);
         }
@@ -1759,13 +1765,15 @@ async function listWixTherapists(req, res) {
     for (const p of psychologists || []) {
       const email = String(p.email || '').trim().toLowerCase();
       if (email) psychByEmail.set(email, p);
-      const nameKey = `${String(p.first_name || '').trim().toLowerCase()} ${String(p.last_name || '').trim().toLowerCase()}`.trim();
+      // Title- and whitespace-insensitive, so a Wix row that says "Dr. Aswathy Raman" still
+      // matches the psychologist stored as "Aswathy Raman" — the same key the sync resolves by.
+      const nameKey = nameMatchKey(`${p.first_name || ''} ${p.last_name || ''}`);
       if (nameKey) psychByName.set(nameKey, p);
     }
 
     const mapped = therapists
       .map((t) => {
-        const nameKey = String(t.name || '').trim().toLowerCase();
+        const nameKey = nameMatchKey(t.name);
         const inferredEmail = t.email || staffEmailByName.get(nameKey) || null;
         const matched = (inferredEmail && psychByEmail.get(inferredEmail)) || psychByName.get(nameKey) || null;
         return {

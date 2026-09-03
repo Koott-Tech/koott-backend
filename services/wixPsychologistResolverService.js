@@ -252,4 +252,8 @@ async function resolvePsychologistsForBookings(bookings) {
 module.exports = {
   resolveOrCreateWixPsychologist,
   resolvePsychologistsForBookings,
+  // Exported so read-only views (e.g. the admin Wix-therapists list) match therapists by the
+  // SAME rule the booking sync uses. A view that matched on the raw name reported "Dr. X" as
+  // unlinked while the sync had linked it correctly all along.
+  nameMatchKey,
 };
