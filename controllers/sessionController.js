@@ -2294,9 +2294,18 @@ const completeSession = async (req, res) => {
       // Captured in the completion popup — previously kept in the therapists' own
       // "Koott-26 Sessions" spreadsheets. Session-level:
       condition, client_status, to_operation,
+      // The therapist's own first/follow-up call. Recorded for their sheet; finance keeps
+      // deriving its own sequence and never reads this.
+      therapist_session_sequence,
+      // Intake answers, all session-level: the same client can give different answers at a
+      // later session, so these are never treated as write-once client facts.
+      concern_duration, therapy_trigger, therapy_awareness, tried_therapy_before,
+      therapy_hesitation, client_opening_statement,
       // Client-level: asked ONCE (the popup only shows these when the client record is
       // missing them), then reused for every later session.
-      client_sex, client_pronouns, client_age,
+      client_sex, client_pronouns, client_age, client_age_group, client_location,
+      // Couple sessions carry a second person who has no client record of their own.
+      partner_sex, partner_age_group, partner_location,
     } = req.body;
     const userId = req.user.id;
     const userRole = req.user.role;
@@ -2370,6 +2379,20 @@ const completeSession = async (req, res) => {
     if (typeof condition === 'string' && condition.trim()) updateData.condition = condition.trim();
     if (typeof client_status === 'string' && client_status.trim()) updateData.client_status = client_status.trim();
     if (typeof to_operation === 'string' && to_operation.trim()) updateData.to_operation = to_operation.trim();
+    // Whitelisted rather than passed through: the column is a backup record, and a typo'd
+    // value would be invisible until someone read the sheet months later.
+    {
+      const seq = String(therapist_session_sequence || '').trim().toLowerCase();
+      if (seq === 'first' || seq === 'followup') updateData.therapist_session_sequence = seq;
+    }
+    // Intake answers — same shape, so a single loop keeps them from drifting apart as more
+    // questions get added to the popup.
+    for (const [field, value] of Object.entries({
+      concern_duration, therapy_trigger, therapy_awareness, tried_therapy_before,
+      therapy_hesitation, client_opening_statement,
+    })) {
+      if (typeof value === 'string' && value.trim()) updateData[field] = value.trim();
+    }
 
     // Add completion_date if provided (for finance dashboard filtering)
     // If not provided, use scheduled_date as default
@@ -2394,10 +2417,19 @@ const completeSession = async (req, res) => {
     if (typeof client_pronouns === 'string' && client_pronouns.trim()) clientPatch.pronouns = client_pronouns.trim();
     const parsedAge = parseInt(client_age, 10);
     if (Number.isFinite(parsedAge) && parsedAge > 0 && parsedAge < 130) clientPatch.age = parsedAge;
+    if (typeof client_age_group === 'string' && client_age_group.trim()) clientPatch.age_group = client_age_group.trim();
+    if (typeof client_location === 'string' && client_location.trim()) clientPatch.location = client_location.trim();
+    // Partner details ride along on the same fill-the-blanks rule, so a later couple session
+    // never overwrites what the first one recorded.
+    if (typeof partner_sex === 'string' && partner_sex.trim()) clientPatch.partner_sex = partner_sex.trim();
+    if (typeof partner_age_group === 'string' && partner_age_group.trim()) clientPatch.partner_age_group = partner_age_group.trim();
+    if (typeof partner_location === 'string' && partner_location.trim()) clientPatch.partner_location = partner_location.trim();
     if (Object.keys(clientPatch).length && session.client_id) {
       try {
         const { data: existing } = await supabaseAdmin
-          .from('clients').select('sex, pronouns, age').eq('id', session.client_id).maybeSingle();
+          .from('clients')
+          .select('sex, pronouns, age, age_group, location, partner_sex, partner_age_group, partner_location')
+          .eq('id', session.client_id).maybeSingle();
         // Fill only the blanks.
         const toWrite = {};
         for (const [k, v] of Object.entries(clientPatch)) {
@@ -2414,10 +2446,13 @@ const completeSession = async (req, res) => {
       }
     }
 
-    // Update session with completion data
-    const { data: updatedSession, error: updateError } = await supabaseAdmin
+    // Update session with completion data.
+    // therapist_session_sequence ships ahead of its migration, so retry without it if the
+    // column isn't there yet: a backup field must never be the reason a therapist can't
+    // close a session.
+    const runCompletionUpdate = (payload) => supabaseAdmin
       .from('sessions')
-      .update(updateData)
+      .update(payload)
       .eq('id', sessionId)
       .select(`
         *,
@@ -2432,6 +2467,13 @@ const completeSession = async (req, res) => {
         )
       `)
       .single();
+
+    let { data: updatedSession, error: updateError } = await runCompletionUpdate(updateData);
+    if (updateError && /therapist_session_sequence/.test(updateError.message || '')) {
+      console.warn('[completeSession] therapist_session_sequence column missing — run migration 20260902180000_session_therapist_sequence.sql');
+      const { therapist_session_sequence: _dropped, ...withoutSequence } = updateData;
+      ({ data: updatedSession, error: updateError } = await runCompletionUpdate(withoutSequence));
+    }
 
     if (updateError) {
       console.error('Error updating session:', updateError);
@@ -2566,7 +2608,23 @@ const completeSession = async (req, res) => {
 
     const completedBy = isAdmin ? 'admin' : 'psychologist';
     console.log(`✅ Session ${sessionId} completed by ${completedBy} ${userId}${isFreeAssessment ? ' (free assessment)' : ''}`);
-    
+
+    // Mirror into the therapist's Google Sheet. Fire-and-forget on purpose: the completion has
+    // already been written, so a Google outage or an expired token must not turn a successful
+    // completion into an error the therapist sees. syncSessionToSheet never throws, and the
+    // nightly sweep re-tries anything it could not write.
+    try {
+      const { syncSessionToSheet } = require('../services/sessionSheetSyncService');
+      syncSessionToSheet(sessionId)
+        .then((r) => {
+          if (r?.ok) console.log(`📄 sheet ${r.action} for session ${sessionId} (${r.tab})`);
+          else console.warn(`📄 sheet sync skipped for ${sessionId}: ${r?.reason}`);
+        })
+        .catch((err) => console.error('📄 sheet sync threw:', err?.message || err));
+    } catch (sheetErr) {
+      console.error('📄 sheet sync could not start:', sheetErr?.message || sheetErr);
+    }
+
     res.json(
       successResponse(updatedSession, 'Session completed successfully')
     );

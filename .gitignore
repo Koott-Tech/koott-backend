@@ -233,3 +233,7 @@ oauth-tokens.json
 # Scratch files
 scratch/
 
+
+# Local cache of the therapist->spreadsheet map written by scripts/google-create-therapist-sheets.js.
+# The therapist_sheets table is the real source of truth; this file is machine-local.
+.therapist-sheets.json
