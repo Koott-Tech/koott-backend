@@ -7,6 +7,11 @@ const { discoverRowToDb, discoverRowToSessionDb, wixBookingCreatedIso, isUnpaidI
 const { resolveClientsForBookings } = require('../services/wixClientResolverService');
 const { linkPackageSessions: linkWixBookingsPackages } = require('../services/wixPackageLinkingService');
 const { resolvePsychologistsForBookings, nameMatchKey } = require('../services/wixPsychologistResolverService');
+// Booking-time changes had NO audit trail at all. When a 4 Sept booking was found with its
+// calendar an hour ahead of its session row, the change had happened eighteen days earlier
+// and there was simply nothing recorded — not who, not from what, not through which action.
+// These entries are in the cleanup job's protected list, so they outlive the general retention.
+const auditLogger = require('../utils/auditLogger');
 const { processNewWixSessions, processOneSession } = require('../services/wixMeetNotifyService');
 const { linkPackageSessions } = require('../services/wixPackageLinkerService');
 const { fetchSessionInfoBatch } = require('../services/wixOrderEnrichmentService');
@@ -2118,6 +2123,16 @@ async function editWixBooking(req, res) {
         });
       }
 
+      auditLogger.logRequest(req, 'WIX_BOOKING_EDITED', 'wix_booking', id, {
+        wix_booking_id: data.wix_booking_id,
+        changed_fields: Object.keys(safeUpdates).filter((k) => !['locally_modified', 'synced_at'].includes(k)),
+        // Time edits are the ones that cost a slot when they only half-apply, so record them explicitly.
+        start_time: safeUpdates.start_time || null,
+        session_time: sessionUpdates.scheduled_date
+          ? `${sessionUpdates.scheduled_date} ${sessionUpdates.scheduled_time}`
+          : null,
+      }).catch((e) => console.error('[editWixBooking] audit log failed:', e?.message || e));
+
       // A package's size lives on every session of the group — if the admin changed the
       // count, propagate it to the siblings (and their wix mirrors) so "N/M" stays consistent.
       if (sessionUpdates.session_count != null) {
@@ -2999,6 +3014,14 @@ async function transferWixBooking(req, res) {
         });
       }
 
+      auditLogger.logRequest(req, 'WIX_BOOKING_TRANSFERRED', 'wix_booking', booking.id, {
+        wix_booking_id: booking.wix_booking_id,
+        session_id: linkedSession.id,
+        from: { psychologist_id: linkedSession.psychologist_id, therapist_name: booking.therapist_name, start_time: booking.start_time },
+        to: { psychologist_id: new_psychologist_id, therapist_name: newPsychName, start_time: newStartTimeIso },
+        time_changed: timeChanged,
+      }).catch((e) => console.error('[transferWixBooking] audit log failed:', e?.message || e));
+
       // Tell the client and the new therapist. This path sent NOTHING before, so a client
       // could have their therapist and time changed without ever being told. Non-fatal: the
       // transfer is already applied and must not be rolled back by a mail failure.
@@ -3328,6 +3351,14 @@ async function rescheduleWixBooking(req, res) {
     if (!newMeetData.eventId) {
       console.error(`🚨 [rescheduleWixBooking] NO calendar event for rescheduled slot ${new_date} ${timeHms} (session ${linkedSession?.id || '-'}). Slot is NOT blocked in Google Calendar — Wix may resell it.`);
     }
+
+    auditLogger.logRequest(req, 'WIX_BOOKING_RESCHEDULED', 'wix_booking', booking.id, {
+      wix_booking_id: booking.wix_booking_id,
+      session_id: linkedSession?.id || null,
+      from: { start_time: booking.start_time, date: linkedSession?.scheduled_date, time: linkedSession?.scheduled_time },
+      to: { start_time: newStartTimeIso, date: new_date, time: timeHms },
+      calendar_event_id: newMeetData?.eventId || null,
+    }).catch((e) => console.error('[rescheduleWixBooking] audit log failed:', e?.message || e));
 
     // 8. Update the linked platform session (carries psychologist + meet/calendar)
     if (linkedSession?.id) {

@@ -5,7 +5,8 @@
  * Runs weekly to keep the database clean.
  * 
  * This job:
- * - Deletes logs older than 7 days
+ * - Deletes logs past AUDIT_LOG_RETENTION_DAYS (default 30), except booking-change
+ *   actions which are kept for AUDIT_LOG_PROTECTED_RETENTION_DAYS (default 365)
  * - Runs weekly (every 7 days)
  * - Logs cleanup statistics
  */
@@ -15,25 +16,54 @@ const { supabaseAdmin } = require('../config/supabase');
 /**
  * Run cleanup job
  * 
- * Deletes audit logs older than 1 week (7 days)
+ * Deletes audit logs past retention, keeping booking-change actions far longer.
  * 
  * @returns {Promise<Object>} { success: boolean, deleted: number, error?: string }
  */
+/**
+ * Actions that answer "who changed this booking, and to what".
+ *
+ * Everything used to be deleted after 7 days. When a 4 Sept booking turned up with its
+ * calendar an hour ahead of its session row, the change had happened on 17 Aug — eighteen
+ * days earlier — and the record was gone, so the cause could not be established at all.
+ * Cheap rows, and they are the only ones anyone ever goes looking for after the fact.
+ */
+const PROTECTED_ACTIONS = [
+  'WIX_BOOKING_RESCHEDULED',
+  'WIX_BOOKING_TRANSFERRED',
+  'WIX_BOOKING_EDITED',
+  'SESSION_UPDATED',
+  'SESSION_RESCHEDULED',
+  'SESSION_DELETED',
+  'SESSION_CANCELLED',
+];
+
+const RETENTION_DAYS = Number(process.env.AUDIT_LOG_RETENTION_DAYS || 30);
+const PROTECTED_RETENTION_DAYS = Number(process.env.AUDIT_LOG_PROTECTED_RETENTION_DAYS || 365);
+
 const runAuditLogsCleanup = async () => {
   try {
     console.log('🧹 Starting audit logs cleanup job...');
     const startTime = Date.now();
 
-    // Calculate cutoff date (7 days ago)
-    const oneWeekAgo = new Date();
-    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-    const cutoffDate = oneWeekAgo.toISOString();
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - RETENTION_DAYS);
+    const cutoffDate = cutoff.toISOString();
+
+    // Booking-change entries survive far longer than the rest: they are the audit trail for
+    // a slot that can be lost, and questions about them arrive weeks late.
+    const protectedCutoff = new Date();
+    protectedCutoff.setDate(protectedCutoff.getDate() - PROTECTED_RETENTION_DAYS);
+    const protectedCutoffDate = protectedCutoff.toISOString();
+    const protectedList = `(${PROTECTED_ACTIONS.join(',')})`;
+
+    console.log(`🧹 retention: ${RETENTION_DAYS}d general, ${PROTECTED_RETENTION_DAYS}d for ${PROTECTED_ACTIONS.length} protected action(s)`);
 
     // First, count how many logs will be deleted
     const { count, error: countError } = await supabaseAdmin
       .from('audit_logs')
       .select('*', { count: 'exact', head: true })
-      .lt('timestamp', cutoffDate);
+      .or(`and(timestamp.lt.${cutoffDate},action.not.in.${protectedList}),and(timestamp.lt.${protectedCutoffDate},action.in.${protectedList})`);
 
     if (countError) {
       console.error('❌ Error counting audit logs:', countError);
@@ -47,14 +77,14 @@ const runAuditLogsCleanup = async () => {
     const logsToDelete = count || 0;
 
     if (logsToDelete === 0) {
-      console.log('✅ No audit logs to clean up (all logs are within 1 week)');
+      console.log(`✅ No audit logs to clean up (all within retention)`);
       return {
         success: true,
         deleted: 0
       };
     }
 
-    console.log(`📋 Found ${logsToDelete} audit log(s) older than 1 week`);
+    console.log(`📋 Found ${logsToDelete} audit log(s) past retention`);
 
     // Batched deletion to avoid long transactions/timeouts
     const BATCH_SIZE = 1000;
@@ -65,7 +95,7 @@ const runAuditLogsCleanup = async () => {
       const { data: deletedRows, error: deleteError } = await supabaseAdmin
         .from('audit_logs')
         .delete()
-        .lt('timestamp', cutoffDate)
+        .or(`and(timestamp.lt.${cutoffDate},action.not.in.${protectedList}),and(timestamp.lt.${protectedCutoffDate},action.in.${protectedList})`)
         .limit(BATCH_SIZE)
         .select('id');
 
