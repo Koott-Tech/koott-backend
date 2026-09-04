@@ -976,6 +976,12 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
 
   const { startDailyCrawlerScheduler } = require('./jobs/dailyCrawlerJob');
   startDailyCrawlerScheduler();
+
+  // Booking time drift check — flags any upcoming booking whose Google Calendar time no longer
+  // matches its session row. While the two disagree the calendar slot is blocked and Wix will
+  // not sell it, so every hour of delay is an hour of lost availability.
+  const { startBookingTimeDriftScheduler } = require('./jobs/bookingTimeDriftJob');
+  startBookingTimeDriftScheduler(30); // Run every 30 minutes
   
   // Start Slot Lock Cleanup Job (releases expired slots and cleans up abandoned payments, runs every 10 minutes)
   const { releaseExpiredSlots, cleanupAbandonedPendingPayments } = require('./services/slotLockService');
