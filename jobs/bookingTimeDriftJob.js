@@ -21,7 +21,9 @@ const { supabaseAdmin } = require('../config/supabase');
 const emailService = require('../utils/emailService');
 
 const LOG_PREFIX = '[bookingDrift]';
-const ALERT_EMAIL = process.env.BOOKING_DRIFT_ALERT_EMAIL || process.env.NOTIFY_FAILURE_ALERT_EMAIL || null;
+// Same shape as the crawler job's recipients: a hardcoded default so the alert works with no
+// deploy-time config, still overridable via env when it needs to go somewhere else.
+const ALERT_EMAIL = process.env.BOOKING_DRIFT_ALERT_EMAIL || 'koottfordeveloper@gmail.com';
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 // Mirror rows in these states are not live bookings, so a time difference is meaningless.
@@ -108,7 +110,7 @@ async function findBookingTimeDrift() {
 
 async function alertOnDrift(drift) {
   const fresh = drift.filter((d) => !alerted.has(d.session_id));
-  if (!fresh.length || !ALERT_EMAIL) return;
+  if (!fresh.length) return;
   try {
     const rows = fresh
       .map(
