@@ -2105,7 +2105,18 @@ async function editWixBooking(req, res) {
         sessionUpdates.scheduled_date = startIST.slice(0, 10);
         sessionUpdates.scheduled_time = startIST.slice(11, 19);
       }
-      await supabaseAdmin.from('sessions').update(sessionUpdates).eq('wix_booking_id', data.wix_booking_id);
+      // The mirror is already written by this point, so a silent failure here is exactly the
+      // drift this endpoint must never create: booking says one time, session says another.
+      const { error: sessErr } = await supabaseAdmin
+        .from('sessions').update(sessionUpdates).eq('wix_booking_id', data.wix_booking_id);
+      if (sessErr) {
+        console.error(`🚨 [editWixBooking] mirror updated but SESSION UPDATE FAILED for wix_booking_id=${data.wix_booking_id}: ${sessErr.message}`);
+        return res.status(500).json({
+          success: false,
+          partiallyApplied: true,
+          error: `The booking was updated but the session record was not (${sessErr.message}). They now disagree — re-apply this edit before the session runs.`,
+        });
+      }
 
       // A package's size lives on every session of the group — if the admin changed the
       // count, propagate it to the siblings (and their wix mirrors) so "N/M" stays consistent.
@@ -2785,16 +2796,36 @@ async function transferWixBooking(req, res) {
 
     // 3. Fetch the linked platform session (source of old psychologist + calendar/meet data)
     const hasOrigPsychCol = await hasOriginalPsychologistColumn(supabaseAdmin);
+    // Same contract as rescheduleWixBooking: everything below this point mutates — the old
+    // calendar event is deleted, a new one is created on the new therapist, and the mirror is
+    // rewritten — while the session write is guarded by `if (linkedSession?.id)`. A swallowed
+    // lookup error therefore moved the calendar and the mirror and left `sessions` pointing at
+    // the old therapist and the old slot, with no error shown. Fail before touching anything.
     let linkedSession = null;
     if (booking.wix_booking_id) {
-      const { data } = await supabaseAdmin
+      const { data, error: linkErr } = await supabaseAdmin
         .from('sessions')
         // scheduled_date/time and client_id are needed for the transfer notification: the email
         // reports the FINAL slot and, when the dialog also moved it, the previous one.
         .select(`id, psychologist_id, client_id, status, scheduled_date, scheduled_time, google_calendar_event_id, google_meet_link${hasOrigPsychCol ? ', original_psychologist_id' : ''}`)
         .eq('wix_booking_id', booking.wix_booking_id)
-        .maybeSingle();
-      linkedSession = data || null;
+        .limit(1);
+      if (linkErr) {
+        console.error('[transferWixBooking] session lookup failed — aborting before any change:', linkErr.message);
+        return res.status(500).json({
+          success: false,
+          error: `Could not load the session for this booking (${linkErr.message}). Nothing was changed — please retry.`,
+        });
+      }
+      linkedSession = (data && data[0]) || null;
+    }
+
+    if (!linkedSession?.id) {
+      console.error(`[transferWixBooking] no session linked to wix_booking_id=${booking.wix_booking_id} — aborting before any change`);
+      return res.status(409).json({
+        success: false,
+        error: 'No platform session is linked to this booking, so it cannot be transferred safely. Nothing was changed.',
+      });
     }
 
     // 4. Delete old calendar event from old therapist (non-fatal)
@@ -2955,7 +2986,18 @@ async function transferWixBooking(req, res) {
         sessionUpdates.status = 'rescheduled';
         sessionUpdates.reminder_sent = false;
       }
-      await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
+      // Calendar and mirror are already changed above. If this write fails the session still
+      // points at the OLD therapist and slot — report it rather than returning success.
+      const { error: sessErr } = await supabaseAdmin
+        .from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
+      if (sessErr) {
+        console.error(`🚨 [transferWixBooking] calendar+mirror moved but SESSION UPDATE FAILED for session=${linkedSession.id}: ${sessErr.message}`);
+        return res.status(500).json({
+          success: false,
+          partiallyApplied: true,
+          error: `The calendar and booking were transferred but the session record was not (${sessErr.message}). They now disagree — re-apply this transfer before the session runs.`,
+        });
+      }
 
       // Tell the client and the new therapist. This path sent NOTHING before, so a client
       // could have their therapist and time changed without ever being told. Non-fatal: the
@@ -3089,14 +3131,47 @@ async function rescheduleWixBooking(req, res) {
     }
 
     // 2. Fetch the linked platform session (source of psychologist + calendar/meet data)
+    //
+    // This lookup used to discard its error and fall through with linkedSession = null. The
+    // mirror update and the Google Calendar move below are unconditional, while the session
+    // write is guarded by `if (linkedSession?.id)` — so a failed lookup moved the booking and
+    // the calendar to the new time, silently left `sessions` on the OLD time with status
+    // still 'booked' and no original_scheduled_*, and reported success to the admin.
+    //
+    // The damage is invisible and expensive: Wix reads the therapist's Google Calendar for
+    // availability, so the new slot gets blocked while the real booking still sits in the old
+    // one — two hours held, one sold. Seen live on a 4 Sept booking that moved 09:00 -> 10:00
+    // in the mirror and on Google while sessions kept 09:00.
+    //
+    // .limit(1) rather than .maybeSingle(): maybeSingle THROWS when a booking has more than
+    // one session row, which is exactly how the lookup can come back empty (same trap that
+    // let commissionCalculationService insert duplicate ledger rows).
     let linkedSession = null;
     if (booking.wix_booking_id) {
-      const { data } = await supabaseAdmin
+      const { data, error: linkErr } = await supabaseAdmin
         .from('sessions')
         .select('id, client_id, psychologist_id, google_calendar_event_id, google_meet_link, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time')
         .eq('wix_booking_id', booking.wix_booking_id)
-        .maybeSingle();
-      linkedSession = data || null;
+        .limit(1);
+      if (linkErr) {
+        console.error('[rescheduleWixBooking] session lookup failed — aborting before any change:', linkErr.message);
+        return res.status(500).json({
+          success: false,
+          error: `Could not load the session for this booking (${linkErr.message}). Nothing was changed — please retry.`,
+        });
+      }
+      linkedSession = (data && data[0]) || null;
+    }
+
+    // Abort BEFORE touching the mirror or the calendar. Every wix_bookings row has exactly one
+    // session, so a miss here means something is wrong — not that a session-less reschedule is
+    // being attempted. Half-applying is worse than refusing.
+    if (!linkedSession?.id) {
+      console.error(`[rescheduleWixBooking] no session linked to wix_booking_id=${booking.wix_booking_id} — aborting before any change`);
+      return res.status(409).json({
+        success: false,
+        error: 'No platform session is linked to this booking, so it cannot be rescheduled safely. Nothing was changed.',
+      });
     }
 
     // 3. Resolve the psychologist — prefer the linked session's id, fall back to matching therapist_name
@@ -3303,7 +3378,14 @@ async function rescheduleWixBooking(req, res) {
           delete sessionUpdates.google_calendar_id;
           await supabaseAdmin.from('sessions').update(sessionUpdates).eq('id', linkedSession.id);
         } else {
-          console.warn('[rescheduleWixBooking] session update error (non-fatal):', sessionUpdateErr.message);
+          // Was logged as "non-fatal" and the admin still saw success — while the calendar sat
+          // on the new time and the session on the old one. That is the whole failure mode.
+          console.error(`🚨 [rescheduleWixBooking] calendar+mirror moved but SESSION UPDATE FAILED for session=${linkedSession.id}: ${sessionUpdateErr.message}`);
+          return res.status(500).json({
+            success: false,
+            partiallyApplied: true,
+            error: `The calendar and booking were moved but the session record was not (${sessionUpdateErr.message}). They now disagree — re-apply this reschedule before the session runs.`,
+          });
         }
       }
     }
