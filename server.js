@@ -982,6 +982,13 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
   // not sell it, so every hour of delay is an hour of lost availability.
   const { startBookingTimeDriftScheduler } = require('./jobs/bookingTimeDriftJob');
   startBookingTimeDriftScheduler(30); // Run every 30 minutes
+
+  // Google Sheet mirror sweep — completeSession writes to the sheet fire-and-forget so a
+  // Google failure can't break a completion, which means a failed write is silent. This picks
+  // up anything still carrying sheet_synced_at = NULL, so a miss self-heals instead of needing
+  // a manual backfill.
+  const { startSheetSyncSweepScheduler } = require('./jobs/sheetSyncSweepJob');
+  startSheetSyncSweepScheduler(60); // Run hourly
   
   // Start Slot Lock Cleanup Job (releases expired slots and cleans up abandoned payments, runs every 10 minutes)
   const { releaseExpiredSlots, cleanupAbandonedPendingPayments } = require('./services/slotLockService');
