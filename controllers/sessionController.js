@@ -2293,7 +2293,13 @@ const completeSession = async (req, res) => {
       summary, report, summary_notes, completion_date,
       // Captured in the completion popup — previously kept in the therapists' own
       // "Koott-26 Sessions" spreadsheets. Session-level:
-      condition, client_status, to_operation,
+      condition, client_status,
+      // The popup's field is `message_to_operations` — it always has been, and it is the name
+      // the form validates and renders. Only `to_operation` was read here, so the value never
+      // arrived and the column stayed null on every completion; the sheet's To Operation
+      // column was only populated because sectionFromReport() parses the text back out of the
+      // concatenated `report`. Accept both names so neither side has to change.
+      to_operation, message_to_operations,
       // The therapist's own first/follow-up call. Recorded for their sheet; finance keeps
       // deriving its own sequence and never reads this.
       therapist_session_sequence,
@@ -2378,7 +2384,10 @@ const completeSession = async (req, res) => {
     // doesn't send these fields (admin panel, older app build) can never blank them.
     if (typeof condition === 'string' && condition.trim()) updateData.condition = condition.trim();
     if (typeof client_status === 'string' && client_status.trim()) updateData.client_status = client_status.trim();
-    if (typeof to_operation === 'string' && to_operation.trim()) updateData.to_operation = to_operation.trim();
+    const operationsNote = [to_operation, message_to_operations].find(
+      (v) => typeof v === 'string' && v.trim()
+    );
+    if (operationsNote) updateData.to_operation = operationsNote.trim();
     // Whitelisted rather than passed through: the column is a backup record, and a typo'd
     // value would be invisible until someone read the sheet months later.
     {
