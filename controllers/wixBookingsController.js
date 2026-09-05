@@ -2801,7 +2801,9 @@ async function transferWixBooking(req, res) {
     // 2. Fetch new psychologist
     const { data: newPsych, error: psychErr } = await supabaseAdmin
       .from('psychologists')
-      .select('id, first_name, last_name, email, google_calendar_credentials')
+      // phone is needed for payload.therapist, which the transfer now keeps in step with
+      // therapist_name.
+      .select('id, first_name, last_name, email, phone, google_calendar_credentials')
       .eq('id', new_psychologist_id)
       .single();
 
@@ -2948,6 +2950,29 @@ async function transferWixBooking(req, res) {
         end_time: new Date(new Date(newStartTimeIso).getTime() + durationMin * 60000).toISOString(),
       } : {}),
     };
+
+    // Move the therapist inside the payload too. Only therapist_name was updated, so a
+    // transferred booking kept the ORIGINAL therapist in payload.therapist forever — and the
+    // admin Wix-therapists page groups rows by name + payload therapist email, so the stale
+    // half resolves to a different psychologist and the page reports the same person as two
+    // profiles. That is what "Possible duplicate therapist profile" has been reporting: not a
+    // duplicate at all, just a transfer this write forgot about.
+    if (booking.payload && typeof booking.payload === 'object') {
+      wbUpdates.payload = {
+        ...booking.payload,
+        therapist: {
+          ...(booking.payload.therapist || {}),
+          name: newPsychName,
+          email: newPsych.email || null,
+          phone: newPsych.phone || null,
+          staffId: newPsych.id,
+        },
+        // serviceName/title carry the therapist's name on Wix-sourced rows and on the mirrors
+        // the admin manual booking builder writes, so they drift for the same reason.
+        ...(booking.payload.serviceName ? { serviceName: newPsychName } : {}),
+        ...(booking.payload.title ? { title: newPsychName } : {}),
+      };
+    }
     // `title` also carries the therapist name (2836 of 2857 rows have title === therapist_name),
     // and the Discovery search matches on it. Leaving it behind on a transfer meant the booking
     // kept surfacing under the OLD therapist's name: searching "Aswathy Raman" returned sessions
