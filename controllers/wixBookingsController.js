@@ -2539,7 +2539,10 @@ async function cancelOnlyWixBooking(req, res) {
 async function bookWixNextSession(req, res) {
   try {
     const { id } = req.params;
-    const { scheduled_date, scheduled_time } = req.body;
+    // duration_minutes is what the admin picked in the Book-next dialog. It was destructured
+    // away and never read, so the choice was silently discarded and the duration always came
+    // from the parent booking's payload.
+    const { scheduled_date, scheduled_time, duration_minutes } = req.body;
 
     if (!id || !scheduled_date || !scheduled_time) {
       return res.status(400).json({ success: false, error: 'Missing required fields: id (param), scheduled_date, scheduled_time' });
@@ -2653,6 +2656,11 @@ async function bookWixNextSession(req, res) {
           const d = Math.round((new Date(origEnd) - new Date(origStart)) / 60000);
           if (d > 0) durMin = d;
         }
+        // An explicit choice from the dialog wins over the inherited window — that is the
+        // whole point of offering the field. Bounded so a typo can't create a 12-hour hold
+        // on a therapist's calendar.
+        const picked = parseInt(duration_minutes, 10);
+        if (Number.isFinite(picked) && picked >= 15 && picked <= 240) durMin = picked;
         endTimeIso = new Date(startLocal.getTime() + durMin * 60000).toISOString();
       }
     } catch (_) { /* non-critical */ }
