@@ -3723,10 +3723,48 @@ async function deleteWixNativeEventHelper(psychologistId, startTimeStr, endTimeS
     const clientNameLower = String(clientDetails.client_full_name || clientDetails.client_first_name || '').toLowerCase().trim();
     const clientPhoneClean = String(clientDetails.client_phone || '').replace(/\D/g, '');
 
+    // Every event in this window carrying the client's name used to be treated as the
+    // Wix-native duplicate — but OUR events carry the client's name too. So cancelling one
+    // session also deleted the calendar event of any OTHER live session for the same client
+    // in the same slot. Seen twice: putting 2/3 of a package on hold silently removed the
+    // brand-new 3/3 booked 34 seconds earlier, and a duplicate manual booking took the real
+    // paid session's event with it. Both left a booked session with nothing on the calendar.
+    //
+    // An event that a session row points at is ours by definition. Look them up once and
+    // never delete those, whatever the title says.
+    const ownedEventIds = new Set();
+    try {
+      const candidateIds = events.map((e) => e.id).filter(Boolean);
+      for (let i = 0; i < candidateIds.length; i += 25) {
+        const slice = candidateIds.slice(i, i + 25);
+        const { data: owning } = await supabaseAdmin
+          .from('sessions')
+          .select('google_calendar_event_id')
+          .in('status', ['booked', 'rescheduled', 'reschedule_requested', 'pending', 'completed'])
+          .or(slice.map((id) => `google_calendar_event_id.ilike.%${id}%`).join(','));
+        (owning || []).forEach((row) => {
+          String(row.google_calendar_event_id || '').split(',').map((x) => x.trim()).filter(Boolean)
+            .forEach((id) => ownedEventIds.add(id));
+        });
+      }
+    } catch (lookupErr) {
+      // Without the lookup we cannot tell our events apart, and deleting the wrong one is far
+      // worse than leaving a stray Wix duplicate. Bail out rather than guess.
+      console.error('[deleteWixNativeEventHelper] ownership lookup failed — skipping cleanup:', lookupErr.message || lookupErr);
+      return;
+    }
+
     for (const ev of events) {
       const summaryLower = String(ev.summary || '').toLowerCase();
-      
+
       if (excludeEventIds.includes(ev.id)) continue;
+      if (ownedEventIds.has(ev.id)) {
+        console.log(`[deleteWixNativeEventHelper] keeping ${ev.id} — a live session points at it ("${ev.summary}")`);
+        continue;
+      }
+      // Belt and braces: our events are titled "Koott …". The Wix-native one reads
+      // "<Therapist> for <Client> +phone".
+      if (summaryLower.startsWith('koott')) continue;
 
       let isWixEvent = false;
       if (clientNameLower && summaryLower.includes(clientNameLower)) {
