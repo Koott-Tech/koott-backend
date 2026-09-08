@@ -2667,6 +2667,14 @@ async function bookWixNextSession(req, res) {
       : (wixRow.session_type === 'package' || totalSessions > 1) ? 'package'
       : linkedSession.session_type || 'package';
 
+    // A couple PACKAGE carries its couple-ness only in payload.bookingType — the parent row's
+    // session_type is 'package' and its tags can even read INDIVIDUAL. Writing `sessionType`
+    // into the follow-up's payload erased the one signal that survives, so the admin list
+    // showed a plain "Pkg (2/3)", the therapist was priced at the individual-package rate, and
+    // the calendar event was sized 50 instead of 80. Inherit it from the parent instead.
+    const parentBookingType = String(wixRow.payload?.bookingType || '').toLowerCase();
+    const payloadBookingType = /couple|cpl/.test(parentBookingType) ? 'couple' : sessionType;
+
     const wixBookingsMirror = {
       wix_booking_id: syntheticWixBookingId,
       wix_session_id: syntheticWixBookingId,
@@ -2691,7 +2699,7 @@ async function bookWixNextSession(req, res) {
       currency: wixRow.currency || null,
       locally_modified: true,
       payload: {
-        bookingType: sessionType,
+        bookingType: payloadBookingType,
         startTime: startTimeIso,
         endTime: endTimeIso,
         therapist: wixRow.therapist_name || null,
@@ -2743,7 +2751,7 @@ async function bookWixNextSession(req, res) {
         // couple package's follow-ups were booked as 80 minutes in the mirror and created as
         // 50 on the therapist's calendar.
         wix_payload: {
-          bookingType: sessionType,
+          bookingType: payloadBookingType,
           startTime: startTimeIso,
           endTime: endTimeIso,
           sessionDurationMin: (startTimeIso && endTimeIso)
