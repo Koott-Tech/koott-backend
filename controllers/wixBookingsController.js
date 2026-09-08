@@ -1459,6 +1459,68 @@ async function listWixBookings(req, res) {
       };
     });
 
+    // ── Package labels (A / B / …) ───────────────────────────────────────────
+    // These were computed in the browser from the rows the page happened to have loaded, and
+    // ordered by the earliest date IN THAT SUBSET. Two admins on different filters or pages
+    // therefore saw the same package labelled differently — one person's "Pkg A" was another's
+    // "Pkg B". A label that identifies a package has to mean the same thing to everyone.
+    //
+    // Computed here instead, over every session the client has had with that therapist, so the
+    // ordering is the client's real package history and does not depend on what is on screen.
+    try {
+      const pairs = new Map(); // "client|psych" -> true
+      for (const b of bookingsOut) {
+        if (b.client_id && b.psychologist_id) pairs.set(`${b.client_id}|${b.psychologist_id}`, true);
+      }
+      if (pairs.size) {
+        const clientIds = [...new Set([...pairs.keys()].map((k) => k.split('|')[0]))];
+        const allPairSessions = [];
+        for (let i = 0; i < clientIds.length; i += 50) {
+          const { data, error } = await supabaseAdmin
+            .from('sessions')
+            .select('client_id, psychologist_id, package_group_id, package_id, session_type, session_count, scheduled_date, scheduled_time')
+            .in('client_id', clientIds.slice(i, i + 50));
+          if (error) throw error;
+          allPairSessions.push(...(data || []));
+        }
+        // Same key the UI falls back to, so a package with no group id still lines up.
+        const groupKey = (r) => r.package_group_id
+          || `cp:${r.client_id}:${r.psychologist_id}:${String(r.session_type || '').toLowerCase()}`;
+        const earliestByPairGroup = {};
+        for (const r of allPairSessions) {
+          if (!r.client_id || !r.psychologist_id) continue;
+          const total = Number(r.session_count || 0);
+          const isPackage = r.session_type === 'package' || total > 1 || !!r.package_id;
+          if (!isPackage) continue;
+          const pair = `${r.client_id}|${r.psychologist_id}`;
+          if (!pairs.has(pair)) continue;
+          const when = `${r.scheduled_date || '9999-99-99'} ${String(r.scheduled_time || '')}`;
+          earliestByPairGroup[pair] = earliestByPairGroup[pair] || {};
+          const k = groupKey(r);
+          if (!earliestByPairGroup[pair][k] || when < earliestByPairGroup[pair][k]) {
+            earliestByPairGroup[pair][k] = when;
+          }
+        }
+        const labelByPairGroup = {};
+        for (const [pair, groups] of Object.entries(earliestByPairGroup)) {
+          const ordered = Object.entries(groups).sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
+          // A single package needs no letter — the badge exists to tell two apart.
+          if (ordered.length < 2) continue;
+          labelByPairGroup[pair] = {};
+          ordered.forEach(([k], i) => { labelByPairGroup[pair][k] = String.fromCharCode(65 + i); });
+        }
+        for (const b of bookingsOut) {
+          if (!b.client_id || !b.psychologist_id) continue;
+          const forPair = labelByPairGroup[`${b.client_id}|${b.psychologist_id}`];
+          if (!forPair) continue;
+          b.package_label = forPair[groupKey(b)] || null;
+        }
+      }
+    } catch (labelErr) {
+      // A missing letter is cosmetic; failing the whole bookings list over it is not.
+      console.warn('[listWixBookings] package label computation skipped:', labelErr.message || labelErr);
+    }
+
     return res.json({
       success: true,
       data: {
