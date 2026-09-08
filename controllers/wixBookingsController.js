@@ -1260,7 +1260,7 @@ async function listWixBookings(req, res) {
       const hasMarkers = await hasNotificationMarkerColumns(supabaseAdmin);
       // google_calendar_event_id + notified_at exist already; email/whatsapp markers are
       // added only when the migration is applied so the query never 42703s pre-migration.
-      const sessionSelect = `id, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, google_calendar_event_id, notified_at, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time, report, session_notes${hasOrigPsychCol ? ', original_psychologist_id' : ''}${hasMarkers ? ', email_sent_at, whatsapp_sent_at' : ''}`;
+      const sessionSelect = `id, source, wix_booking_id, package_id, package_group_id, client_id, psychologist_id, package_session_number, session_count, session_type, status, google_meet_link, google_meet_join_url, google_meet_start_url, google_calendar_link, google_calendar_event_id, notified_at, scheduled_date, scheduled_time, original_scheduled_date, original_scheduled_time, report, session_notes${hasOrigPsychCol ? ', original_psychologist_id' : ''}${hasMarkers ? ', email_sent_at, whatsapp_sent_at' : ''}`;
       // Batch the id list — a single .in() with hundreds of ids overflows the PostgREST
       // GET URL and returns NULL, leaving session_status unattached. That made the status
       // filters fall back to the (often stale) wix_bookings.status, so e.g. completed
@@ -1322,6 +1322,14 @@ async function listWixBookings(req, res) {
         package_session_number: row.package_session_number ?? linkedSession.package_session_number ?? null,
         session_count: resolvedCount,
         session_status: linkedSession.status || null,
+        // Add Record (createRecordOnlyBooking) logs a session that ALREADY happened, so it
+        // deliberately creates no Meet link and sends no email or WhatsApp. Without a marker
+        // those blank columns read as a delivery failure, and the natural next step is to
+        // "fix" it by notifying a client about a session they already attended.
+        //
+        // source === 'admin_manual' is the signature: 56 such sessions exist and not one has
+        // a notification or an auto-created Meet link, while every other source has both.
+        is_record_only: linkedSession.source === 'admin_manual',
         google_calendar_event_id: linkedSession.google_calendar_event_id || null,
         notified_at: linkedSession.notified_at || null,
         email_sent_at: linkedSession.email_sent_at || null,
