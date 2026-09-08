@@ -2736,6 +2736,24 @@ async function bookWixNextSession(req, res) {
         price: sessionPrice,             // session 1 carries package payment; follow-ups are already paid
         amount: sessionPrice,
         session_notes: wixRow.client_full_name ? `Package follow-up for ${wixRow.client_full_name}` : 'Package follow-up (Wix)',
+        // Carry the booked window onto the session, not just the mirror. wixMeetNotifyService
+        // sizes the Google Calendar event from session.wix_payload's start/end; with no payload
+        // it fell back to typeDefaults[session_type], and session_type here is 'package' — a key
+        // that list does not have — so every package follow-up got the 50-minute default. A
+        // couple package's follow-ups were booked as 80 minutes in the mirror and created as
+        // 50 on the therapist's calendar.
+        wix_payload: {
+          bookingType: sessionType,
+          startTime: startTimeIso,
+          endTime: endTimeIso,
+          sessionDurationMin: (startTimeIso && endTimeIso)
+            ? Math.round((new Date(endTimeIso) - new Date(startTimeIso)) / 60000)
+            : null,
+          isAdminManual: true,
+          sourceWixBookingId: wixRow.wix_booking_id,
+          planSessionNumber: nextSessionNumber,
+          creditsAvailable: totalSessions,
+        },
         created_at: now,
         updated_at: now,
         booking_created_at: now,

@@ -269,11 +269,35 @@ async function processOneSession(session, tempPassword = null) {
     const computed = Math.round((new Date(wixEnd) - new Date(wixStart)) / 60000);
     if (computed > 0) meetDurationMinutes = computed;
   } else {
-    // Session-type defaults when Wix times are unavailable
-    const typeDefaults = { couple: 80, assessment: 30, discovery: 30, individual: 50 };
-    meetDurationMinutes = typeDefaults[session.session_type] || resolveSessionDurationMinutes({
-      packageInfo: session.package_id ? { packageType: session.session_type } : null,
-    }) || 50;
+    // No times on the session — fall back to the mirror's booked window before guessing.
+    // The mirror is where the real duration lives for admin/package bookings (a couple
+    // package's follow-up is booked 80 minutes wide there), and session_type for those rows
+    // is 'package', which the defaults below have no entry for — so guessing produced a
+    // 50-minute calendar event for an 80-minute session.
+    if (session.wix_booking_id) {
+      try {
+        const { data: mirror } = await supabaseAdmin
+          .from('wix_bookings')
+          .select('start_time, end_time')
+          .eq('wix_booking_id', session.wix_booking_id)
+          .maybeSingle();
+        if (mirror?.start_time && mirror?.end_time) {
+          const fromMirror = Math.round((new Date(mirror.end_time) - new Date(mirror.start_time)) / 60000);
+          if (fromMirror > 0) meetDurationMinutes = fromMirror;
+        }
+      } catch (e) {
+        console.warn(`${LOG_PREFIX} could not read mirror duration for ${session.id}: ${e.message || e}`);
+      }
+    }
+    if (meetDurationMinutes === 50) {
+      // Session-type defaults when neither the payload nor the mirror gives a window.
+      // 'package' is included so a package follow-up inherits couple length when its own
+      // session_type says couple, rather than silently taking the individual default.
+      const typeDefaults = { couple: 80, assessment: 30, discovery: 30, individual: 50 };
+      meetDurationMinutes = typeDefaults[session.session_type] || resolveSessionDurationMinutes({
+        packageInfo: session.package_id ? { packageType: session.session_type } : null,
+      }) || 50;
+    }
   }
 
   const endTime = addMinutesToTime(session.scheduled_time || '00:00', meetDurationMinutes);
