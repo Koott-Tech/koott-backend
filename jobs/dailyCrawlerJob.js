@@ -3,6 +3,11 @@ const { supabaseAdmin } = require('../config/supabase');
 const EmailService = require('../utils/emailService');
 const { regenerateSessionMeet } = require('../services/wixMeetNotifyService');
 
+// First per-channel marker ever written — the moment 20260709_notification_channel_markers.sql
+// landed. A session notified before this has null email_sent_at / whatsapp_sent_at by
+// construction, not by failure, so those nulls must not be read as "never sent".
+const CHANNEL_MARKERS_LIVE_AT = Date.parse('2026-07-09T00:00:00Z');
+
 const startDailyCrawlerScheduler = () => {
   // Schedule to run at 12:00 AM every day in IST
   cron.schedule('0 0 * * *', async () => {
@@ -20,7 +25,7 @@ const startDailyCrawlerScheduler = () => {
         // wixMeetNotifyService but nothing ever read them, so a client who never received
         // their Meet link by email or WhatsApp was never flagged. Now checked alongside the
         // calendar event.
-        .select('id, client_id, psychologist_id, scheduled_time, status, google_calendar_event_id, google_meet_link, email_sent_at, whatsapp_sent_at, email_error, whatsapp_error')
+        .select('id, client_id, psychologist_id, scheduled_time, status, google_calendar_event_id, google_meet_link, notified_at, email_sent_at, whatsapp_sent_at, email_error, whatsapp_error')
         .eq('scheduled_date', today)
         // Only ACTIVE bookings actually need a Meet link. Excludes cancelled, refunded,
         // on_hold, no_show, completed, deleted — those legitimately have none, so flagging
@@ -88,21 +93,32 @@ const startDailyCrawlerScheduler = () => {
           problems.push(bits.join(' + '));
           reasons.push(`calendar: ${calendarStillBroken.get(sess.id) || 'missing'}`);
         }
-        if (!sess.email_sent_at) {
+        // A session notified BEFORE the per-channel marker columns existed has notified_at set
+        // and email_sent_at / whatsapp_sent_at null — not because nothing was delivered, but
+        // because there was nowhere to record it. Reading those nulls as "never sent" reported
+        // long-delivered sessions as failures: a 19 June booking was flagged on the morning of
+        // its rescheduled 9 September session, three months after the client was notified.
+        //
+        // The first marker ever written is 2026-07-09T05:05Z, the day that migration shipped.
+        // Before it, notified_at is the only record of delivery, so trust it.
+        const notifiedAt = sess.notified_at ? Date.parse(sess.notified_at) : null;
+        const markersUnavailable = notifiedAt != null && notifiedAt < CHANNEL_MARKERS_LIVE_AT;
+
+        if (!sess.email_sent_at && !markersUnavailable) {
           problems.push('Email');
-          reasons.push(`email: ${sess.email_error || 'never sent'}`);
+          reasons.push(`email: ${sess.email_error || (sess.notified_at ? 'no email marker' : 'never sent')}`);
         }
-        if (!sess.whatsapp_sent_at) {
+        if (!sess.whatsapp_sent_at && !markersUnavailable) {
           problems.push('WhatsApp');
-          reasons.push(`whatsapp: ${sess.whatsapp_error || 'never sent'}`);
+          reasons.push(`whatsapp: ${sess.whatsapp_error || (sess.notified_at ? 'no whatsapp marker' : 'never sent')}`);
         }
         if (problems.length) missingSessions.push({ ...sess, problems, reasons });
       }
 
       console.log(`Problems found: ${missingSessions.length} session(s) — ` +
         `calendar ${missingSessions.filter((s) => !s.google_meet_link || !s.google_calendar_event_id).length}, ` +
-        `email ${missingSessions.filter((s) => !s.email_sent_at).length}, ` +
-        `whatsapp ${missingSessions.filter((s) => !s.whatsapp_sent_at).length}`);
+        `email ${missingSessions.filter((s) => s.problems.includes('Email')).length}, ` +
+        `whatsapp ${missingSessions.filter((s) => s.problems.includes('WhatsApp')).length}`);
 
       if (missingSessions.length > 0) {
         let htmlBody = `
@@ -114,8 +130,8 @@ const startDailyCrawlerScheduler = () => {
             <p>The following <strong>${missingSessions.length}</strong> session(s) need attention:</p>
             <ul style="font-size: 14px; color: #555;">
               <li>Calendar / Meet missing: <strong>${missingSessions.filter((s) => !s.google_meet_link || !s.google_calendar_event_id).length}</strong></li>
-              <li>Email not sent: <strong>${missingSessions.filter((s) => !s.email_sent_at).length}</strong></li>
-              <li>WhatsApp not sent: <strong>${missingSessions.filter((s) => !s.whatsapp_sent_at).length}</strong></li>
+              <li>Email not sent: <strong>${missingSessions.filter((s) => s.problems.includes('Email')).length}</strong></li>
+              <li>WhatsApp not sent: <strong>${missingSessions.filter((s) => s.problems.includes('WhatsApp')).length}</strong></li>
             </ul>
             <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
               <thead>
@@ -182,8 +198,8 @@ const startDailyCrawlerScheduler = () => {
 
         const counts = [
           `${missingSessions.filter((s) => !s.google_meet_link || !s.google_calendar_event_id).length} calendar`,
-          `${missingSessions.filter((s) => !s.email_sent_at).length} email`,
-          `${missingSessions.filter((s) => !s.whatsapp_sent_at).length} whatsapp`,
+          `${missingSessions.filter((s) => s.problems.includes('Email')).length} email`,
+          `${missingSessions.filter((s) => s.problems.includes('WhatsApp')).length} whatsapp`,
         ].join(', ');
 
         await EmailService.sendEmail({
