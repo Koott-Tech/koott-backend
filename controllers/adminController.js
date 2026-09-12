@@ -306,7 +306,7 @@ async function createOneManualPackageSession({
   sessionType, sessionCount, sessionNumber,
   scheduledDate, scheduledTime, durationMinutes,
   price, therapistCommission, notes,
-  packageId
+  packageId, emergencyContact = null
 }) {
   const meetLinkService = require('../utils/meetLinkService');
   const { addMinutesToTime } = require('../utils/helpers');
@@ -322,7 +322,7 @@ async function createOneManualPackageSession({
     if (creds?.access_token) userAuth = { access_token: creds.access_token, refresh_token: creds.refresh_token, expiry_date: creds.expiry_date };
     const meetResult = await meetLinkService.generateSessionMeetLink({
       summary: buildKoottSessionTitle({ clientName, psychologistName }),
-      description: buildKoottSessionDescription({ clientName, psychologistName, clientPhone: client.phone_number }),
+      description: buildKoottSessionDescription({ clientName, psychologistName, clientPhone: client.phone_number, emergencyContact }),
       startDate: scheduledDate,
       startTime: scheduledTime.slice(0, 5),
       endTime: addMinutesToTime(scheduledTime.slice(0, 5), durationMinutes),
@@ -432,7 +432,7 @@ async function createOneManualPackageSession({
 
 const createManualPackageBooking = async (req, res) => {
   try {
-    const { client_id, psychologist_id, session_type, schedules, amount, payment_received_date, payment_method, receipt_url, therapist_commission, notes } = req.body;
+    const { client_id, psychologist_id, session_type, schedules, amount, payment_received_date, payment_method, receipt_url, therapist_commission, notes, emergency_contact: emergencyContact } = req.body;
 
     if (!client_id || !psychologist_id || !Array.isArray(schedules) || schedules.length === 0 || !amount || !payment_received_date) {
       return res.status(400).json(errorResponse('Missing required fields: client_id, psychologist_id, schedules[], amount, payment_received_date'));
@@ -531,6 +531,7 @@ const createManualPackageBooking = async (req, res) => {
           therapistCommission: therapist_commission ? parseFloat(therapist_commission) : 0,
           notes,
           packageId: resolvedPackageId,
+          emergencyContact,
         });
         created.push({ id: sess.id, session_number: i + 1, scheduled_date: sess.scheduled_date, scheduled_time: sess.scheduled_time });
       }
@@ -755,6 +756,10 @@ const createManualBooking = async (req, res) => {
       payment_method,
       receipt_url,
       payment_screenshot_url,
+      // Wix collects this on its booking form and prints it into the therapist's calendar
+      // event. Admin-booked sessions had no equivalent, so a therapist opening one had no
+      // emergency number at all.
+      emergency_contact,
       notes 
     } = req.body;
 
@@ -1046,6 +1051,7 @@ const createManualBooking = async (req, res) => {
           clientName,
           psychologistName,
           clientPhone: client.phone_number,
+          emergencyContact: emergency_contact,
         }),
         startDate: scheduled_date,
         startTime: scheduledTimeNormalized,
@@ -1172,6 +1178,8 @@ const createManualBooking = async (req, res) => {
       booking_created_at: new Date().toISOString(),
       original_scheduled_date: scheduled_date
     };
+    const emergencyContactTrimmed = typeof emergency_contact === 'string' ? emergency_contact.trim() : '';
+    if (emergencyContactTrimmed) sessionData.emergency_contact = emergencyContactTrimmed;
 
     // Add Meet data if available
           if (meetData && meetData.eventId) {
@@ -1186,11 +1194,22 @@ const createManualBooking = async (req, res) => {
             }
           }
 
-    const { data: createdSession, error: sessionError } = await supabaseAdmin
+    // emergency_contact ships ahead of its migration, so retry without it when the column is
+    // not there yet — a booking must not fail over a field that is additional information.
+    let { data: createdSession, error: sessionError } = await supabaseAdmin
       .from('sessions')
       .insert([sessionData])
       .select('*')
       .single();
+    if (sessionError && /emergency_contact/.test(sessionError.message || '')) {
+      console.warn('[createManualBooking] emergency_contact column missing — run migration 20260912090000_session_emergency_contact.sql');
+      const { emergency_contact: _dropped, ...withoutEmergency } = sessionData;
+      ({ data: createdSession, error: sessionError } = await supabaseAdmin
+        .from('sessions')
+        .insert([withoutEmergency])
+        .select('*')
+        .single());
+    }
 
     if (sessionError) {
       console.error('❌ [MANUAL BOOKING] Session creation failed:', sessionError);

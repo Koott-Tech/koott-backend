@@ -74,6 +74,7 @@ function buildKoottSessionDescription({
   clientName,
   psychologistName,
   clientPhone = null,
+  emergencyContact = null,
   isRescheduled = false,
 }) {
   const safeClientName = normalizeWhitespace(clientName) || 'Client';
@@ -82,8 +83,17 @@ function buildKoottSessionDescription({
   const phoneLine = normalizeWhitespace(clientPhone)
     ? `\nClient phone: ${normalizeWhitespace(clientPhone)}`
     : '';
+  // Wix prints this into the event it puts on the therapist's calendar; admin-booked sessions
+  // had no equivalent, so the number was missing precisely when it would be needed. Same
+  // wording as Wix so the two read alike. Omitted entirely when it duplicates the client's own
+  // number — repeating it adds nothing and makes the real one harder to spot.
+  const emergency = normalizeWhitespace(emergencyContact);
+  const digits = (v) => String(v || '').replace(/\D/g, '');
+  const emergencyLine = emergency && digits(emergency) !== digits(clientPhone)
+    ? `\nEmergency Contact Number : ${emergency}`
+    : '';
 
-  return `${sessionLabel} between ${safeClientName} and ${safePsychologistName}.${phoneLine}`;
+  return `${sessionLabel} between ${safeClientName} and ${safePsychologistName}.${phoneLine}${emergencyLine}`;
 }
 
 module.exports = {
