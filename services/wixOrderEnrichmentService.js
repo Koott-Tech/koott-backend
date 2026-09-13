@@ -31,6 +31,19 @@ function parseSessionDescription(descLine) {
     return { sessionType: 'package', sessionCount: parseInt(packMatch[1], 10) };
   }
 
+  // Pattern: "20 min (Follow-Up Package (3x20))" — the count is written as N×minutes.
+  // None of the patterns below match this wording, so the parser returned null and a paid
+  // 3-session package was left typed as a single individual session (Dr. Sangeetha's
+  // follow-up package, ₹3,499, on at least three bookings). Only honoured when the line is
+  // explicitly a package, so an unrelated "2x" elsewhere cannot turn a session into a series.
+  const multiplierPackMatch = str.match(/package[^()]*\(\s*(\d+)\s*[x×*]\s*\d+\s*(?:min)?\s*\)/i);
+  if (multiplierPackMatch) {
+    const count = parseInt(multiplierPackMatch[1], 10);
+    if (count > 1) {
+      return { sessionType: str.includes('couple') ? 'couple' : 'package', sessionCount: count };
+    }
+  }
+
   // Pattern seen in Wix order details: "... (Package- 3 Single Session)"
   // Also covers variants like "Package - 3 Couple Session" or "Package 3 Session".
   const namedPackageMatch =
