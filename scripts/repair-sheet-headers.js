@@ -16,6 +16,13 @@ const svc = require('../services/sessionSheetSyncService');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PAUSE_MS = Number(process.env.SHEET_REPAIR_PAUSE_MS || 1300); // ~46 writes/min, safely under
 
+// A1-style letter for a 1-based column number (1 -> A, 28 -> AB, 29 -> AC).
+const colLetter = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+// The header check must read as many columns as COLUMNS has. It was hard-coded to AB (28), so
+// once a 29th column was added the length comparison could never pass and every tab was
+// rewritten on every run — harmless to the data, but a wasted write against the rate limit.
+const LAST_COL = colLetter(svc.COLUMNS.length);
+
 (async () => {
   const o = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET,
@@ -37,7 +44,7 @@ const PAUSE_MS = Number(process.env.SHEET_REPAIR_PAUSE_MS || 1300); // ~46 write
       for (const sh of meta.sheets) {
         const tab = sh.properties.title;
         const { data: head } = await sheets.spreadsheets.values.get({
-          spreadsheetId: l.spreadsheet_id, range: `'${tab}'!A1:AB2`,
+          spreadsheetId: l.spreadsheet_id, range: `'${tab}'!A1:${LAST_COL}2`,
         });
         const hdr = (head.values || [])[0] || [];
         const totalRow = (head.values || [])[1] || [];
