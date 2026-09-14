@@ -1423,13 +1423,25 @@ const completeSession = async (req, res) => {
     const psychologistId = req.user.id;
     const { sessionId } = req.params;
     // Accept both frontend format (summary, report, summary_notes) and backend format (session_summary, session_notes)
-    const { 
-      summary, 
-      report, 
+    const {
+      summary,
+      report,
       summary_notes,
-      session_summary, 
-      session_notes, 
-      status = 'completed' 
+      session_summary,
+      session_notes,
+      status = 'completed',
+      // Everything below comes from the completion popup. The therapist dashboard has always
+      // sent these — this route is the one therapists actually use — but it never read them,
+      // so every answer was discarded: Main Concern, Client Status, the intake questions,
+      // First/Follow-up, To Operation and the client's demographics. The admin route
+      // (sessionController.completeSession) saved them; therapists never hit that route.
+      condition, client_status,
+      to_operation, message_to_operations,
+      therapist_session_sequence,
+      concern_duration, therapy_trigger, therapy_awareness, tried_therapy_before,
+      therapy_hesitation, client_opening_statement,
+      client_sex, client_pronouns, client_age, client_age_group, client_location,
+      partner_sex, partner_age_group, partner_location,
     } = req.body;
 
     // Use frontend format if provided, otherwise fall back to backend format
@@ -1474,6 +1486,30 @@ const completeSession = async (req, res) => {
         finalReport.trim();
     }
 
+    // Session-only popup fields. Kept separate from updateData until we know this is a regular
+    // session: the assessment branch below reuses updateData against assessment_sessions, which
+    // has none of these columns, and merging them up front would fail every assessment completion.
+    const sessionOnlyFields = {};
+    const setText = (key, value) => {
+      if (typeof value === 'string' && value.trim()) sessionOnlyFields[key] = value.trim();
+    };
+    // The Google Sheet and the admin views read `summary`; this route only ever wrote
+    // session_summary, so "Summary to Client" stayed blank for every therapist completion.
+    // Session-only: assessment_sessions has no summary column.
+    if (typeof finalSummary === 'string' && finalSummary.trim()) sessionOnlyFields.summary = finalSummary.trim();
+    setText('condition', condition);
+    setText('client_status', client_status);
+    const operationsNote = [to_operation, message_to_operations].find((v) => typeof v === 'string' && v.trim());
+    if (operationsNote) sessionOnlyFields.to_operation = operationsNote.trim();
+    {
+      const seq = String(therapist_session_sequence || '').trim().toLowerCase();
+      if (seq === 'first' || seq === 'followup') sessionOnlyFields.therapist_session_sequence = seq;
+    }
+    for (const [key, value] of Object.entries({
+      concern_duration, therapy_trigger, therapy_awareness, tried_therapy_before,
+      therapy_hesitation, client_opening_statement,
+    })) setText(key, value);
+
     // First, try to find it as a regular session with client data (for notifications)
     const { data: regularSession } = await supabaseAdmin
       .from('sessions')
@@ -1501,6 +1537,7 @@ const completeSession = async (req, res) => {
     if (regularSession) {
       // Normalize client (Supabase PostgREST can return FK relation as object or array)
       const client = Array.isArray(regularSession.client) ? regularSession.client[0] : regularSession.client;
+      Object.assign(updateData, sessionOnlyFields);
 
       // Update regular session
       let { data: updatedSession, error } = await supabaseAdmin
@@ -1625,6 +1662,59 @@ const completeSession = async (req, res) => {
       } catch (notificationError) {
         console.error('Error sending completion notification:', notificationError);
         // Don't fail the request if notification fails
+      }
+
+      // Client-level details describe the person, not the session: fill blanks only, never
+      // overwrite, and never fail a completion over them. Mirrors the admin route.
+      {
+        const clientPatch = {};
+        const put = (key, value) => { if (typeof value === 'string' && value.trim()) clientPatch[key] = value.trim(); };
+        put('sex', client_sex);
+        put('pronouns', client_pronouns);
+        const parsedAge = parseInt(client_age, 10);
+        if (Number.isFinite(parsedAge) && parsedAge > 0 && parsedAge < 130) clientPatch.age = parsedAge;
+        put('age_group', client_age_group);
+        put('location', client_location);
+        put('partner_sex', partner_sex);
+        put('partner_age_group', partner_age_group);
+        put('partner_location', partner_location);
+        if (Object.keys(clientPatch).length && regularSession.client_id) {
+          try {
+            const { data: existing } = await supabaseAdmin
+              .from('clients')
+              .select('sex, pronouns, age, age_group, location, partner_sex, partner_age_group, partner_location')
+              .eq('id', regularSession.client_id)
+              .maybeSingle();
+            const toWrite = {};
+            for (const [k, v] of Object.entries(clientPatch)) {
+              if (!existing || existing[k] === null || existing[k] === undefined || existing[k] === '') toWrite[k] = v;
+            }
+            if (Object.keys(toWrite).length) {
+              toWrite.updated_at = new Date().toISOString();
+              const { error: cErr } = await supabaseAdmin.from('clients').update(toWrite).eq('id', regularSession.client_id);
+              if (cErr) console.warn('[psychologist.completeSession] client detail save skipped:', cErr.message);
+            }
+          } catch (cEx) {
+            console.warn('[psychologist.completeSession] client detail save failed (non-fatal):', cEx.message || cEx);
+          }
+        }
+      }
+
+      // Mirror into the therapist's Google Sheet. This route never did, so the instant write
+      // never happened for therapists — only the hourly sweep could have caught these.
+      // Fire-and-forget: a Google failure must never turn a completion into an error.
+      if (status === 'completed') {
+        try {
+          const { syncSessionToSheet } = require('../services/sessionSheetSyncService');
+          syncSessionToSheet(sessionId)
+            .then((r) => {
+              if (r?.ok) console.log(`📄 sheet ${r.action} for session ${sessionId} (${r.tab})`);
+              else console.warn(`📄 sheet sync skipped for ${sessionId}: ${r?.reason}`);
+            })
+            .catch((err) => console.error('📄 sheet sync threw:', err?.message || err));
+        } catch (sheetErr) {
+          console.error('📄 sheet sync could not start:', sheetErr?.message || sheetErr);
+        }
       }
 
       return res.json(

@@ -2304,6 +2304,29 @@ async function completeWixBooking(req, res) {
         .from('sessions')
         .update({ status: 'completed', completion_date: new Date().toISOString() })
         .eq('wix_booking_id', data.wix_booking_id);
+
+      // Mirror into the therapist's Google Sheet. Completing from the admin bookings page never
+      // did, so these sessions depended entirely on the hourly sweep. Fire-and-forget: a Google
+      // failure must never turn a completion into an error.
+      try {
+        const { data: linkedForSheet } = await supabaseAdmin
+          .from('sessions')
+          .select('id')
+          .eq('wix_booking_id', data.wix_booking_id)
+          .limit(1);
+        const sheetSessionId = linkedForSheet?.[0]?.id;
+        if (sheetSessionId) {
+          const { syncSessionToSheet } = require('../services/sessionSheetSyncService');
+          syncSessionToSheet(sheetSessionId)
+            .then((r) => {
+              if (r?.ok) console.log(`📄 sheet ${r.action} for session ${sheetSessionId} (${r.tab})`);
+              else console.warn(`📄 sheet sync skipped for ${sheetSessionId}: ${r?.reason}`);
+            })
+            .catch((err) => console.error('📄 sheet sync threw:', err?.message || err));
+        }
+      } catch (sheetErr) {
+        console.error('📄 sheet sync could not start:', sheetErr?.message || sheetErr);
+      }
     }
 
     // Send session_follow_up_v2 WhatsApp to client (Interakt template)
