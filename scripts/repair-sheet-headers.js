@@ -23,6 +23,24 @@ const colLetter = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s
 // rewritten on every run — harmless to the data, but a wasted write against the rate limit.
 const LAST_COL = colLetter(svc.COLUMNS.length);
 
+// Sheets allows 60 reads and 60 writes a minute per user, shared with every other job on the
+// account. Without a retry, one quota error skipped that therapist's whole sheet and the run
+// carried on as if nothing happened — three sheets were missed that way when a verification
+// ran at the same time. Back off and retry quota errors instead.
+async function withRetry(fn, label) {
+  for (let attempt = 1; ; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      const msg = e?.response?.data?.error?.message || e.message || '';
+      const quota = /quota|rate limit/i.test(msg) || e?.code === 429 || e?.response?.status === 429;
+      if (!quota || attempt >= 6) throw e;
+      const wait = 15000 * attempt;
+      console.log(`  quota hit on ${label}, waiting ${wait / 1000}s (attempt ${attempt})`);
+      await sleep(wait);
+    }
+  }
+}
+
 (async () => {
   const o = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET,
@@ -38,26 +56,26 @@ const LAST_COL = colLetter(svc.COLUMNS.length);
       .select('first_name,last_name').eq('id', l.psychologist_id).maybeSingle();
     const name = `${p?.first_name || ''} ${p?.last_name || ''}`.trim();
     try {
-      const { data: meta } = await sheets.spreadsheets.get({
+      const { data: meta } = await withRetry(() => sheets.spreadsheets.get({
         spreadsheetId: l.spreadsheet_id, fields: 'sheets(properties(sheetId,title))',
-      });
+      }), `${name} tabs`);
       for (const sh of meta.sheets) {
         const tab = sh.properties.title;
-        const { data: head } = await sheets.spreadsheets.values.get({
+        const { data: head } = await withRetry(() => sheets.spreadsheets.values.get({
           spreadsheetId: l.spreadsheet_id, range: `'${tab}'!A1:${LAST_COL}2`,
-        });
+        }), `${name} / ${tab} header`);
         const hdr = (head.values || [])[0] || [];
         const totalRow = (head.values || [])[1] || [];
         if (hdr.length === svc.COLUMNS.length && totalRow[0] === 'TOTAL') { already++; continue; }
 
-        await sheets.spreadsheets.values.update({
+        await withRetry(() => sheets.spreadsheets.values.update({
           spreadsheetId: l.spreadsheet_id, range: `'${tab}'!A1`,
           valueInputOption: 'RAW', requestBody: { values: [svc.COLUMNS] },
-        });
+        }), `${name} / ${tab} write header`);
         await sleep(PAUSE_MS);
-        await svc.writeTotalsRow(l.spreadsheet_id, tab);
+        await withRetry(() => svc.writeTotalsRow(l.spreadsheet_id, tab), `${name} / ${tab} totals`);
         await sleep(PAUSE_MS);
-        await sheets.spreadsheets.batchUpdate({
+        await withRetry(() => sheets.spreadsheets.batchUpdate({
           spreadsheetId: l.spreadsheet_id,
           requestBody: { requests: [
             { updateSheetProperties: {
@@ -68,7 +86,7 @@ const LAST_COL = colLetter(svc.COLUMNS.length);
                 cell: { userEnteredFormat: { textFormat: { bold: true } } },
                 fields: 'userEnteredFormat.textFormat.bold' } },
           ] },
-        });
+        }), `${name} / ${tab} format`);
         await sleep(PAUSE_MS);
         fixed++;
         console.log(`  fixed   ${name} / ${tab}`);
