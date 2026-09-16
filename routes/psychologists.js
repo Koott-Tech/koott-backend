@@ -117,6 +117,7 @@ router.get('/sessions', psychologistController.getSessions);
 router.get('/clients/:clientId/session-history', psychologistController.getClientSessionHistory);
 router.get('/stats/monthly', psychologistController.getMonthlyStats);
 router.put('/sessions/:sessionId', psychologistController.updateSession);
+router.get('/sessions/:sessionId/completion-prefill', psychologistController.getSessionCompletionPrefill);
 router.post('/sessions/:sessionId/complete', psychologistController.completeSession);
 router.put('/sessions/:sessionId/no-show', sessionController.markSessionAsNoShow);
 router.delete('/sessions/:sessionId', psychologistController.deleteSession);

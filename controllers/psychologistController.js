@@ -1503,7 +1503,11 @@ const completeSession = async (req, res) => {
     if (operationsNote) sessionOnlyFields.to_operation = operationsNote.trim();
     {
       const seq = String(therapist_session_sequence || '').trim().toLowerCase();
-      if (seq === 'first' || seq === 'followup') sessionOnlyFields.therapist_session_sequence = seq;
+      // The popup now asks only "Client: New / Follow up / Resumed after a pause", so the
+      // First/Follow-up record is derived from it when not sent explicitly.
+      const status = String(client_status || '').trim().toLowerCase();
+      const derived = seq || (status === 'new' ? 'first' : status ? 'followup' : '');
+      if (derived === 'first' || derived === 'followup') sessionOnlyFields.therapist_session_sequence = derived;
     }
     for (const [key, value] of Object.entries({
       concern_duration, therapy_trigger, therapy_awareness, tried_therapy_before,
@@ -1685,9 +1689,12 @@ const completeSession = async (req, res) => {
               .select('sex, pronouns, age, age_group, location, partner_sex, partner_age_group, partner_location')
               .eq('id', regularSession.client_id)
               .maybeSingle();
+            // The popup now shows these pre-filled and editable, so a value that differs from the
+            // record is the therapist's correction and is saved. Blanks are never sent, so an
+            // untouched or cleared field cannot wipe what is already stored.
             const toWrite = {};
             for (const [k, v] of Object.entries(clientPatch)) {
-              if (!existing || existing[k] === null || existing[k] === undefined || existing[k] === '') toWrite[k] = v;
+              if (!existing || String(existing[k] ?? '') !== String(v)) toWrite[k] = v;
             }
             if (Object.keys(toWrite).length) {
               toWrite.updated_at = new Date().toISOString();
@@ -2074,6 +2081,66 @@ const getMonthlyStats = async (req, res) => {
 
 // Get client's completed session history (for any psychologist viewing a session with this client)
 // Private notes (summary_notes) are only included when the session was conducted by the current psychologist
+// Pre-fill for the completion popup. A follow-up client answers the same intake and demographic
+// questions every time, so the popup opens with the last answers already in place and the
+// therapist only edits what changed. Only this therapist's own earlier sessions are read —
+// another therapist's notes on the client are not shared through this popup. Two indexed
+// lookups run in parallel, so this is roughly a 100 ms call.
+const PREFILL_INTAKE_FIELDS = [
+  'condition', 'concern_duration', 'therapy_trigger', 'therapy_awareness',
+  'tried_therapy_before', 'therapy_hesitation', 'client_opening_statement',
+];
+
+const getSessionCompletionPrefill = async (req, res) => {
+  try {
+    const psychologistId = req.user.id;
+    const { sessionId } = req.params;
+
+    const { data: session } = await supabaseAdmin
+      .from('sessions')
+      .select('id, client_id')
+      .eq('id', sessionId)
+      .eq('psychologist_id', psychologistId)
+      .maybeSingle();
+    if (!session?.client_id) return res.json(successResponse({ client: null, previous: null }));
+
+    const [{ data: client }, { data: previousRows }] = await Promise.all([
+      supabaseAdmin
+        .from('clients')
+        .select('sex, pronouns, age, age_group, location, partner_sex, partner_age_group, partner_location')
+        .eq('id', session.client_id)
+        .maybeSingle(),
+      supabaseAdmin
+        .from('sessions')
+        .select(`id, completion_date, scheduled_date, ${PREFILL_INTAKE_FIELDS.join(', ')}`)
+        .eq('client_id', session.client_id)
+        .eq('psychologist_id', psychologistId)
+        .eq('status', 'completed')
+        .neq('id', sessionId)
+        .order('completion_date', { ascending: false, nullsFirst: false })
+        .limit(10),
+    ]);
+
+    // Any earlier completed session makes this a follow-up. The intake answers come from the
+    // most recent one that actually has them — sessions completed before the intake questions
+    // existed are blank, and must not hide older answers.
+    const rows = previousRows || [];
+    const withIntake = rows.find((r) => PREFILL_INTAKE_FIELDS.some((f) => r[f] && String(r[f]).trim()));
+    const previous = rows.length
+      ? {
+          session_id: (withIntake || rows[0]).id,
+          date: (withIntake || rows[0]).completion_date || (withIntake || rows[0]).scheduled_date,
+          intake: withIntake ? Object.fromEntries(PREFILL_INTAKE_FIELDS.map((f) => [f, withIntake[f] || ''])) : null,
+        }
+      : null;
+
+    return res.json(successResponse({ client: client || null, previous }));
+  } catch (error) {
+    console.error('Get completion prefill error:', error);
+    return res.status(500).json(errorResponse('Failed to load previous session details'));
+  }
+};
+
 const getClientSessionHistory = async (req, res) => {
   try {
     const currentPsychologistId = req.user.id;
@@ -2343,6 +2410,7 @@ module.exports = {
   deleteAssessmentSession,
   getMonthlyStats,
   getClientSessionHistory,
+  getSessionCompletionPrefill,
   // Private note password
   getPrivateNotePasswordStatus,
   setupPrivateNotePassword,

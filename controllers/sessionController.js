@@ -2392,7 +2392,11 @@ const completeSession = async (req, res) => {
     // value would be invisible until someone read the sheet months later.
     {
       const seq = String(therapist_session_sequence || '').trim().toLowerCase();
-      if (seq === 'first' || seq === 'followup') updateData.therapist_session_sequence = seq;
+      // The popup now asks only "Client: New / Follow up / Resumed after a pause", so the
+      // First/Follow-up record is derived from it when not sent explicitly.
+      const status = String(client_status || '').trim().toLowerCase();
+      const derived = seq || (status === 'new' ? 'first' : status ? 'followup' : '');
+      if (derived === 'first' || derived === 'followup') updateData.therapist_session_sequence = derived;
     }
     // Intake answers — same shape, so a single loop keeps them from drifting apart as more
     // questions get added to the popup.
