@@ -2096,30 +2096,43 @@ const getSessionCompletionPrefill = async (req, res) => {
     const psychologistId = req.user.id;
     const { sessionId } = req.params;
 
-    const { data: session } = await supabaseAdmin
+    // The popup already knows the client, so all three lookups run at once instead of first
+    // resolving the client from the session. The session check still gates the response: the
+    // client details are only returned when this session really is this therapist's session
+    // with that client, so a hand-edited clientId reveals nothing.
+    const sessionCheck = supabaseAdmin
       .from('sessions')
       .select('id, client_id')
       .eq('id', sessionId)
       .eq('psychologist_id', psychologistId)
       .maybeSingle();
-    if (!session?.client_id) return res.json(successResponse({ client: null, previous: null }));
+    let clientId = typeof req.query.clientId === 'string' ? req.query.clientId : '';
+    // Older frontend builds don't send clientId: look the session up first (a query builder
+    // re-runs on every await, so the result is reused rather than awaited twice).
+    const sessionResult = clientId ? sessionCheck : await sessionCheck;
+    if (!clientId) clientId = sessionResult.data?.client_id || '';
+    if (!clientId) return res.json(successResponse({ client: null, previous: null }));
 
-    const [{ data: client }, { data: previousRows }] = await Promise.all([
+    const [{ data: session }, { data: client }, { data: previousRows }] = await Promise.all([
+      sessionResult,
       supabaseAdmin
         .from('clients')
         .select('sex, pronouns, age, age_group, location, partner_sex, partner_age_group, partner_location')
-        .eq('id', session.client_id)
+        .eq('id', clientId)
         .maybeSingle(),
       supabaseAdmin
         .from('sessions')
         .select(`id, completion_date, scheduled_date, ${PREFILL_INTAKE_FIELDS.join(', ')}`)
-        .eq('client_id', session.client_id)
+        .eq('client_id', clientId)
         .eq('psychologist_id', psychologistId)
         .eq('status', 'completed')
         .neq('id', sessionId)
         .order('completion_date', { ascending: false, nullsFirst: false })
         .limit(10),
     ]);
+    if (!session || session.client_id !== clientId) {
+      return res.json(successResponse({ client: null, previous: null }));
+    }
 
     // Any earlier completed session makes this a follow-up. The intake answers come from the
     // most recent one that actually has them — sessions completed before the intake questions
