@@ -989,6 +989,12 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
   // a manual backfill.
   const { startSheetSyncSweepScheduler } = require('./jobs/sheetSyncSweepJob');
   startSheetSyncSweepScheduler(60); // Run hourly
+
+  // Daily booking report to operations (midnight IST). This used to be a scheduled task inside
+  // a desktop app on one laptop, so it silently sent nothing on any night that machine was
+  // asleep — which is exactly what happened on 24 Sept.
+  const { startDailyBookingReportScheduler } = require('./jobs/dailyBookingReportJob');
+  startDailyBookingReportScheduler();
   
   // Start Slot Lock Cleanup Job (releases expired slots and cleans up abandoned payments, runs every 10 minutes)
   const { releaseExpiredSlots, cleanupAbandonedPendingPayments } = require('./services/slotLockService');
