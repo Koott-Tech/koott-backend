@@ -22,6 +22,7 @@ async function main() {
   const receipt = { accepted:result.accepted,rejected:result.rejected,messageId:result.messageId,sentAt:new Date().toISOString() };
   if (!result.accepted?.includes(RECIPIENT) || result.rejected?.length) throw new Error('SMTP did not accept the recipient');
   fs.writeFileSync(receiptPath,JSON.stringify(receipt,null,2));
+  fs.rmSync(attemptPath, { force: true }); // delivery is confirmed; the attempt record has served its purpose
   console.log(JSON.stringify(receipt));
 }
 main().catch(e=>{console.error(e.message);process.exitCode=1;});
