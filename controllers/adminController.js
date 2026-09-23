@@ -306,7 +306,7 @@ async function createOneManualPackageSession({
   sessionType, sessionCount, sessionNumber,
   scheduledDate, scheduledTime, durationMinutes,
   price, therapistCommission, notes,
-  packageId, emergencyContact = null
+  packageId, emergencyContact = null, requestKey = null
 }) {
   const meetLinkService = require('../utils/meetLinkService');
   const { addMinutesToTime } = require('../utils/helpers');
@@ -361,6 +361,8 @@ async function createOneManualPackageSession({
       creditsAvailable: sessionCount,
       isAdminManual: true,
       manualBooking: true,
+      // Lets a repeat submission of the same form be recognised before anything is created.
+      ...(requestKey ? { requestKey: String(requestKey) } : {}),
     },
     // NOTE: wix_booking_id is set AFTER the mirror row exists (FK constraint) — see below.
   };
@@ -432,7 +434,21 @@ async function createOneManualPackageSession({
 
 const createManualPackageBooking = async (req, res) => {
   try {
-    const { client_id, psychologist_id, session_type, schedules, amount, payment_received_date, payment_method, receipt_url, therapist_commission, notes, emergency_contact: emergencyContact } = req.body;
+    const { client_id, psychologist_id, session_type, schedules, amount, payment_received_date, payment_method, receipt_url, therapist_commission, notes, emergency_contact: emergencyContact, request_key: requestKey } = req.body;
+
+    // Same form submitted twice (a retry after a slow response): return the package that first
+    // submission created rather than booking every session a second time.
+    if (requestKey) {
+      const { data: already } = await supabaseAdmin
+        .from('sessions')
+        .select('*')
+        .eq('wix_payload->>requestKey', String(requestKey))
+        .order('package_session_number', { ascending: true });
+      if (already && already.length) {
+        console.log(`[manualPackage] repeat submission ${requestKey} — returning ${already.length} existing session(s)`);
+        return res.json(successResponse({ sessions: already, duplicate_submission: true }, 'This package was already created'));
+      }
+    }
 
     if (!client_id || !psychologist_id || !Array.isArray(schedules) || schedules.length === 0 || !amount || !payment_received_date) {
       return res.status(400).json(errorResponse('Missing required fields: client_id, psychologist_id, schedules[], amount, payment_received_date'));
@@ -532,6 +548,7 @@ const createManualPackageBooking = async (req, res) => {
           notes,
           packageId: resolvedPackageId,
           emergencyContact,
+          requestKey,
         });
         created.push({ id: sess.id, session_number: i + 1, scheduled_date: sess.scheduled_date, scheduled_time: sess.scheduled_time });
       }
@@ -760,6 +777,9 @@ const createManualBooking = async (req, res) => {
       // event. Admin-booked sessions had no equivalent, so a therapist opening one had no
       // emergency number at all.
       emergency_contact,
+      // One id per opened form. A retry after a slow or failed response carries the same id,
+      // so the booking it already created is returned instead of a second one being made.
+      request_key,
       notes 
     } = req.body;
 
@@ -952,6 +972,53 @@ const createManualBooking = async (req, res) => {
       }
     }
 
+    // Same form, submitted twice: hand back what the first submission created rather than
+    // creating anything. Stored inside wix_payload, so this needs no new column.
+    if (request_key) {
+      const { data: already } = await supabaseAdmin
+        .from('sessions')
+        .select('*')
+        .eq('wix_payload->>requestKey', String(request_key))
+        .limit(1);
+      if (already && already.length) {
+        console.log(`[MANUAL BOOKING] repeat submission ${request_key} — returning session ${already[0].id}`);
+        return res.json(successResponse({ session: already[0], duplicate_submission: true }, 'This booking was already created'));
+      }
+    }
+
+    // DUPLICATE GUARD — refuse to create a second record for a session that already exists.
+    // Runs BEFORE the payment and the Google Calendar event: it used to sit after them, so a
+    // double-submitted manual booking created a calendar event and Meet link on every attempt
+    // and only then returned 409. The rejected attempts left their events behind — one client
+    // held three invites with three different Meet links for a single session, and the day's
+    // calendar showed more sessions than really existed.
+    // Wix-synced sessions are already in the table, so manually "recording" one again produced
+    // a duplicate row AND a phantom package group, which then swallowed follow-up bookings
+    // (a real incident: the same 8pm session existed twice, splitting a client's package).
+    // A therapist cannot hold two sessions at the same instant, so this is always an error.
+    {
+      const { data: clash } = await supabaseAdmin
+        .from('sessions')
+        .select('id, status, source, wix_booking_id')
+        .eq('client_id', client.id)
+        .eq('psychologist_id', psychologist_id)
+        .eq('scheduled_date', scheduled_date)
+        .eq('scheduled_time', scheduledTimeNormalized)
+        .not('status', 'in', '("cancelled","deleted","refunded")');
+      if (clash && clash.length) {
+        const existing = clash[0];
+        console.warn(`[MANUAL BOOKING] duplicate blocked — session ${existing.id} already exists at ${scheduled_date} ${scheduledTimeNormalized}`);
+        return res.status(409).json(
+          errorResponse(
+            `A session already exists for this client with this therapist at ${scheduled_date} ${scheduledTimeNormalized} ` +
+            `(source: ${existing.source || 'admin'}). Edit that session instead of creating a duplicate.`,
+            { existing_session_id: existing.id }
+          )
+        );
+      }
+    }
+
+
     // ============================================
     // STEP 6: CREATE PAYMENT RECORD
     // ============================================
@@ -1129,36 +1196,6 @@ const createManualBooking = async (req, res) => {
     // ============================================
     // STEP 8: CREATE SESSION
     // ============================================
-    // DUPLICATE GUARD — refuse to create a second record for a session that already exists.
-    // Wix-synced sessions are already in the table, so manually "recording" one again produced
-    // a duplicate row AND a phantom package group, which then swallowed follow-up bookings
-    // (a real incident: the same 8pm session existed twice, splitting a client's package).
-    // A therapist cannot hold two sessions at the same instant, so this is always an error.
-    {
-      const { data: clash } = await supabaseAdmin
-        .from('sessions')
-        .select('id, status, source, wix_booking_id')
-        .eq('client_id', client.id)
-        .eq('psychologist_id', psychologist_id)
-        .eq('scheduled_date', scheduled_date)
-        .eq('scheduled_time', scheduledTimeNormalized)
-        .not('status', 'in', '("cancelled","deleted","refunded")');
-      if (clash && clash.length) {
-        const existing = clash[0];
-        if (paymentRecord) {
-          await supabaseAdmin.from('payments').delete().eq('id', paymentRecord.id);
-        }
-        console.warn(`[MANUAL BOOKING] duplicate blocked — session ${existing.id} already exists at ${scheduled_date} ${scheduledTimeNormalized}`);
-        return res.status(409).json(
-          errorResponse(
-            `A session already exists for this client with this therapist at ${scheduled_date} ${scheduledTimeNormalized} ` +
-            `(source: ${existing.source || 'admin'}). Edit that session instead of creating a duplicate.`,
-            { existing_session_id: existing.id }
-          )
-        );
-      }
-    }
-
     const sessionData = {
       client_id: client.id,
       psychologist_id: psychologist_id,
@@ -1178,6 +1215,9 @@ const createManualBooking = async (req, res) => {
       booking_created_at: new Date().toISOString(),
       original_scheduled_date: scheduled_date
     };
+    // Kept with the session so a repeat submission of the same form is recognised. wix_payload
+    // is a JSON column that already exists, so this needs no migration.
+    if (request_key) sessionData.wix_payload = { isAdminManual: true, manualBooking: true, requestKey: String(request_key) };
     const emergencyContactTrimmed = typeof emergency_contact === 'string' ? emergency_contact.trim() : '';
     if (emergencyContactTrimmed) sessionData.emergency_contact = emergencyContactTrimmed;
 
@@ -1213,6 +1253,16 @@ const createManualBooking = async (req, res) => {
 
     if (sessionError) {
       console.error('❌ [MANUAL BOOKING] Session creation failed:', sessionError);
+      // No session will reference this event, and an event nobody deletes shows up as a real
+      // session on the therapist's calendar and in the daily report.
+      if (meetData?.eventId) {
+        try {
+          await require('../utils/meetLinkService').deleteCalendarEvent(meetData.eventId, meetUserAuth);
+          console.log('[MANUAL BOOKING] removed orphan calendar event', meetData.eventId);
+        } catch (cleanupErr) {
+          console.warn('[MANUAL BOOKING] could not remove orphan calendar event:', cleanupErr.message);
+        }
+      }
       
       // Check for unique constraint violation (double booking)
         const isUniqueViolation = 
