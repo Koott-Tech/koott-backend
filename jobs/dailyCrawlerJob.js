@@ -8,16 +8,16 @@ const { regenerateSessionMeet } = require('../services/wixMeetNotifyService');
 // construction, not by failure, so those nulls must not be read as "never sent".
 const CHANNEL_MARKERS_LIVE_AT = Date.parse('2026-07-09T00:00:00Z');
 
-const startDailyCrawlerScheduler = () => {
-  // Schedule to run at 12:00 AM every day in IST
-  cron.schedule('0 0 * * *', async () => {
+// Exported so the same check can be run on demand — previously it existed only as a cron
+// callback, so there was no way to try it without waiting for midnight.
+const runDailyCrawler = async ({ dryRun = false, date = null } = {}) => {
     console.log('🕒 Running Daily Missing Links Crawler...');
     
     try {
       // Get today's date in YYYY-MM-DD
       // Note: Because it runs at midnight IST, the local date in Asia/Kolkata is exactly "today"
       const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
-      const today = formatter.format(new Date());
+      const today = date || formatter.format(new Date());
 
       const { data: sessions, error } = await supabaseAdmin
         .from('sessions')
@@ -50,14 +50,25 @@ const startDailyCrawlerScheduler = () => {
       // that STILL fail after this repair attempt are escalated in the alert email — so ops
       // isn't paged for issues the system already fixed itself.
       const calendarStillBroken = new Map(); // sessionId -> repair failure reason
+      if (dryRun) console.log('  (dry run — no repairs and no email)');
       for (const sess of initiallyMissing) {
         try {
+          if (dryRun) { calendarStillBroken.set(sess.id, 'dry run — not repaired'); continue; }
           const result = await regenerateSessionMeet(sess.id);
           if (result.success && result.eventId) {
-            console.log(`  ✅ repaired session ${sess.id} → event ${result.eventId}`);
-            sess.google_calendar_event_id = result.eventId;
-            sess.google_meet_link = result.meetLink || sess.google_meet_link;
-            continue; // fixed — don't alert
+            // Read the row back rather than trusting the returned fields: the repair writes the
+            // Meet link itself, and a result that omitted it used to leave this copy null, so
+            // the alert reported "Meet Link missing" for a session repaired seconds earlier.
+            const { data: repaired } = await supabaseAdmin
+              .from('sessions')
+              .select('google_calendar_event_id, google_meet_link')
+              .eq('id', sess.id).maybeSingle();
+            sess.google_calendar_event_id = repaired?.google_calendar_event_id || result.eventId;
+            sess.google_meet_link = repaired?.google_meet_link || result.meetLink || sess.google_meet_link;
+            console.log(`  ✅ repaired session ${sess.id} → event ${sess.google_calendar_event_id}`);
+            if (sess.google_calendar_event_id && sess.google_meet_link) continue; // fixed — don't alert
+            calendarStillBroken.set(sess.id, 'event created but no Meet link saved');
+            continue;
           }
           // Re-read to confirm current state, then escalate with the repair failure reason.
           const { data: fresh } = await supabaseAdmin
@@ -121,8 +132,14 @@ const startDailyCrawlerScheduler = () => {
         `whatsapp ${missingSessions.filter((s) => s.problems.includes('WhatsApp')).length}`);
 
       if (missingSessions.length > 0) {
+        // Seven columns never fitted the old 600px box: long emails could not wrap, so the
+        // cells pushed into each other and the table read as overlapping. Wider frame, fixed
+        // column widths, wrapping inside every cell, and the whole table scrolls sideways on a
+        // phone instead of squashing.
+        const TD = 'padding:8px 10px;border:1px solid #e3e6ea;vertical-align:top;font-size:13px;line-height:1.45;word-break:break-word;overflow-wrap:anywhere;';
+        const TH = 'padding:8px 10px;border:1px solid #e3e6ea;text-align:left;font-size:12px;letter-spacing:.02em;text-transform:uppercase;color:#4a5560;white-space:nowrap;';
         let htmlBody = `
-          <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; padding: 20px;">
+          <div style="font-family: Arial, sans-serif; color: #333; max-width: 920px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; padding: 20px;">
             <h2 style="color: #d9534f; border-bottom: 2px solid #eee; padding-bottom: 10px;">Today's Session Checks — Problems Found</h2>
             <p><strong>Date:</strong> ${today}</p>
             <p>Checked <strong>${sessions.length}</strong> active session(s) scheduled today for three things: <strong>Calendar event + Meet link</strong>, <strong>confirmation email sent</strong>, and <strong>WhatsApp sent</strong>.</p>
@@ -133,16 +150,21 @@ const startDailyCrawlerScheduler = () => {
               <li>Email not sent: <strong>${missingSessions.filter((s) => s.problems.includes('Email')).length}</strong></li>
               <li>WhatsApp not sent: <strong>${missingSessions.filter((s) => s.problems.includes('WhatsApp')).length}</strong></li>
             </ul>
-            <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
+            <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;margin-top:20px;">
+            <table style="width:100%;min-width:760px;border-collapse:collapse;table-layout:fixed;">
+              <colgroup>
+                <col style="width:8%"><col style="width:15%"><col style="width:22%"><col style="width:13%">
+                <col style="width:14%"><col style="width:12%"><col style="width:16%">
+              </colgroup>
               <thead>
                 <tr style="background-color: #f8f9fa;">
-                  <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Time</th>
-                  <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Client</th>
-                  <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Email</th>
-                  <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Phone</th>
-                  <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Therapist</th>
-                  <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Missing</th>
-                  <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Reason</th>
+                  <th style="${TH}">Time</th>
+                  <th style="${TH}">Client</th>
+                  <th style="${TH}">Email</th>
+                  <th style="${TH}">Phone</th>
+                  <th style="${TH}">Therapist</th>
+                  <th style="${TH}">Missing</th>
+                  <th style="${TH}">Reason</th>
                 </tr>
               </thead>
               <tbody>
@@ -172,13 +194,13 @@ const startDailyCrawlerScheduler = () => {
 
           htmlBody += `
                 <tr>
-                  <td style="padding: 10px; border: 1px solid #ddd;">${sess.scheduled_time}</td>
-                  <td style="padding: 10px; border: 1px solid #ddd;">${clientName}</td>
-                  <td style="padding: 10px; border: 1px solid #ddd;">${clientEmail}</td>
-                  <td style="padding: 10px; border: 1px solid #ddd;">${clientPhone}</td>
-                  <td style="padding: 10px; border: 1px solid #ddd;">${psychName}</td>
-                  <td style="padding: 10px; border: 1px solid #ddd; color: #d9534f;">${missingItems.join(', ')}</td>
-                  <td style="padding: 10px; border: 1px solid #ddd; color: #777;">${(sess.reasons || []).join('<br>') || '—'}</td>
+                  <td style="${TD}white-space:nowrap;">${String(sess.scheduled_time || '').slice(0, 5)}</td>
+                  <td style="${TD}">${clientName}</td>
+                  <td style="${TD}">${clientEmail}</td>
+                  <td style="${TD}white-space:nowrap;">${clientPhone}</td>
+                  <td style="${TD}">${psychName}</td>
+                  <td style="${TD}color:#d9534f;font-weight:bold;">${missingItems.join('<br>')}</td>
+                  <td style="${TD}color:#777;">${(sess.reasons || []).join('<br>') || '—'}</td>
                 </tr>
           `;
         }
@@ -186,6 +208,7 @@ const startDailyCrawlerScheduler = () => {
         htmlBody += `
               </tbody>
             </table>
+            </div>
             <p style="margin-top: 20px; font-size: 12px; color: #777;">This is an automated alert generated by the Koott System.</p>
           </div>
         `;
@@ -202,6 +225,10 @@ const startDailyCrawlerScheduler = () => {
           `${missingSessions.filter((s) => s.problems.includes('WhatsApp')).length} whatsapp`,
         ].join(', ');
 
+        if (dryRun) {
+          console.log(`  (dry run) would email ${alertRecipients.join(', ')} about ${missingSessions.length} session(s)`);
+          return { ok: true, dryRun: true, checked: sessions.length, missing: missingSessions, html: htmlBody };
+        }
         await EmailService.sendEmail({
           to: alertRecipients.join(', '),
           subject: `⚠️ URGENT: ${missingSessions.length} sessions need attention today (${today}) — ${counts}`,
@@ -211,14 +238,21 @@ const startDailyCrawlerScheduler = () => {
 
         console.log(`✅ Daily alert email sent to ${alertRecipients.join(', ')}`);
       }
+      return { ok: true, checked: sessions.length, missing: missingSessions.length };
     } catch (err) {
       console.error('Error in daily missing links crawler:', err);
+      return { ok: false, error: err?.message || String(err) };
     }
-  }, {
-    timezone: 'Asia/Kolkata'
-  });
+};
+
+const startDailyCrawlerScheduler = () => {
+  // Midnight IST — the timezone is explicit because the server runs on UTC.
+  cron.schedule('0 0 * * *', () => {
+    runDailyCrawler().catch((err) => console.error('Daily crawler threw:', err?.message || err));
+  }, { timezone: 'Asia/Kolkata' });
 };
 
 module.exports = {
   startDailyCrawlerScheduler,
+  runDailyCrawler,
 };

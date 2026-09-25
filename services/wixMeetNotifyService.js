@@ -756,6 +756,44 @@ async function processPendingNotifications() {
  *
  * @returns {Promise<{ success: boolean, eventId?: string, error?: string }>}
  */
+/**
+ * The Koott invite already on the therapist's calendar for this session's exact slot, if any.
+ * Matched on start time plus the client's email among the guests (falling back to the client's
+ * name in the title), so it can never adopt another client's booking.
+ */
+async function findExistingSessionEvent({ session, userAuth, clientEmail, clientName }) {
+  try {
+    const { google } = require('googleapis');
+    const startIso = `${session.scheduled_date}T${String(session.scheduled_time || '00:00').slice(0, 8).padEnd(8, ':00')}+05:30`;
+    const startMs = Date.parse(startIso);
+    if (!Number.isFinite(startMs)) return null;
+    const o = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
+    o.setCredentials(userAuth);
+    const { data } = await google.calendar({ version: 'v3', auth: o }).events.list({
+      calendarId: 'primary',
+      timeMin: new Date(startMs - 60000).toISOString(),
+      timeMax: new Date(startMs + 60000).toISOString(),
+      singleEvents: true,
+      maxResults: 20,
+    });
+    const wanted = String(clientEmail || '').toLowerCase();
+    const name = String(clientName || '').toLowerCase();
+    const match = (data.items || []).find((e) => {
+      if (e.status === 'cancelled' || !e.start?.dateTime) return false;
+      if (Math.abs(Date.parse(e.start.dateTime) - startMs) > 60000) return false;
+      if (!/koott/i.test(e.summary || '')) return false;
+      const guests = (e.attendees || []).map((a) => String(a.email || '').toLowerCase());
+      if (wanted && guests.includes(wanted)) return true;
+      return !!name && String(e.summary || '').toLowerCase().includes(name);
+    });
+    if (!match) return null;
+    return { eventId: match.id, meetLink: match.hangoutLink || null };
+  } catch (e) {
+    console.warn(`${LOG_PREFIX} could not check the calendar before recreating an event: ${e.message || e}`);
+    return null; // fall through to creating one — better a duplicate than no invite at all
+  }
+}
+
 async function regenerateSessionMeet(sessionId) {
   const { data: session, error: sErr } = await supabaseAdmin
     .from('sessions')
@@ -763,7 +801,10 @@ async function regenerateSessionMeet(sessionId) {
     .eq('id', sessionId)
     .maybeSingle();
   if (sErr || !session) return { success: false, error: sErr?.message || 'session not found' };
-  if (session.google_calendar_event_id) return { success: true, eventId: session.google_calendar_event_id };
+  // meetLink comes back too: the daily crawler marks a session repaired from this result, and
+  // without the link it re-reported every repaired session as "Meet Link missing" the same
+  // morning it had just fixed it.
+  if (session.google_calendar_event_id) return { success: true, eventId: session.google_calendar_event_id, meetLink: session.google_meet_link || null };
   if (!session.client_id || !session.psychologist_id) return { success: false, error: 'client/psychologist not resolved' };
 
   const { data: clientDetails } = await supabaseAdmin
@@ -803,6 +844,25 @@ async function regenerateSessionMeet(sessionId) {
   const creds = psychologistDetails.google_calendar_credentials;
   const userAuth = { access_token: creds.access_token, refresh_token: creds.refresh_token, expiry_date: creds.expiry_date };
 
+  // The session row lost its event id at some point, but the invite the client already holds is
+  // usually still on the therapist's calendar. Creating another one sends the client a SECOND
+  // invite with a different Meet link, and leaves the day's calendar showing more sessions than
+  // exist (Devu Shaji, 25 Sept: a 16:39 invite plus a midnight one). Adopt the existing invite
+  // instead, and only create when there really is none.
+  const adopted = await findExistingSessionEvent({ session, userAuth, clientEmail, clientName });
+  if (adopted) {
+    await supabaseAdmin.from('sessions').update({
+      google_calendar_event_id: adopted.eventId,
+      ...(adopted.meetLink ? {
+        google_meet_link: adopted.meetLink,
+        google_meet_join_url: adopted.meetLink,
+        google_meet_start_url: adopted.meetLink,
+      } : {}),
+    }).eq('id', session.id);
+    console.log(`${LOG_PREFIX} 🔗 re-linked session ${sessionId} to its existing calendar event ${adopted.eventId}`);
+    return { success: true, eventId: adopted.eventId, meetLink: adopted.meetLink || session.google_meet_link || null, adopted: true };
+  }
+
   try {
     const meetResult = await meetLinkService.generateSessionMeetLink(meetSessionData, userAuth);
     if (!meetResult?.eventId) {
@@ -816,7 +876,7 @@ async function regenerateSessionMeet(sessionId) {
       google_calendar_id: meetResult.calendarId || null,
     }).eq('id', sessionId);
     console.log(`${LOG_PREFIX} 🔧 regenerated calendar event for ${sessionId} → ${meetResult.eventId}`);
-    return { success: true, eventId: meetResult.eventId };
+    return { success: true, eventId: meetResult.eventId, meetLink: meetResult.meetLink || session.google_meet_link || null };
   } catch (e) {
     return { success: false, error: e?.message || String(e) };
   }
