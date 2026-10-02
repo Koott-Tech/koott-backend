@@ -157,16 +157,28 @@ function bookingDisplayNameProbablySamePsychologist(bookingDisplayNameRaw, psych
 async function getLocallyModifiedWixIds() {
   const TERMINAL = ['completed', 'no_show', 'cancelled', 'refunded', 'deleted'];
   try {
-    const [
-      { data: wixEdited },
-      { data: wixTerminal },
-      { data: sessEdited },
-      { data: sessTerminal },
-    ] = await Promise.all([
-      supabaseAdmin.from('wix_bookings').select('wix_booking_id').eq('locally_modified', true),
-      supabaseAdmin.from('wix_bookings').select('wix_booking_id').in('status', TERMINAL),
-      supabaseAdmin.from('sessions').select('wix_booking_id').eq('locally_modified', true).not('wix_booking_id', 'is', null),
-      supabaseAdmin.from('sessions').select('wix_booking_id').in('status', TERMINAL).not('wix_booking_id', 'is', null),
+    // PAGED, not a plain select. PostgREST caps a response at 1000 rows and says nothing about
+    // it — this set had 3,361 terminal sessions to protect and was seeing 1,000 of them. The
+    // other 2,361 were invisible to the sync, which then read Wix's still-CONFIRMED booking,
+    // mapped it back to 'booked' and undid the therapist's completion. That is the "I marked it
+    // complete and after refresh it reverted" report, and it silently removed the work from
+    // payouts too. Which 1,000 survived depended on row order, so it looked intermittent.
+    const pageAll = async (buildQuery) => {
+      const out = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await buildQuery().range(from, from + 999);
+        if (error) throw error;
+        out.push(...(data || []));
+        if (!data || data.length < 1000) return out;
+        if (from > 100000) return out; // hard stop; never spin forever
+      }
+    };
+
+    const [wixEdited, wixTerminal, sessEdited, sessTerminal] = await Promise.all([
+      pageAll(() => supabaseAdmin.from('wix_bookings').select('wix_booking_id').eq('locally_modified', true)),
+      pageAll(() => supabaseAdmin.from('wix_bookings').select('wix_booking_id').in('status', TERMINAL)),
+      pageAll(() => supabaseAdmin.from('sessions').select('wix_booking_id').eq('locally_modified', true).not('wix_booking_id', 'is', null)),
+      pageAll(() => supabaseAdmin.from('sessions').select('wix_booking_id').in('status', TERMINAL).not('wix_booking_id', 'is', null)),
     ]);
 
     const ids = new Set();
@@ -364,6 +376,19 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
                 // If admin soft-deleted this session (cancelled + notified_at set), lock status too
                 // so Wix sync can't resurrect it back to 'booked'
                 if (prev.notified_at && prev.status === 'cancelled') row.status = 'cancelled';
+                // A session that reached a terminal state is a record of what HAPPENED; Wix only
+                // knows what was booked. Never let a sync walk it back. This is deliberately
+                // independent of the protection set above: that set has now silently truncated
+                // once, and the cost of it failing again is a therapist losing their completion
+                // and the payout that goes with it.
+                const TERMINAL_SESSION_STATUSES = ['completed', 'no_show', 'cancelled', 'refunded', 'deleted'];
+                if (TERMINAL_SESSION_STATUSES.includes(String(prev.status || '').toLowerCase())) {
+                  row.status = prev.status;
+                }
+                if (prev.completion_date && String(row.status || '').toLowerCase() === 'booked') {
+                  row.status = prev.status || 'completed';
+                }
+                if (prev.completion_date) row.completion_date = prev.completion_date;
               }
 
               if (prev.client_id) row.client_id = prev.client_id;

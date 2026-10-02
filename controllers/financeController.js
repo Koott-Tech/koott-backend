@@ -2164,23 +2164,33 @@ const getDoctorPayouts = async (req, res) => {
       return res.json(successResponse({ payouts: [] }, 'No doctors found'));
     }
 
-    // Get only sessions that can appear for the requested payout status.
-    let allSessionsQuery = supabaseAdmin
-      .from('sessions')
-      .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count')
-      .not('psychologist_id', 'is', null)
-      .neq('session_type', 'free_assessment')
-      .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'])
-      .in('psychologist_id', allPsychIds);
+    // Built FRESH per page. A PostgREST builder cannot be re-ranged after it has run, so the
+    // previous version — one builder reused across every .range() call — paged unreliably and
+    // dropped whole therapists from the result. Aswathy Sampath had 14 completed September
+    // sessions and did not appear in the Completed view at all.
+    const buildDoctorSessionsQuery = () => {
+      let q = supabaseAdmin
+        .from('sessions')
+        .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count')
+        .not('psychologist_id', 'is', null)
+        .neq('session_type', 'free_assessment')
+        .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'])
+        .in('psychologist_id', allPsychIds);
 
-    if (status === 'completed') {
-      allSessionsQuery = allSessionsQuery.eq('status', 'completed');
+      if (status === 'completed') q = q.eq('status', 'completed');
+
+      // The date window is applied for EVERY status, not just the two named ones. Previously a
+      // request with no status fell through both branches and was filtered by nothing at all:
+      // asking for 1-30 September returned rows from May to October, 41 of 207 in range.
       if (dateFrom && dateTo) {
-        allSessionsQuery = allSessionsQuery.gte('scheduled_date', dateFrom).lte('scheduled_date', dateTo);
+        if (status === 'pending') {
+          q = q.gte('created_at', `${dateFrom}T00:00:00+05:30`).lte('created_at', `${dateTo}T23:59:59.999+05:30`);
+        } else {
+          q = q.gte('scheduled_date', dateFrom).lte('scheduled_date', dateTo);
+        }
       }
-    } else if (status === 'pending' && dateFrom && dateTo) {
-      allSessionsQuery = allSessionsQuery.gte('created_at', `${dateFrom}T00:00:00+05:30`).lte('created_at', `${dateTo}T23:59:59.999+05:30`);
-    }
+      return q.order('created_at', { ascending: true });
+    };
     
     // Paginate — the same 1000-row PostgREST cap that was silently truncating the pending
     // payout scan applies here too (July alone has 1041 completed sessions), which under-
@@ -2189,9 +2199,7 @@ const getDoctorPayouts = async (req, res) => {
     {
       let pageErr = null;
       for (let offset = 0; ; offset += 1000) {
-        const { data: page, error } = await allSessionsQuery
-          .order('created_at', { ascending: true })
-          .range(offset, offset + 999);
+        const { data: page, error } = await buildDoctorSessionsQuery().range(offset, offset + 999);
         if (error) { pageErr = error; break; }
         allSessions.push(...(page || []));
         if (!page || page.length < 1000) break;
