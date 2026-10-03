@@ -18,6 +18,7 @@ const userInteractionLogger = require('../utils/userInteractionLogger');
 const LOCK_TABLE = 'job_locks';
 const INSTANCE_ID = `${process.env.RENDER_INSTANCE_ID || process.pid}@${Date.now().toString(36)}`;
 let lockTableMissingLogged = false;
+let slotLockSchemaWarned = false;
 
 /**
  * Claim a lease lock for a job.
@@ -152,6 +153,23 @@ const runRecoveryJob = async () => {
       .limit(50); // Process max 50 at a time
 
     if (findError) {
+      // This job was written against a `slot_locks` shape that was never migrated: client_id,
+      // scheduled_date, scheduled_time and recovery_attempts do not exist on the table, and
+      // nothing in the codebase calls createSlotLock, so the table is empty and never written.
+      // Until that feature is finished there is nothing here to recover — say so once rather
+      // than logging the same schema error every five minutes forever.
+      const schemaIncomplete = findError.code === '42703' ||
+        /does not exist/i.test(String(findError.message || ''));
+      if (schemaIncomplete) {
+        if (!slotLockSchemaWarned) {
+          slotLockSchemaWarned = true;
+          console.warn(
+            `⚠️ Recovery job idle: slot_locks is missing columns this job needs (${findError.message}). ` +
+            'Nothing creates slot locks today, so there is nothing to recover. This will not be logged again.'
+          );
+        }
+        return { success: true, processed: 0, errors: 0, skipped: true, reason: 'slot_locks schema incomplete' };
+      }
       console.error('❌ Error finding slot locks for recovery:', findError);
       return {
         success: false,
