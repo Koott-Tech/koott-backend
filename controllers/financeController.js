@@ -9,6 +9,7 @@ const {
   getFinanceBookingDedupeKey,
   getSessionFinanceRevenueAmount,
 } = require('../utils/sessionBookingCreatedAt');
+const { WIX_PAYLOAD_FINANCE_SELECT, rehydrateWixPayload } = require('../utils/wixPayloadProjection');
 
 /** Rows counted for dashboard “total sessions / bookings”; excludes cancelled (soft-deleted) and refunded. */
 /**
@@ -452,6 +453,79 @@ const storeMonthlySnapshot = async (snapshotData, forceUpdate = false) => {
  * Get Finance Dashboard Data
  * GET /api/finance/dashboard
  */
+/**
+ * GET /api/finance/summary — deliberately cheap counterpart to getDashboard.
+ *
+ * getDashboard pages the whole year of `sessions` into this process (twice) to compute its
+ * cards. That is fine for an operator who opened the dashboard; it is not fine for a header
+ * widget or a poller. This returns only the handful of scalars a header needs, using Postgres
+ * aggregates and a single narrow row scan over the requested window.
+ *
+ * Returns no session list, no wix_payload, no charts, no nested relations.
+ */
+const getFinanceSummary = async (req, res) => {
+  try {
+    const IST = '+05:30';
+    const istNow = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const todayIst = istNow.toISOString().slice(0, 10);
+    const monthStartIst = `${todayIst.slice(0, 7)}-01`;
+
+    const { dateFrom, dateTo } = req.query;
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(String(dateFrom || '')) ? dateFrom : monthStartIst;
+    const to = /^\d{4}-\d{2}-\d{2}$/.test(String(dateTo || '')) ? dateTo : todayIst;
+
+    // Narrow scan: price + the two JSON scalars revenue recognition needs, nothing else.
+    // Capped at one PostgREST page — a month of bookings is far below 1000 rows, and this
+    // endpoint is explicitly an approximation for header display, not a ledger.
+    const { data: rows, error } = await supabaseAdmin
+      .from('sessions')
+      .select(`id, price, status, source, payment_id, wix_booking_id, scheduled_date, wpx_session_id:wix_payload->>sessionId, wpx_final_price:wix_payload->paymentDetails->balance->finalPrice->>amount, wpx_amount_received:wix_payload->paymentDetails->balance->>amountReceived`)
+      .neq('session_type', 'free_assessment')
+      .in('status', ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow'])
+      .gte('scheduled_date', from)
+      .lte('scheduled_date', to)
+      .order('scheduled_date', { ascending: false })
+      .limit(1000);
+
+    if (error) {
+      console.error('[finance/summary] query failed:', error.message);
+      return res.status(500).json(errorResponse('Failed to load finance summary'));
+    }
+
+    rehydrateWixPayload(rows || []);
+
+    let totalRevenue = 0;
+    let todayRevenue = 0;
+    let pendingAmount = 0;
+    const bookingKeys = new Set();
+
+    for (const r of rows || []) {
+      const amount = getSessionFinanceRevenueAmount(r);
+      totalRevenue += amount;
+      if (r.scheduled_date === todayIst) todayRevenue += amount;
+      if (r.status !== 'completed') pendingAmount += amount;
+      const k = getFinanceBookingDedupeKey(r);
+      if (k) bookingKeys.add(k);
+    }
+
+    // Private, per-user figures: must not be stored by a shared cache.
+    res.setHeader('Cache-Control', 'private, max-age=60');
+
+    return res.json(successResponse({
+      totalRevenue: Math.round(totalRevenue * 100) / 100,
+      todayRevenue: Math.round(todayRevenue * 100) / 100,
+      pendingAmount: Math.round(pendingAmount * 100) / 100,
+      bookingCount: bookingKeys.size,
+      dateFrom: from,
+      dateTo: to,
+      timestamp: new Date().toISOString(),
+    }, 'Finance summary'));
+  } catch (err) {
+    console.error('[finance/summary] error:', err);
+    return res.status(500).json(errorResponse('Failed to load finance summary'));
+  }
+};
+
 const getDashboard = async (req, res) => {
   try {
     console.log('Finance dashboard request received:', { dateFrom: req.query.dateFrom, dateTo: req.query.dateTo });
@@ -581,10 +655,15 @@ const getDashboard = async (req, res) => {
       // caps a response at 1000 rows regardless. The dashboard therefore aggregated only the
       // newest 1000 of 3000 matching sessions, so every revenue and session total silently
       // excluded everything booked before ~12 Jul 2026. Paging covers the full range.
-      const buildDashSessionsQuery = () => {
+      // BANDWIDTH: `wix_payload` is a ~2.4KB JSONB blob per row and this scan pages over the
+      // whole year (several thousand rows), so selecting it pulled tens of MB from Supabase on
+      // every dashboard load — for the handful of scalars listed in utils/wixPayloadProjection.
+      // Those are extracted server-side instead and rebuilt into a minimal `wix_payload` below,
+      // so every downstream consumer keeps working unchanged.
+      const buildDashSessionsQuery = (wixSelect = WIX_PAYLOAD_FINANCE_SELECT) => {
         let q = supabaseAdmin
           .from('sessions')
-          .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} wix_payload, package_id, source, package_session_number, session_count`)
+          .select(`id, scheduled_date, original_scheduled_date, price, psychologist_id, client_id, status, payment_id, session_type, created_at, booking_created_at, ${dashBcf} ${wixSelect}, package_id, source, package_session_number, session_count`)
           .in('status', ['completed', 'booked', 'pending', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
           .neq('session_type', 'free_assessment');
         // Not all-time: from the start of the year, enough for the MTD/QTD/YTD cards.
@@ -593,6 +672,14 @@ const getDashboard = async (req, res) => {
       };
 
       ({ data: sessions, error: sessionsError } = await fetchAllPagesOf(buildDashSessionsQuery));
+
+      // Safety net: if this Postgres/PostgREST rejects the JSON-path projection for any reason,
+      // fall back to the full blob so the dashboard keeps reporting correct numbers (slow, but
+      // identical to the pre-optimisation behaviour) instead of returning zeroes.
+      if (sessionsError && /wpx_|->/.test(String(sessionsError.message || ''))) {
+        console.warn('[finance] wix_payload projection rejected, falling back to full blob:', sessionsError.message);
+        ({ data: sessions, error: sessionsError } = await fetchAllPagesOf(() => buildDashSessionsQuery('wix_payload')));
+      }
 
       // Legacy schema fallback: sessions.payment_id not present
       if (sessionsError && String(sessionsError.message || '').includes('payment_id')) {
@@ -637,7 +724,9 @@ const getDashboard = async (req, res) => {
         console.error('Error fetching sessions:', sessionsError);
         sessionsData = [];
       } else {
-        sessionsData = sessions || [];
+        // Rebuild the minimal `wix_payload` from the projected scalars. No-op for rows that
+        // already carry a real blob (one of the legacy-schema fallbacks above ran).
+        sessionsData = rehydrateWixPayload(sessions || []);
       }
     } catch (err) {
       console.error('Exception fetching sessions:', err);
@@ -1077,7 +1166,9 @@ const getDashboard = async (req, res) => {
       const pkgBcf = appendBookingTimeSelectFragment(dashBookingTimeCol);
       const { data: allPkgSessions } = await supabaseAdmin
         .from('sessions')
-        .select(`id, client_id, package_id, created_at, ${pkgBcf} wix_payload, source`)
+        // BANDWIDTH: `wix_payload` was selected here but never read — the loop below only uses
+        // id / client_id / package_id, and the ordering is a DB-side order on dashBookingTimeCol.
+        .select(`id, client_id, package_id, created_at, ${pkgBcf} source`)
         .in('package_id', recentPackageIds)
         .order(dashBookingTimeCol, { ascending: true });
       const counterByClientPackage = {};
@@ -1198,10 +1289,13 @@ const getDashboard = async (req, res) => {
         // Re-using one builder does not fix it either: a PostgREST builder cannot be re-ranged
         // after it has run, so a factory that closes over a single query silently pages over
         // the same rows. fetchAllPagesOf needs a genuinely new builder each call.
-        const buildAllSessionsQuery = () => {
+        // BANDWIDTH: same JSON-path projection as the dashboard scan above — see
+        // utils/wixPayloadProjection. This is the second full-year scan per request, so it was
+        // doubling the blob transfer.
+        const buildAllSessionsQuery = (wixSelect = WIX_PAYLOAD_FINANCE_SELECT) => {
           let q = supabaseAdmin
             .from('sessions')
-            .select('id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, wix_payload, source')
+            .select(`id, psychologist_id, client_id, session_type, package_id, price, scheduled_date, original_scheduled_date, status, payment_id, created_at, updated_at, completion_date, package_session_number, session_count, booking_created_at, ${wixSelect}, source`)
             .not('psychologist_id', 'is', null)
             .neq('session_type', 'free_assessment')
             .in('status', ['booked', 'pending', 'completed', 'rescheduled', 'reschedule_requested', 'no_show', 'noshow', 'refunded', 'cancelled'])
@@ -1218,6 +1312,12 @@ const getDashboard = async (req, res) => {
         let allSessions = null;
         let allSessionsError = null;
         ({ data: allSessions, error: allSessionsError } = await fetchAllPagesOf(buildAllSessionsQuery));
+        // Safety net: fall back to the full blob if the JSON-path projection is rejected.
+        if (allSessionsError && /wpx_|->/.test(String(allSessionsError.message || ''))) {
+          console.warn('[finance] wix_payload projection rejected (payouts scan), falling back:', allSessionsError.message);
+          ({ data: allSessions, error: allSessionsError } =
+            await fetchAllPagesOf(() => buildAllSessionsQuery('wix_payload')));
+        }
         if (allSessionsError && String(allSessionsError.message || '').includes('payment_id')) {
           allSessionsQuery = supabaseAdmin
             .from('sessions')
@@ -1261,7 +1361,9 @@ const getDashboard = async (req, res) => {
           }
         }
         if (allSessionsError) throw allSessionsError;
-        
+        // Rebuild the minimal `wix_payload` from the projected scalars (no-op if a fallback ran).
+        rehydrateWixPayload(allSessions || []);
+
         // Get commission settings (same as doctors page)
         const { data: commissions } = await supabaseAdmin
           .from('doctor_commissions')
@@ -8545,6 +8647,7 @@ const getFreeAssessments = async (req, res) => {
 
 module.exports = {
   getDashboard,
+  getFinanceSummary,
   getSessions,
   getDoctorBookings,
   getDoctorFinanceProfile,

@@ -4922,13 +4922,28 @@ const getRescheduleRequests = async (req, res) => {
   try {
     const { status } = req.query; // 'pending', 'approved', 'rejected', or undefined for all
 
-    // Get all notifications that are reschedule requests
-    // Filter by type='warning' and message contains 'reschedule' or title contains 'Reschedule'
+    // BANDWIDTH: this used to `select('*')` every warning/info notification with no limit and
+    // filter in JS. PostgREST caps a response at 1000 rows, so it pulled ~1000 full rows on
+    // every call — and this endpoint is polled by the admin rescheduling page. The reschedule
+    // match and related_type check are now done in Postgres, and only the columns the page
+    // renders are selected. `ilike` is case-insensitive, matching the previous
+    // `.toLowerCase().includes()` behaviour exactly.
+    const RESCHEDULE_NOTIFICATION_COLUMNS =
+      'id, title, message, type, status, is_read, is_approved, related_id, related_type, created_at';
+
     let query = supabaseAdmin
       .from('notifications')
-      .select('*')
-      .or('type.eq.warning,type.eq.info')
-      .order('created_at', { ascending: false });
+      .select(RESCHEDULE_NOTIFICATION_COLUMNS)
+      .in('type', ['warning', 'info'])
+      .eq('related_type', 'session')
+      .or('message.ilike.%reschedule%,title.ilike.%reschedule%')
+      .order('created_at', { ascending: false })
+      // 500, not a tighter number: the status filter below ('pending' / 'approved' /
+      // 'rejected') is still applied in JS over this window, so a cap that is too low could
+      // hide an older pending request behind newer approved ones. The bandwidth win here came
+      // from the column narrowing, not from the row cap, so there is no reason to cut it fine.
+      // PostgREST capped this at 1000 before, so this is still a reduction.
+      .limit(500);
 
     const { data: allNotifications, error: fetchError } = await query;
 
@@ -4939,12 +4954,8 @@ const getRescheduleRequests = async (req, res) => {
       );
     }
 
-    // Filter for reschedule-related notifications
-    let rescheduleRequests = (allNotifications || []).filter(notif => 
-      (notif.message?.toLowerCase().includes('reschedule') || 
-       notif.title?.toLowerCase().includes('reschedule')) &&
-      notif.related_type === 'session'
-    );
+    // Already filtered in Postgres (reschedule match + related_type = 'session').
+    let rescheduleRequests = allNotifications || [];
 
     // Filter by status (use status field or is_approved if available, fallback to is_read for backward compatibility)
     if (status === 'pending') {
@@ -4972,15 +4983,19 @@ const getRescheduleRequests = async (req, res) => {
       .filter(Boolean))];
     let sessionMap = {};
     if (sessionIds.length > 0) {
+      // BANDWIDTH + DISCLOSURE: this used to select `*` plus `clients(*)` and
+      // `psychologists(*)`. The psychologist row carries `google_calendar_credentials`
+      // (Google OAuth access/refresh tokens), so every poll shipped those to the browser.
+      // Narrowed to exactly the fields the rescheduling page renders.
       const { data: sessions, error: sessionsError } = await supabaseAdmin
         .from('sessions')
         .select(`
-          *,
+          id, scheduled_date, scheduled_time, status, reschedule_count,
           client:clients(
-            *,
+            id, first_name, last_name, phone_number, child_name, child_age, schedule_name,
             user:users(email)
           ),
-          psychologist:psychologists!sessions_psychologist_id_fkey(*)
+          psychologist:psychologists!sessions_psychologist_id_fkey(id, first_name, last_name)
         `)
         .in('id', sessionIds);
       if (sessionsError) {

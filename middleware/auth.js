@@ -4,6 +4,60 @@ const supabaseAdmin = require('../config/supabase').supabaseAdmin;
 const tokenRevocationService = require('../utils/tokenRevocation');
 
 // Verify JWT token (handles both backend JWT and Supabase JWT)
+/**
+ * BANDWIDTH: these lookups run on every authenticated request and used to `select('*')`.
+ * The psychologists row in particular carries `google_calendar_credentials` (Google OAuth
+ * access + refresh tokens), so every request pulled those out of the database for no reason.
+ *
+ * This is the complete set of `req.user.*` fields read anywhere in the codebase:
+ *   id, role, email, client_id, user_id, first_name, last_name, profile_picture_url,
+ *   google_id, created_at  (plus is_active, checked below for users)
+ * `req.user` is never serialised into a response wholesale, so narrowing it is not an API
+ * change. If a handler needs another column, add it here.
+ */
+// NOTE: `client_id` is deliberately absent — it is not a column on `clients`; it is assigned
+// onto req.user further down as `client_id: client.id`.
+const AUTH_COLUMNS = {
+  clients: 'id, email, first_name, last_name, profile_picture_url, google_id, user_id, created_at',
+  users: 'id, email, role, first_name, last_name, profile_picture_url, is_active, created_at',
+  psychologists: 'id, email, first_name, last_name, created_at, updated_at',
+};
+
+/**
+ * Column list for an auth lookup, degrading to '*' if this deployment's schema does not have
+ * one of them.
+ *
+ * Narrowing these selects must not be able to lock everyone out: if a column above is missing
+ * in some environment, PostgREST fails the whole query (42703) and authentication would break
+ * for every user. Instead the table permanently falls back to '*' for the life of the process
+ * — the old behaviour — and says so once.
+ */
+function authColumns(table) {
+  return AUTH_COLUMNS[table] || '*';
+}
+
+function isUnknownColumnError(error) {
+  if (!error) return false;
+  return error.code === '42703' || /does not exist|column .* not found/i.test(String(error.message || ''));
+}
+
+/**
+ * Run an auth lookup, retrying once with '*' if the narrow column list is rejected.
+ * @param {string} table
+ * @param {(cols: string) => PromiseLike<{data: any, error: any}>} build
+ */
+async function authLookup(table, build) {
+  const result = await build(authColumns(table));
+  if (isUnknownColumnError(result?.error) && AUTH_COLUMNS[table] !== '*') {
+    console.warn(
+      `[auth] narrow column list rejected for "${table}" (${result.error.message}) — falling back to select('*') for this process.`
+    );
+    AUTH_COLUMNS[table] = '*';
+    return build('*');
+  }
+  return result;
+}
+
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
@@ -102,11 +156,8 @@ const authenticateToken = async (req, res, next) => {
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.log('🔍 Looking up client in database for email:', supabaseUser.email);
         }
-        const { data: client, error: clientError } = await supabaseAdmin
-          .from('clients')
-          .select('*')
-          .eq('email', supabaseUser.email)
-          .single();
+        const { data: client, error: clientError } = await authLookup('clients', (cols) =>
+          supabaseAdmin.from('clients').select(cols).eq('email', supabaseUser.email).single());
 
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.log('🔍 Client lookup result:', { client, clientError });
@@ -131,11 +182,8 @@ const authenticateToken = async (req, res, next) => {
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.log('🔍 Looking up user in users table for email:', supabaseUser.email);
         }
-        const { data: user, error: userError } = await supabaseAdmin
-          .from('users')
-          .select('*')
-          .eq('email', supabaseUser.email)
-          .single();
+        const { data: user, error: userError } = await authLookup('users', (cols) =>
+          supabaseAdmin.from('users').select(cols).eq('email', supabaseUser.email).single());
 
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.log('🔍 User lookup result:', { user, userError });
@@ -160,11 +208,8 @@ const authenticateToken = async (req, res, next) => {
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.log('🔍 Looking up psychologist for email:', supabaseUser.email);
         }
-        const { data: psychologist, error: psychologistError } = await supabaseAdmin
-          .from('psychologists')
-          .select('*')
-          .eq('email', supabaseUser.email)
-          .single();
+        const { data: psychologist, error: psychologistError } = await authLookup('psychologists', (cols) =>
+          supabaseAdmin.from('psychologists').select(cols).eq('email', supabaseUser.email).single());
 
         if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
           console.log('🔍 Psychologist lookup result:', { psychologist, psychologistError });
@@ -284,11 +329,8 @@ const authenticateToken = async (req, res, next) => {
     
     // Use supabaseAdmin to bypass RLS for authentication lookups
     // Check if it's a psychologist first (since login checks psychologists table first)
-    const { data: psychologist, error: psychologistError } = await supabaseAdmin
-      .from('psychologists')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    const { data: psychologist, error: psychologistError } = await authLookup('psychologists', (cols) =>
+      supabaseAdmin.from('psychologists').select(cols).eq('id', userId).single());
 
     if (psychologist && !psychologistError) {
       // Psychologist exists in psychologists table (standalone)
@@ -306,11 +348,8 @@ const authenticateToken = async (req, res, next) => {
     if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
       console.log('🔍 Looking up user in users table with userId:', userId);
     }
-    const { data: user, error: userError } = await supabaseAdmin
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    const { data: user, error: userError } = await authLookup('users', (cols) =>
+      supabaseAdmin.from('users').select(cols).eq('id', userId).single());
 
     if (process.env.NODE_ENV === 'development' && process.env.DEBUG_AUTH === 'true') {
       console.log('🔍 User lookup result:', { 
@@ -354,11 +393,8 @@ const authenticateToken = async (req, res, next) => {
 
     // If user is a client, fetch the client profile data
     if (user.role === 'client') {
-      const { data: client, error: clientError } = await supabaseAdmin
-        .from('clients')
-        .select('*')
-        .eq('user_id', userId)
-        .single();
+      const { data: client, error: clientError } = await authLookup('clients', (cols) =>
+        supabaseAdmin.from('clients').select(cols).eq('user_id', userId).single());
 
       if (client && !clientError) {
         // Combine user and client data
@@ -373,11 +409,8 @@ const authenticateToken = async (req, res, next) => {
         };
       } else {
         // Client record not found - might be old system client, try lookup by id (backward compatibility)
-        const { data: oldClient, error: oldClientError } = await supabaseAdmin
-          .from('clients')
-          .select('*')
-          .eq('id', userId)
-          .single();
+        const { data: oldClient, error: oldClientError } = await authLookup('clients', (cols) =>
+          supabaseAdmin.from('clients').select(cols).eq('id', userId).single());
 
         if (oldClient && !oldClientError) {
           // Old system client - use client data

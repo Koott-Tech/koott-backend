@@ -25,6 +25,9 @@ router.use(generalLimiter);
 
 // Dashboard
 router.get('/dashboard', financeController.getDashboard);
+// Cheap header/polling counterpart — scalars only, no session list, no wix_payload, no charts.
+// Use this for anything that refreshes on a timer; /dashboard pages the whole year into memory.
+router.get('/summary', financeController.getFinanceSummary);
 
 // Sessions Management
 router.get('/sessions', financeController.getSessions);

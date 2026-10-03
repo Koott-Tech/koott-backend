@@ -504,10 +504,80 @@ async function upsertEnrichedBookings(rawBookings, options = {}) {
  * session type and count from order description lines (e.g. "Individual 4-Session Pack").
  * Updates both wix_bookings and sessions tables with the correct values.
  */
+/**
+ * Whether wix_bookings.wix_order_enriched_at exists (migration
+ * 20261003100000_wix_order_enriched_at.sql). Probed once and cached.
+ *
+ * Deploying this code before the migration is harmless: the column reads as missing, the
+ * freshness check is skipped and enrichment behaves exactly as it did before.
+ */
+let cachedHasOrderEnrichedAt = null;
+async function hasOrderEnrichedAtColumn() {
+  if (cachedHasOrderEnrichedAt != null) return cachedHasOrderEnrichedAt;
+  const { error } = await supabaseAdmin.from('wix_bookings').select('wix_order_enriched_at').limit(1);
+  const missing = error && (error.code === '42703' || /does not exist|could not find/i.test(String(error.message || '')));
+  cachedHasOrderEnrichedAt = !missing;
+  if (missing) {
+    console.warn(
+      '[enrichBookingsFromOrders] wix_order_enriched_at missing — re-enriching every cycle as before. Apply supabase/migrations/20261003100000_wix_order_enriched_at.sql to cut repeat Wix order calls.'
+    );
+  }
+  return cachedHasOrderEnrichedAt;
+}
+
 async function enrichBookingsFromOrders(wixBookingIds) {
   if (!wixBookingIds.length) return;
 
-  const infoMap = await fetchSessionInfoBatch(wixBookingIds);
+  // BANDWIDTH vs LIVENESS: this runs on every sync cycle over every booking in the window and
+  // made one outbound Wix order call per booking each time. With the default 10-minute cycle
+  // and 4-hour window that is ~24 identical fetches per booking.
+  //
+  // It is NOT safe to skip enriched bookings outright: a Wix order can be edited after the
+  // booking is created (session type corrected, price changed, payment captured late), and
+  // re-enrichment is how that reaches us. So this rate-limits rather than skips — a booking is
+  // re-enriched at most once per WIX_ENRICH_MIN_INTERVAL_MINUTES. Edits still flow through,
+  // just within an hour instead of within ten minutes.
+  //
+  // Set WIX_ENRICH_MIN_INTERVAL_MINUTES=0 to restore the old every-cycle behaviour with no
+  // deploy. Bookings never enriched are always fetched, every cycle, regardless of this.
+  let idsToEnrich = wixBookingIds;
+  const minIntervalMin = Number.parseInt(process.env.WIX_ENRICH_MIN_INTERVAL_MINUTES ?? '60', 10);
+  const minIntervalMs = Number.isFinite(minIntervalMin) ? minIntervalMin * 60 * 1000 : 60 * 60 * 1000;
+
+  if (minIntervalMs > 0 && (await hasOrderEnrichedAtColumn())) {
+    try {
+      const freshlyEnriched = new Set();
+      const cutoffMs = Date.now() - minIntervalMs;
+      for (let i = 0; i < wixBookingIds.length; i += 100) {
+        const { data: rows, error } = await supabaseAdmin
+          .from('wix_bookings')
+          .select('wix_booking_id, wix_order_enriched_at')
+          .in('wix_booking_id', wixBookingIds.slice(i, i + 100))
+          .not('wix_order_enriched_at', 'is', null);
+        if (error) throw error;
+        (rows || []).forEach((r) => {
+          const t = Date.parse(r.wix_order_enriched_at);
+          if (Number.isFinite(t) && t > cutoffMs) freshlyEnriched.add(r.wix_booking_id);
+        });
+      }
+      if (freshlyEnriched.size) {
+        idsToEnrich = wixBookingIds.filter((id) => !freshlyEnriched.has(id));
+        console.log(
+          `[enrichBookingsFromOrders] ${freshlyEnriched.size} booking(s) enriched within the last ${minIntervalMin}m — ${idsToEnrich.length} to fetch`
+        );
+      }
+    } catch (e) {
+      // Non-blocking: on any doubt, enrich everything exactly as before.
+      console.warn('[enrichBookingsFromOrders] freshness pre-check failed, enriching all:', e.message || e);
+      idsToEnrich = wixBookingIds;
+    }
+  }
+
+  if (!idsToEnrich.length) return;
+
+  const orderEnrichedAtAvailable = await hasOrderEnrichedAtColumn();
+
+  const infoMap = await fetchSessionInfoBatch(idsToEnrich);
   if (!infoMap.size) return;
 
   let updated = 0;
@@ -547,6 +617,7 @@ async function enrichBookingsFromOrders(wixBookingIds) {
       };
       if (info.orderId) wbUpdate.wix_order_id = info.orderId;
       if (info.orderNumber) wbUpdate.wix_order_number = info.orderNumber;
+      if (orderEnrichedAtAvailable) wbUpdate.wix_order_enriched_at = new Date().toISOString();
       if (canApplyPrice) {
         wbUpdate.price = info.price;
       }
@@ -590,7 +661,7 @@ async function enrichBookingsFromOrders(wixBookingIds) {
   }
 
   if (updated) {
-    console.log(`[enrichBookingsFromOrders] enriched ${updated}/${wixBookingIds.length} bookings from eCommerce API`);
+    console.log(`[enrichBookingsFromOrders] enriched ${updated}/${idsToEnrich.length} bookings from eCommerce API`);
   }
 }
 function bookingDedupKey(b) {

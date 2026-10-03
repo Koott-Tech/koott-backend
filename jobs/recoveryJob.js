@@ -15,71 +15,94 @@ const { getSlotLockByOrderId, updateSlotLockStatus } = require('../services/slot
 const { createSessionFromSlotLock } = require('../services/sessionCreationService');
 const userInteractionLogger = require('../utils/userInteractionLogger');
 
-let advisoryLockUnavailableLogged = false;
+const LOCK_TABLE = 'job_locks';
+const INSTANCE_ID = `${process.env.RENDER_INSTANCE_ID || process.pid}@${Date.now().toString(36)}`;
+let lockTableMissingLogged = false;
 
 /**
- * Acquire distributed lock for recovery job
- * Uses database-based advisory lock to prevent concurrent execution across instances
- * @param {string} lockKey - Lock identifier
- * @param {number} timeoutSeconds - Lock timeout in seconds (default: 300 = 5 minutes) - currently unused, reserved for future TTL implementation
+ * Claim a lease lock for a job.
+ *
+ * Previously this called an RPC `pg_try_advisory_lock` that does not exist in this project,
+ * so the lock could never be acquired and runRecoveryJob returned early EVERY time — the
+ * recovery job has effectively been switched off. See migration 20261003110000_job_locks.sql
+ * for why a lease row is used instead of a Postgres advisory lock (PostgREST pools
+ * connections, so advisory locks can be orphaned and block the job forever).
+ *
+ * The claim is one conditional UPDATE, which Postgres applies atomically: exactly one caller
+ * can match `locked_until < now()` and get a row back.
+ *
+ * @param {string} lockKey
+ * @param {number} timeoutSeconds how long the lease is held before it self-expires
  * @returns {Promise<{acquired: boolean, lockId?: string}>}
  */
 const acquireDistributedLock = async (lockKey = 'recovery_job', timeoutSeconds = 300) => {
-  // Note: timeoutSeconds parameter is reserved for future TTL/timeout implementation
-  // Currently PostgreSQL advisory locks are released when the connection closes or explicitly unlocked
   try {
-    // Use PostgreSQL advisory lock (pg_advisory_lock) for distributed locking
-    // Lock ID is derived from lockKey hash
-    const crypto = require('crypto');
-    const lockId = parseInt(crypto.createHash('sha256').update(lockKey).digest('hex').substring(0, 8), 16) % 2147483647;
-    
-    // Try to acquire lock (non-blocking)
-    const { data, error } = await supabaseAdmin.rpc('pg_try_advisory_lock', {
-      lock_id: lockId
-    });
-    
+    const nowIso = new Date().toISOString();
+    const untilIso = new Date(Date.now() + timeoutSeconds * 1000).toISOString();
+
+    const { data, error } = await supabaseAdmin
+      .from(LOCK_TABLE)
+      .update({ locked_until: untilIso, locked_by: INSTANCE_ID, updated_at: nowIso })
+      .eq('job_name', lockKey)
+      .lt('locked_until', nowIso)
+      .select('job_name');
+
     if (error) {
-      const functionNotFound = error.code === '42883' || error.code === 'PGRST202' ||
-        (error.message && error.message.includes('Could not find the function'));
-      if (functionNotFound) {
-        // Function doesn't exist or not exposed by PostgREST - fail-safe: don't allow concurrent runs
-        if (!advisoryLockUnavailableLogged) {
-          advisoryLockUnavailableLogged = true;
-          console.error('❌ CRITICAL: pg_try_advisory_lock not available. Recovery job will not run to prevent concurrent execution. Run supabase-advisory-lock-functions.sql in Supabase SQL Editor to enable distributed locking.');
+      const tableMissing = error.code === '42P01' || error.code === 'PGRST205' ||
+        (error.message && /could not find the table|does not exist/i.test(error.message));
+      if (tableMissing) {
+        // Migration not applied yet. Fall back to the in-process guard in
+        // startRecoveryScheduler, which is correct for a single instance.
+        //
+        // This deliberately fails OPEN where the old code failed closed: failing closed is
+        // what disabled the job, and a paid booking with no session row is a worse outcome
+        // than the small chance of two instances overlapping during a deploy (createSession
+        // FromSlotLock re-checks for an existing session before creating one).
+        if (!lockTableMissingLogged) {
+          lockTableMissingLogged = true;
+          console.warn(
+            `⚠️ ${LOCK_TABLE} is missing — running the recovery job with in-process locking only. Apply supabase/migrations/20261003110000_job_locks.sql for cross-instance safety.`
+          );
         }
-        return { acquired: false, lockId: null }; // Fail-safe: prevent execution
+        return { acquired: true, lockId: null };
       }
-      console.error('❌ Error acquiring distributed lock:', error);
+      console.error('❌ Error acquiring job lock:', error);
       return { acquired: false };
     }
-    
-    // RPC returns boolean indicating if lock was acquired
-    const acquired = data === true || data === 'true' || (typeof data === 'object' && data?.acquired === true);
-    
-    // Do not use setTimeout to auto-unlock; only releaseDistributedLock in the job's finally block should release the lock (avoids releasing a lock held by another instance).
-    return { acquired, lockId: acquired ? String(lockId) : null };
+
+    // Empty result = the conditional UPDATE matched nothing = someone else holds the lease.
+    const acquired = Array.isArray(data) && data.length > 0;
+    return { acquired, lockId: acquired ? lockKey : null };
   } catch (error) {
-    console.error('❌ Exception acquiring distributed lock:', error);
+    console.error('❌ Exception acquiring job lock:', error);
     return { acquired: false };
   }
 };
 
 /**
- * Release distributed lock
- * @param {string} lockId - Lock ID returned from acquireDistributedLock
- * @returns {Promise<void>}
+ * Release the lease by expiring it immediately, so the next tick can claim it rather than
+ * waiting out the full timeout.
+ * @param {string|null} lockId
  */
 const releaseDistributedLock = async (lockId) => {
-  if (!lockId) return; // No lock to release (fallback mode)
-  
+  if (!lockId) return; // fallback mode — nothing was claimed
+
   try {
-    await supabaseAdmin.rpc('pg_advisory_unlock', { lock_id: parseInt(lockId) });
+    const nowIso = new Date().toISOString();
+    // Expire one second in the PAST, not at `now`: a claim uses `locked_until < now()`, and a
+    // release stamped with the current instant is not strictly less than a claim made in the
+    // same millisecond, which would make the next tick skip for no reason.
+    const expiredIso = new Date(Date.now() - 1000).toISOString();
+    const { error } = await supabaseAdmin
+      .from(LOCK_TABLE)
+      .update({ locked_until: expiredIso, updated_at: nowIso })
+      .eq('job_name', lockId)
+      // Only clear OUR lease: if ours already expired and another instance claimed it,
+      // this matches nothing and we leave their lock alone.
+      .eq('locked_by', INSTANCE_ID);
+    if (error) console.error('❌ Error releasing job lock:', error);
   } catch (error) {
-    const ignore = error.code === '42883' || error.code === 'PGRST202' ||
-      (error.message && error.message.includes('Could not find the function'));
-    if (!ignore) {
-      console.error('❌ Error releasing distributed lock:', error);
-    }
+    console.error('❌ Exception releasing job lock:', error);
   }
 };
 

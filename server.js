@@ -12,6 +12,13 @@ const securityMonitor = require('./utils/securityMonitor');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
+// Bandwidth audit — entirely inert unless BANDWIDTH_AUDIT=true. Required immediately after
+// dotenv (it reads the flag at load time) and BEFORE any route/config module, so the patched
+// global fetch is the one @supabase/supabase-js captures.
+const bandwidthMeter = require('./instrumentation/bandwidthMeter');
+bandwidthMeter.installOutboundFetchMeter();
+bandwidthMeter.installHttpMeter();
+
 const authRoutes = require('./routes/auth');
 const clientRoutes = require('./routes/clients');
 const psychologistRoutes = require('./routes/psychologists');
@@ -194,6 +201,10 @@ try {
   console.warn('⚠️ Compression module not found. Install with: npm install compression');
   console.warn('   This reduces egress by 60-80% - highly recommended!');
 }
+
+// After compression, so the measured response size is the compressed wire size Render bills.
+// No-op middleware unless BANDWIDTH_AUDIT=true.
+app.use(bandwidthMeter.responseSizeMeter());
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
@@ -940,6 +951,9 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
       }
     })();
   }
+
+  // Aggregated bandwidth report (no-op unless BANDWIDTH_AUDIT=true).
+  bandwidthMeter.startBandwidthRollup(5 * 60 * 1000);
 
   // Start Google Calendar sync service
   calendarSyncService.start();

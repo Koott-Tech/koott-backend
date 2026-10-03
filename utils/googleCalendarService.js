@@ -1,6 +1,48 @@
 const { google } = require('googleapis');
 const { OAuth2Client } = require('google-auth-library');
 
+/**
+ * BANDWIDTH: events.list returns the full event resource by default — attendee lists,
+ * reminders, organizer blocks, recurrence rules, iCalUID and so on. With maxResults: 2500 and
+ * one call per psychologist every CALENDAR_SYNC_INTERVAL_MINUTES, most of that payload was
+ * downloaded and thrown away.
+ *
+ * This is the complete set of fields anything in this codebase actually reads off an event:
+ *   id, status, summary, description, location, start, end   — googleCalendarService.syncCalendarEvents,
+ *                                                               calendarSyncService, adminController
+ *   updated                                                  — change ordering
+ *   hangoutsLink, conferenceData                             — Meet link extraction (this file, ~line 179)
+ *   creator/email, extendedProperties/private, source/title  — adminController "is this ours?" check
+ *   nextSyncToken / nextPageToken                            — incremental sync bookkeeping
+ *
+ * Notably absent: attendees (the bulkiest part of a booked event). Nothing reads them.
+ * If a consumer starts needing a new field, it MUST be added here or it will arrive undefined.
+ */
+const EVENT_LIST_FIELDS = [
+  'nextSyncToken',
+  'nextPageToken',
+  'items(' + [
+    'id',
+    'status',
+    'summary',
+    'description',
+    'location',
+    'start',
+    'end',
+    'updated',
+    // Google's field is `hangoutLink` (singular). NOTE: syncCalendarEvents below reads
+    // `event.hangoutsLink` (plural), which is not a field Google returns — that read has
+    // always been undefined and the Meet link actually comes from conferenceData. Left as-is
+    // deliberately: changing it would change which link is used. The name here must be the
+    // real API field, because an unknown name in `fields` makes the whole call fail with 400.
+    'hangoutLink',
+    'conferenceData',
+    'creator/email',
+    'extendedProperties/private',
+    'source/title',
+  ].join(',') + ')',
+].join(',');
+
 class GoogleCalendarService {
   constructor() {
     this.calendar = google.calendar({ version: 'v3' });
@@ -47,7 +89,9 @@ class GoogleCalendarService {
         singleEvents: true,
         orderBy: 'startTime',
         showDeleted: true, // Include deleted events when using sync token
-        maxResults: 2500
+        maxResults: 2500,
+        // Only the fields this codebase reads — see EVENT_LIST_FIELDS above.
+        fields: EVENT_LIST_FIELDS,
       };
 
       // If syncToken provided, use incremental sync (only changes)

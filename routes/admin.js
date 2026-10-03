@@ -70,11 +70,18 @@ router.post('/upload/image', requireEventOrganizer, upload.single('file'), async
 
     // Caller can choose which bucket to upload into via ?bucket= or form-data field `bucket`.
     // Allowlist: only these buckets can be targeted from this endpoint.
-    const ALLOWED_BUCKETS = ['profile-pictures', 'manual-bookings', 'blog-images', 'counselling-images', 'events-poster', 'certificate-templates'];
+    // `session-attachments` is here because the admin path of SessionCompletionModal
+    // (admin/bookings, which passes fieldsOptional) uploads session attachments through this
+    // route. It was NOT in this list, and an unknown bucket silently falls back to
+    // 'profile-pictures' — a PUBLIC bucket — so an admin attaching a file to a session report
+    // would have filed a client document into public storage with no error shown.
+    const ALLOWED_BUCKETS = ['profile-pictures', 'manual-bookings', 'blog-images', 'counselling-images', 'events-poster', 'certificate-templates', 'session-attachments'];
     const requestedBucket = String(req.body?.bucket || req.query?.bucket || 'profile-pictures').toLowerCase();
     const bucket = ALLOWED_BUCKETS.includes(requestedBucket) ? requestedBucket : 'profile-pictures';
-    // manual-bookings is a private (sensitive) bucket — payment proofs/IDs.
-    const isPrivate = bucket === 'manual-bookings';
+    // Private (sensitive) buckets: manual-bookings holds payment proofs/IDs,
+    // session-attachments holds clinical documents attached to session reports.
+    const PRIVATE_BUCKETS = new Set(['manual-bookings', 'session-attachments']);
+    const isPrivate = PRIVATE_BUCKETS.has(bucket);
 
     // Upload to Supabase Storage using admin client (bypasses RLS)
     let { error: uploadError } = await supabaseAdmin.storage

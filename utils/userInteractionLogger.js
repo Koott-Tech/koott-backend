@@ -1,39 +1,68 @@
 // Use supabaseAdmin from config for consistency and RLS bypass
 const { supabaseAdmin } = require('../config/supabase');
-// Alias for storage operations (same client, just for clarity)
 const supabase = supabaseAdmin;
+const crypto = require('crypto');
 
+/** Historical logs only. Nothing is written here any more — see logInteraction. */
 const LOGS_BUCKET = 'logs';
 
 /**
- * Safely serialize error objects, handling circular references
- * @param {*} error - Error object or any value
- * @returns {Object|null} Serializable error object or null
+ * Keys whose VALUE must never reach the log, wherever they appear in the nested metadata.
+ * Mirrors the allowlist in middleware/auditMiddleware so the two logs redact alike.
  */
-function safeSerializeError(error) {
-  if (!error) return null;
-  if (typeof error !== 'object') return { message: String(error) };
+const SENSITIVE_KEYS = new Set([
+  'password', 'pass', 'passwd', 'pwd', 'password_hash', 'token', 'access_token', 'refresh_token',
+  'id_token', 'api_key', 'apikey', 'secret', 'secret_key', 'ssn', 'social_security_number',
+  'credit_card', 'card_number', 'cardnum', 'cvv', 'cvc', 'iban', 'routing_number',
+  'bank_account', 'auth', 'authorization', 'cookie', 'session_token', 'otp', 'pin',
+  // Clinical / message content: never logged.
+  'notes', 'session_notes', 'summary', 'session_summary', 'report', 'feedback',
+  'client_feedback', 'message', 'message_body', 'content', 'transcript',
+]);
 
-  const seen = new WeakSet();
-  const replacer = (key, value) => {
-    if (typeof value === 'object' && value !== null) {
-      if (seen.has(value)) {
-        return '[Circular Reference]';
-      }
-      seen.add(value);
-    }
-    return value;
-  };
+function isSensitiveKey(key) {
+  const k = String(key || '').toLowerCase();
+  if (SENSITIVE_KEYS.has(k)) return true;
+  if (k.includes('password') || k.includes('secret') || k.includes('token')) return true;
+  if (k.endsWith('_token') || k.includes('card') || k.includes('cvv')) return true;
+  return false;
+}
 
-  try {
-    return JSON.parse(JSON.stringify(error, replacer));
-  } catch (e) {
-    return {
-      message: error.message || String(error),
-      name: error.name,
-      stack: error.stack ? error.stack.substring(0, 500) : undefined
-    };
+function truncate(value, max) {
+  const s = String(value);
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/**
+ * Recursively strip sensitive values and cap size. Metadata only: the goal is "what happened",
+ * never "what was said". Depth- and breadth-capped so one oversized object cannot blow up a row.
+ */
+function redactForLog(value, depth = 0, seen = new WeakSet()) {
+  if (depth > 6) return '[MAX_DEPTH]';
+  if (value === null || value === undefined) return null;
+
+  const t = typeof value;
+  if (t === 'string') return truncate(value, 500);
+  if (t === 'number' || t === 'boolean') return value;
+  if (t !== 'object') return String(t);
+
+  if (seen.has(value)) return '[CIRCULAR]';
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((v) => redactForLog(v, depth + 1, seen));
   }
+
+  const out = {};
+  let count = 0;
+  for (const [k, v] of Object.entries(value)) {
+    if (count++ >= 50) {
+      out['…'] = '[TRUNCATED]';
+      break;
+    }
+    out[k] = isSensitiveKey(k) ? '[REDACTED]' : redactForLog(v, depth + 1, seen);
+  }
+  return out;
 }
 
 /**
@@ -42,165 +71,45 @@ function safeSerializeError(error) {
  */
 class UserInteractionLogger {
   constructor() {
-    this.initialized = false;
-    this.bucketName = LOGS_BUCKET;
-    this.writeQueues = new Map(); // Per-filePath queue for serializing writes
+    this.initialized = true; // nothing to set up: inserts go straight to Postgres
+    this.bucketName = LOGS_BUCKET; // retained: historical logs still live in this bucket
+    this.tableName = 'user_interaction_logs';
+    this.tableMissingWarned = false;
   }
 
   /**
-   * Initialize Supabase Storage client and ensure bucket exists
+   * No-op. Kept because callers and tests may still await it.
+   *
+   * The previous implementation listed/created a Storage bucket on first use; the append-only
+   * table is created by migration 20261003090000_user_interaction_logs.sql instead.
    */
   async initialize() {
-    if (this.initialized) return;
-
-    try {
-      // Check if bucket exists, create if it doesn't
-      const { data: buckets, error: listError } = await supabase.storage.listBuckets();
-      
-      if (listError) {
-        console.error('❌ Error listing buckets:', listError.message);
-        this.initialized = false;
-        return;
-      }
-
-      const bucketExists = buckets.some(bucket => bucket.name === this.bucketName);
-
-      if (!bucketExists) {
-        console.log(`📦 Creating bucket: ${this.bucketName}`);
-        const { data, error: createError } = await supabase.storage.createBucket(this.bucketName, {
-          public: false, // Private bucket
-          fileSizeLimit: 10485760, // 10MB per file
-          allowedMimeTypes: ['application/json']
-        });
-
-        if (createError) {
-          console.error('❌ Error creating bucket:', createError.message);
-          console.error('💡 Please create the bucket manually in Supabase Dashboard:');
-          console.error(`   1. Go to Storage → Create bucket`);
-          console.error(`   2. Name: ${this.bucketName}`);
-          console.error(`   3. Make it private`);
-          this.initialized = false;
-          return;
-        }
-
-        console.log(`✅ Created bucket: ${this.bucketName}`);
-      } else {
-        console.log(`✅ Bucket exists: ${this.bucketName}`);
-      }
-
-      this.initialized = true;
-      console.log('✅ User Interaction Logger initialized successfully');
-    } catch (error) {
-      console.error('❌ User Interaction Logger initialization failed:', error.message);
-      this.initialized = false;
-    }
+    this.initialized = true;
   }
 
   /**
-   * Get user email from client ID or user ID
+   * Stable, non-reversible id for a user. Derived from the user id alone — the previous
+   * implementation hashed the EMAIL, which cost one or two extra database round-trips per
+   * logged event purely to produce a hash.
+   *
+   * Note: because the input changed, these do not line up with the hashed folder names of the
+   * pre-migration files in the `logs` bucket. New rows carry `user_id` directly, which is more
+   * useful than the hash was; the old files remain readable on their own terms.
    */
-  async getUserEmail(userId, userRole = 'client') {
-    try {
-      if (userRole === 'client') {
-        // Try to get email from clients table
-        // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
-        const { supabaseAdmin } = require('../config/supabase');
-        const { data: client } = await supabaseAdmin
-          .from('clients')
-          .select('email, user_id')
-          .eq('id', userId)
-          .single();
-
-        if (client && client.email) {
-          return client.email;
-        }
-
-        // If client has user_id, try to get email from users table
-        if (client && client.user_id) {
-          const { data: user } = await supabaseAdmin
-            .from('users')
-            .select('email')
-            .eq('id', client.user_id)
-            .single();
-
-          if (user && user.email) {
-            return user.email;
-          }
-        }
-      } else if (userRole === 'psychologist') {
-        const { supabaseAdmin } = require('../config/supabase');
-        const { data: psychologist } = await supabaseAdmin
-          .from('psychologists')
-          .select('email')
-          .eq('id', userId)
-          .single();
-
-        if (psychologist && psychologist.email) {
-          return psychologist.email;
-        }
-      } else {
-        // For admin/superadmin, get from users table
-        // Use supabaseAdmin to bypass RLS (backend service, proper auth already handled)
-        const { supabaseAdmin } = require('../config/supabase');
-        const { data: user } = await supabaseAdmin
-          .from('users')
-          .select('email')
-          .eq('id', userId)
-          .single();
-
-        if (user && user.email) {
-          return user.email;
-        }
-      }
-
-      // Fallback to user ID
-      return `user_${userId}`;
-    } catch (error) {
-      console.error('Error getting user email:', error.message);
-      return `user_${userId}`;
-    }
+  hashIdentifier(userId) {
+    if (userId == null || String(userId) === '') return null;
+    return crypto.createHash('sha256').update(String(userId)).digest('hex').substring(0, 16);
   }
 
   /**
-   * Get file path in bucket - NEW STRUCTURE: 1 folder per user, 1 file per user
-   * Structure: logs/{hashed_identifier}/all_logs.json
-   * Uses hashed identifier instead of email to avoid PII leakage
-   */
-  getFilePath(identifier) {
-    // Caller must pass already-hashed identifier to avoid double-hashing
-    return `logs/${String(identifier)}/all_logs.json`;
-  }
-
-  /**
-   * Find existing log file in Supabase Storage
-   * @param {string} identifier - Hashed identifier (not email)
-   */
-  async findExistingLogFile(identifier) {
-    try {
-      const filePath = this.getFilePath(identifier);
-      const folderPath = filePath.split('/').slice(0, -1).join('/'); // Get folder path
-      const fileName = filePath.split('/').pop(); // Get filename
-      
-      const { data, error } = await supabase.storage
-        .from(this.bucketName)
-        .list(folderPath);
-
-      if (error) {
-        // Folder doesn't exist yet
-        return null;
-      }
-
-      // Check if file exists
-      const existingFile = data.find(file => file.name === fileName);
-      
-      return existingFile ? filePath : null;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  /**
-   * Log user interaction to Supabase Storage
+   * Log a user interaction as a single append-only row.
+   *
+   * Previously this downloaded the user's entire all_logs.json from Storage, parsed it,
+   * appended one entry, re-serialised the whole array pretty-printed and uploaded it again —
+   * so the cost of recording one event grew without bound as a user's history grew. This is a
+   * constant-cost insert.
+   *
+   * Never throws: logging must not be able to break a booking or a payment.
    */
   async logInteraction({
     userId,
@@ -210,170 +119,41 @@ class UserInteractionLogger {
     details = {},
     error = null
   }) {
-    // Don't block if logging fails
     try {
-      if (!this.initialized) {
-        await this.initialize();
-      }
-
-      if (!this.initialized) {
-        console.warn('⚠️ User Interaction Logger not initialized, skipping log');
-        return;
-      }
-
-      // Get user email (for internal use only, will be hashed for file path)
-      const userEmail = await this.getUserEmail(userId, userRole);
-      
-      // Use hashed identifier for file path (avoid PII leakage)
-      const crypto = require('crypto');
-      const hashedIdentifier = crypto.createHash('sha256').update(String(userEmail || userId)).digest('hex').substring(0, 16);
-
-      // Create detailed log entry with backend-style logging
-      const timestamp = new Date().toISOString();
-      const logEntry = {
-        timestamp,
-        userId, // Keep userId for reference, but don't use email in path
-        userRole,
-        action,
-        status,
-        details: {
-          ...details,
-          // Add detailed error information if present
-          errorDetails: error ? {
-            message: error.message || String(error),
-            stack: error.stack,
-            code: error.code,
-            name: error.name,
-          // Include full error object for debugging (safely serialized)
-          fullError: safeSerializeError(error)
-          } : null,
-          // Add failure reason if status is failure
-          failureReason: status === 'failure' && error 
-            ? (error.message || error.reason || String(error))
-            : null
-        },
-        // Keep error at top level for backward compatibility
-        error: error ? {
-          message: error.message || String(error),
-          stack: error.stack,
-          code: error.code,
-          name: error.name
-        } : null
+      const row = {
+        hashed_identifier: this.hashIdentifier(userId),
+        user_id: userId != null ? String(userId) : null,
+        user_role: userRole || null,
+        action: action || 'unknown',
+        status: status || null,
+        details: redactForLog(details),
+        // Message and code only. Stack traces were the bulk of the old payload and routinely
+        // carried request fragments into the log.
+        error_message: error ? truncate(error.message || String(error), 500) : null,
+        error_code: error && error.code != null ? truncate(String(error.code), 100) : null,
       };
 
-      // Get file path: logs/{hashed_identifier}/all_logs.json
-      const filePath = this.getFilePath(hashedIdentifier);
-      const folderPath = filePath.split('/').slice(0, -1).join('/'); // Get folder path
+      const { error: insertError } = await supabase.from(this.tableName).insert(row);
 
-      // Check if file exists (append to it) or create new (use hashed identifier)
-      const existingFilePath = await this.findExistingLogFile(hashedIdentifier);
-      const targetPath = existingFilePath || filePath;
-      
-      // Serialize writes per target path to prevent race conditions
-      if (!this.writeQueues.has(targetPath)) {
-        this.writeQueues.set(targetPath, Promise.resolve());
-      }
-
-      // Enqueue this write operation
-      this.writeQueues.set(targetPath, this.writeQueues.get(targetPath).then(async () => {
-        if (existingFilePath) {
-          // Read existing file, append new log, write back
-          const { data: fileData, error: downloadError } = await supabase.storage
-            .from(this.bucketName)
-            .download(existingFilePath);
-
-          if (downloadError) {
-            console.error('❌ Error downloading existing log file:', downloadError.message);
-            // Create new file instead
-            return this.createNewLogFile(filePath, logEntry, userEmail, action, status);
-          } else {
-            try {
-              const fileText = await fileData.text();
-              let logs = [];
-              try {
-                logs = JSON.parse(fileText);
-                if (!Array.isArray(logs)) {
-                  logs = [logs];
-                }
-              } catch (e) {
-                logs = [];
-              }
-
-              // Sort logs by timestamp to maintain chronological order
-              logs.push(logEntry);
-              logs.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-              // Update file
-              const { error: uploadError } = await supabase.storage
-                .from(this.bucketName)
-                .update(existingFilePath, JSON.stringify(logs, null, 2), {
-                  contentType: 'application/json',
-                  upsert: true
-                });
-
-              if (uploadError) {
-                console.error('❌ Error updating log file:', uploadError.message);
-              } else {
-                console.log(`✅ Logged ${action} (${status}) for user: ${hashedIdentifier} → ${filePath}`);
-              }
-              return;
-            } catch (parseError) {
-              console.error('❌ Error parsing existing log file:', parseError.message);
-              // Fall through to create new file
-              return this.createNewLogFile(filePath, logEntry, userEmail, action, status);
-            }
+      if (insertError) {
+        // Table not created yet (migration not applied) — say so once, then stay quiet.
+        if (insertError.code === '42P01' || insertError.code === 'PGRST205') {
+          if (!this.tableMissingWarned) {
+            this.tableMissingWarned = true;
+            console.warn(
+              `⚠️ ${this.tableName} is missing — interaction logging is disabled. Apply supabase/migrations/20261003090000_user_interaction_logs.sql.`
+            );
           }
-        } else {
-          return this.createNewLogFile(filePath, logEntry, userEmail, action, status);
+          return;
         }
-      }).catch(err => {
-        console.error('❌ Error in write queue for', targetPath, ':', err);
-      }));
-
-      // Wait for the write to complete
-      await this.writeQueues.get(targetPath);
-    } catch (error) {
-      // Don't throw - logging failures shouldn't break the app
-      console.error('❌ Error logging user interaction:', error.message);
-    }
-  }
-
-  /**
-   * Create a new log file
-   * @param {string} filePath - File path in bucket
-   * @param {Object} logEntry - Log entry object
-   * @param {string} identifier - Hashed identifier (for logging)
-   * @param {string} action - Action name (for logging)
-   * @param {string} status - Status (for logging)
-   * @returns {Promise<void>}
-   */
-  async createNewLogFile(filePath, logEntry, identifier, action, status) {
-    try {
-      const folderPath = filePath.split('/').slice(0, -1).join('/');
-      
-      // Ensure folder exists (create if needed)
-      // Note: Supabase Storage doesn't require explicit folder creation
-      
-      // Create new file with single log entry
-      const logs = [logEntry];
-      const fileContent = JSON.stringify(logs, null, 2);
-      
-      const { error: uploadError } = await supabase.storage
-        .from(this.bucketName)
-        .upload(filePath, fileContent, {
-          contentType: 'application/json',
-          upsert: false // Don't overwrite if exists
-        });
-
-      if (uploadError) {
-        console.error('❌ Error creating new log file:', uploadError.message);
-      } else {
-        console.log(`✅ Created new log file for ${identifier}: ${action} (${status}) → ${filePath}`);
+        console.error('❌ Error writing interaction log:', insertError.message);
       }
-    } catch (error) {
-      console.error('❌ Error in createNewLogFile:', error.message);
+    } catch (err) {
+      // Don't throw - logging failures shouldn't break the app
+      console.error('❌ Error logging user interaction:', err.message);
     }
   }
+
 
   /**
    * Log detailed booking flow with comprehensive information
