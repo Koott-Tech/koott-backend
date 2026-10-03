@@ -42,6 +42,26 @@ function nameMatchKey(value) {
 function normalizedFullName(firstName, lastName) {
   return nameMatchKey([firstName, lastName].filter(Boolean).join(' '));
 }
+// Wix prints a therapist's full legal name while the profile often holds a shorter one, so
+// "Nikita Elizabeth Roy" never matched "Nikita Roy" and a second, empty profile was created —
+// with no email and no Google Calendar, which left the client with no real Meet link. Treat one
+// name as the same person when all of its words appear in the other and the first and last
+// words agree, so an extra middle name cannot split a therapist in two.
+function nameWords(value) {
+  return stripTitles(value).toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+}
+function sameTherapistName(aFull, bFull) {
+  const a = nameWords(aFull), b = nameWords(bFull);
+  if (!a.length || !b.length) return false;
+  if (nameMatchKey(aFull) === nameMatchKey(bFull)) return true;
+  const [shortName, longName] = a.length <= b.length ? [a, b] : [b, a];
+  if (shortName.length < 2) return false; // a lone first name is not enough to merge on
+  const inLong = new Set(longName);
+  return shortName.every((w) => inLong.has(w))
+    && shortName[0] === longName[0]
+    && shortName[shortName.length - 1] === longName[longName.length - 1];
+}
+
 function psychologistNameMatches(row, targetFullName) {
   if (!targetFullName) return true;
   return normalizedFullName(row?.first_name, row?.last_name) === targetFullName;
@@ -128,8 +148,10 @@ async function resolveOrCreateWixPsychologist(booking) {
     const { data: allPsychs } = await supabaseAdmin
       .from('psychologists')
       .select('id, first_name, last_name, email, google_calendar_credentials, wix_staff_id');
+    const rowFullName = (row) => [row.first_name, row.last_name].filter(Boolean).join(' ');
     const matches = (allPsychs || []).filter((row) =>
-      normalizedFullName(row.first_name, row.last_name) === targetFullName
+      normalizedFullName(row.first_name, row.last_name) === targetFullName ||
+      sameTherapistName(rowFullName(row), rawName)
     );
     if (matches.length) {
       // If a duplicate already exists, prefer the most complete profile (has email,
@@ -150,9 +172,11 @@ async function resolveOrCreateWixPsychologist(booking) {
     passwordHash = await hashPassword(tempPassword);
   }
 
+  // Wix sends ONE staff id for every therapist (the same 971fb91e… appears on bookings for all
+  // 32 of them), so storing it on a profile cannot identify anyone and risks pointing later
+  // bookings at whoever happens to hold it.
   const insertPayload = {
     email: rawEmail || null,
-    wix_staff_id: therapist.staffId || null,
     first_name: firstName,
     last_name: lastName || null,
     phone: rawPhone || null,
@@ -185,6 +209,19 @@ async function resolveOrCreateWixPsychologist(booking) {
     console.warn('[wixPsychologistResolver] insert failed:', error.message || error);
     return { psychologistId: null, isNew: false };
   }
+
+  // A new therapist profile appearing on its own is nearly always a near-duplicate of an
+  // existing one, and one without an email has no Google Calendar either — every booking on it
+  // gets the generic fallback Meet link. Say so instead of letting it surface as a client
+  // complaint (Manasa, 3 Oct: "Nikita Elizabeth Roy" vs "Nikita Roy").
+  emailService.sendCustomEmail({
+    to: 'koottfordeveloper@gmail.com',
+    subject: `New therapist profile created from a Wix booking — ${rawName}${rawEmail ? '' : ' (NO EMAIL)'}`,
+    text: `A Wix booking named a therapist that matched no existing profile, so one was created.\n\n`
+      + `Name from Wix: ${rawName}\nEmail: ${rawEmail || 'none sent by Wix'}\nPhone: ${rawPhone || 'none'}\n\n`
+      + `If this is an existing therapist under a slightly different name, merge the profiles: `
+      + `a profile without an email has no Google Calendar, so its bookings get the fallback Meet link.`,
+  }).catch((err) => console.error('[wixPsychologistResolver] could not send the new-profile alert:', err?.message || err));
 
   // Send welcome email with login credentials (fire-and-forget)
   if (rawEmail && tempPassword) {
