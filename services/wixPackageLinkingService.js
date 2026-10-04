@@ -133,8 +133,15 @@ async function linkPackageSessions() {
       return true;
     }).slice(0, cap);
 
-    // The package row itself is always session 1.
-    desired.set(pkg.wix_booking_id, { parent: undefined, index: 1, session_count: undefined });
+    // The package row itself is session 1 of its own group — UNLESS an earlier package already
+    // claimed it as a child. Some zero-price rows are typed session_type='package' even though
+    // they are a credit inside another package; stamping those back to 1 overwrote the child
+    // index they had just been given, leaving 22 rows reading "session 1 of 3" while pointing
+    // at a parent. Packages are processed oldest-first, so anything claimed as a child was
+    // claimed by a package that comes before this one — being claimed wins.
+    if (!claimedChildren.has(pkg.wix_booking_id)) {
+      desired.set(pkg.wix_booking_id, { parent: undefined, index: 1, session_count: undefined });
+    }
 
     candidates.forEach((c, i) => {
       claimedChildren.add(c.wix_booking_id);
