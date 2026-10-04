@@ -14,7 +14,22 @@
  * client or session content, message bodies.
  */
 
-const ENABLED = String(process.env.BANDWIDTH_AUDIT || '').toLowerCase() === 'true';
+// .trim() matters: a value pasted into a dashboard field with a trailing space would
+// otherwise silently disable the audit with no way to tell from the logs.
+const RAW_FLAG = String(process.env.BANDWIDTH_AUDIT ?? '');
+const ENABLED = RAW_FLAG.trim().toLowerCase() === 'true';
+
+/**
+ * Say which state we booted in, once, either way. Without this an absent report is ambiguous:
+ * it could mean the flag is off, the build is old, or the service simply has not reached the
+ * first rollup yet.
+ */
+function announce() {
+  if (ENABLED) return; // the rollup prints its own "enabled" line with the interval
+  console.log(
+    `[bandwidth] audit disabled (BANDWIDTH_AUDIT=${JSON.stringify(RAW_FLAG)}) — set it to exactly "true" and redeploy to enable`
+  );
+}
 
 const { AsyncLocalStorage } = require('async_hooks');
 
@@ -288,7 +303,7 @@ function buildReport() {
 
 /** Print an aggregated report every `everyMs`. Totals are cumulative, not per-window. */
 function startBandwidthRollup(everyMs = 5 * 60 * 1000) {
-  if (!ENABLED) return () => {};
+  if (!ENABLED) { announce(); return () => {}; }
   console.log(`[bandwidth] audit enabled — aggregated report every ${Math.round(everyMs / 60000)} min`);
   const timer = setInterval(() => console.log(buildReport()), everyMs);
   timer.unref?.();
@@ -297,7 +312,7 @@ function startBandwidthRollup(everyMs = 5 * 60 * 1000) {
 
 /** Install everything. Safe and near-free to call when the audit is off. */
 function install({ reportEveryMs = 5 * 60 * 1000 } = {}) {
-  if (!ENABLED) return () => {};
+  if (!ENABLED) { announce(); return () => {}; }
   installOutboundFetchMeter();
   installHttpMeter();
   return startBandwidthRollup(reportEveryMs);
@@ -305,6 +320,7 @@ function install({ reportEveryMs = 5 * 60 * 1000 } = {}) {
 
 module.exports = {
   ENABLED,
+  announce,
   runAs,
   currentCaller,
   install,
