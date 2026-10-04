@@ -16,8 +16,45 @@
 
 const ENABLED = String(process.env.BANDWIDTH_AUDIT || '').toLowerCase() === 'true';
 
-const outbound = new Map(); // host -> { requests, down, up }
+const { AsyncLocalStorage } = require('async_hooks');
+
+const outbound = new Map(); // host    -> { requests, down, up }
+const byCaller = new Map(); // caller  -> { requests, down, up }
 const inbound = new Map();  // "METHOD /route" -> { calls, bytes }
+const largest = [];         // biggest single requests seen
+
+/**
+ * Which job/route is responsible for an outbound call. A host-level total cannot tell you
+ * WHICH code path spent the bandwidth, which is the only question worth answering.
+ */
+const callerContext = new AsyncLocalStorage();
+
+/** Run fn with every outbound call inside it attributed to `label`. */
+function runAs(label, fn) {
+  if (!ENABLED) return fn();
+  return callerContext.run({ label }, fn);
+}
+
+function currentCaller() {
+  return callerContext.getStore()?.label || 'unattributed';
+}
+
+const LARGE_UPLOAD_BYTES = 1024 * 1024;        // 1MB  -> log it
+const CRITICAL_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB -> flag it
+
+function noteLarge(rec) {
+  const total = rec.up + rec.down;
+  largest.push(rec);
+  largest.sort((a, b) => (b.up + b.down) - (a.up + a.down));
+  if (largest.length > 10) largest.length = 10;
+
+  if (rec.up >= LARGE_UPLOAD_BYTES) {
+    const level = rec.up >= CRITICAL_UPLOAD_BYTES ? 'CRITICAL' : 'LARGE';
+    console.warn(`[bandwidth] ${level} OUTBOUND REQUEST  caller=${rec.caller} ${rec.method} ${rec.host}${rec.path} uploaded=${fmt(rec.up)} downloaded=${fmt(rec.down)} ${rec.ts}`);
+  } else if (total >= 20 * 1024 * 1024) {
+    console.warn(`[bandwidth] LARGE TRANSFER  caller=${rec.caller} ${rec.method} ${rec.host}${rec.path} down=${fmt(rec.down)} ${rec.ts}`);
+  }
+}
 
 /** uuids / long ids / digit runs → placeholders, so routes group instead of fragmenting. */
 function coarsenPath(pathname) {
@@ -35,12 +72,23 @@ function fmt(bytes) {
   return `${bytes}B`;
 }
 
-function addOutbound(host, up, down) {
+function addOutbound(host, up, down, meta = {}) {
   const prev = outbound.get(host) || { requests: 0, down: 0, up: 0 };
   prev.requests += 1;
   prev.up += up;
   prev.down += down;
   outbound.set(host, prev);
+
+  const caller = currentCaller();
+  const c = byCaller.get(caller) || { requests: 0, down: 0, up: 0 };
+  c.requests += 1;
+  c.up += up;
+  c.down += down;
+  byCaller.set(caller, c);
+
+  if (up >= LARGE_UPLOAD_BYTES || up + down >= 5 * 1024 * 1024) {
+    noteLarge({ ts: new Date().toISOString(), caller, host, path: meta.path || '', method: meta.method || 'GET', up, down });
+  }
 }
 
 function addInbound(key, bytes) {
@@ -100,7 +148,8 @@ function installOutboundFetchMeter() {
   globalThis.fetch = async function meteredFetch(input, init) {
     const urlStr = typeof input === 'string' ? input : (input?.url || String(input));
     let host = 'unknown';
-    try { host = new URL(urlStr).host; } catch { /* leave as unknown */ }
+    let pathname = '';
+    try { const u = new URL(urlStr); host = u.host; pathname = u.pathname; } catch { /* leave as unknown */ }
 
     let up = 0;
     const body = init?.body ?? (typeof input === 'object' ? input?.body : undefined);
@@ -119,7 +168,7 @@ function installOutboundFetchMeter() {
       down = declared ? Number(declared) : 0;
     }
 
-    addOutbound(host, up, down);
+    addOutbound(host, up, down, { method: (init?.method || 'GET').toUpperCase(), path: coarsenPath(pathname) });
     return res;
   };
 }
@@ -154,7 +203,7 @@ function installHttpMeter() {
         res.on('data', (d) => { down += d.length; });
         res.on('end', () => {
           const host = String(req.getHeader?.('host') || req.host || 'unknown');
-          addOutbound(host, up, down);
+          addOutbound(host, up, down, { method: req.method, path: coarsenPath((req.path || '').split('?')[0]) });
         });
       });
 
@@ -198,6 +247,28 @@ function buildReport() {
   }
 
   lines.push('');
+  lines.push('OUTBOUND BY CALLER  <- this is the one that names the culprit');
+  lines.push(`  ${pad('caller / job', 34)}${padL('requests', 10)}${padL('uploaded', 12)}${padL('downloaded', 14)}`);
+  const callers = [...byCaller.entries()]
+    .map(([caller, v]) => ({ caller, ...v }))
+    .sort((a, b) => (b.down + b.up) - (a.down + a.up));
+  if (!callers.length) {
+    lines.push('  (none)');
+  } else {
+    for (const r of callers) {
+      lines.push(`  ${pad(r.caller, 34)}${padL(r.requests, 10)}${padL(fmt(r.up), 12)}${padL(fmt(r.down), 14)}`);
+    }
+  }
+
+  if (largest.length) {
+    lines.push('');
+    lines.push('TOP SINGLE REQUESTS');
+    for (const r of largest.slice(0, 8)) {
+      lines.push(`  ${r.ts}  ${pad(r.caller, 24)} ${pad(r.method, 6)} ${pad((r.host + r.path).slice(0, 42), 43)} up=${fmt(r.up)} down=${fmt(r.down)}`);
+    }
+  }
+
+  lines.push('');
   lines.push('INBOUND (responses sent to clients)');
   lines.push(`  ${pad('route', 44)}${padL('calls', 10)}${padL('response bytes', 16)}`);
   if (!inn.length) {
@@ -234,6 +305,8 @@ function install({ reportEveryMs = 5 * 60 * 1000 } = {}) {
 
 module.exports = {
   ENABLED,
+  runAs,
+  currentCaller,
   install,
   responseSizeMeter,
   installOutboundFetchMeter,

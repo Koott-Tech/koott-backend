@@ -953,73 +953,80 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
   }
 
   // Aggregated bandwidth report (no-op unless BANDWIDTH_AUDIT=true).
-  bandwidthMeter.startBandwidthRollup(5 * 60 * 1000);
+  // 15 minutes while hunting a specific culprit; the totals are cumulative either way.
+  bandwidthMeter.startBandwidthRollup(15 * 60 * 1000);
+
+  // Each scheduler is started inside a named context so that every outbound call its ticks
+  // make is attributed to that job in the bandwidth report. AsyncLocalStorage propagates
+  // through the timer callbacks, so this label survives into the job's own async work.
+  // Costs nothing when BANDWIDTH_AUDIT is not 'true' — runAs just calls the function.
+  const as = (label, fn) => bandwidthMeter.runAs(label, fn);
 
   // Start Google Calendar sync service
-  calendarSyncService.start();
+  as('calendarSync', () => calendarSyncService.start());
   
   // Start Session Reminder service (2-hour WhatsApp reminders)
-  sessionReminderService.start();
+  as('sessionReminder', () => sessionReminderService.start());
   
   // Start Daily Availability service (adds next day at 12 AM)
-  dailyAvailabilityService.start();
+  as('dailyAvailability', () => dailyAvailabilityService.start());
   
   // Start Daily Calendar Conflict Monitor service (checks for conflicts at 1 AM)
-  dailyCalendarConflictAlert.start();
+  as('dailyCalendarConflictAlert', () => dailyCalendarConflictAlert.start());
 
   // Start Daily Overbooking Crawler (05:30 IST; emails ops only if overbookings found)
-  overbookingCrawlerService.start();
+  as('overbookingCrawler', () => overbookingCrawlerService.start());
 
   // Start Wix discover mirror sync service (near real-time fallback)
-  wixRealtimeSyncService.start();
+  as('wixRealtimeSync', () => wixRealtimeSyncService.start());
 
   // Start monthly finance snapshot service (persists previous month automatically)
-  monthlyFinanceSnapshotService.start();
+  as('monthlyFinanceSnapshot', () => monthlyFinanceSnapshotService.start());
   
   // Start Recovery Job (recovers failed session creations, runs every 5 minutes)
   const { startRecoveryScheduler } = require('./jobs/recoveryJob');
-  startRecoveryScheduler(5); // Run every 5 minutes
+  as('recoveryJob', () => startRecoveryScheduler(5)); // Run every 5 minutes
   
   // Start Security Logs Cleanup Job (deletes logs older than 1 week, runs weekly)
   const { startSecurityLogsCleanupScheduler } = require('./jobs/securityLogsCleanupJob');
-  startSecurityLogsCleanupScheduler(7); // Run every 7 days (weekly)
+  as('securityLogsCleanup', () => startSecurityLogsCleanupScheduler(7)); // weekly
   
   // Start Audit Logs Cleanup Job (deletes logs older than 1 week, runs weekly)
   const { startAuditLogsCleanupScheduler } = require('./jobs/auditLogsCleanupJob');
-  startAuditLogsCleanupScheduler(7); // Run every 7 days (weekly)
+  as('auditLogsCleanup', () => startAuditLogsCleanupScheduler(7)); // weekly
 
   const { startDailyCrawlerScheduler } = require('./jobs/dailyCrawlerJob');
-  startDailyCrawlerScheduler();
+  as('dailyCrawler', () => startDailyCrawlerScheduler());
 
   // Booking time drift check — flags any upcoming booking whose Google Calendar time no longer
   // matches its session row. While the two disagree the calendar slot is blocked and Wix will
   // not sell it, so every hour of delay is an hour of lost availability.
   const { startBookingTimeDriftScheduler } = require('./jobs/bookingTimeDriftJob');
-  startBookingTimeDriftScheduler(30); // Run every 30 minutes
+  as('bookingTimeDrift', () => startBookingTimeDriftScheduler(30)); // every 30 min
 
   // Google Sheet mirror sweep — completeSession writes to the sheet fire-and-forget so a
   // Google failure can't break a completion, which means a failed write is silent. This picks
   // up anything still carrying sheet_synced_at = NULL, so a miss self-heals instead of needing
   // a manual backfill.
   const { startSheetSyncSweepScheduler } = require('./jobs/sheetSyncSweepJob');
-  startSheetSyncSweepScheduler(60); // Run hourly
+  as('sheetSyncSweep', () => startSheetSyncSweepScheduler(60)); // hourly
 
   // Daily booking report to operations (midnight IST). This used to be a scheduled task inside
   // a desktop app on one laptop, so it silently sent nothing on any night that machine was
   // asleep — which is exactly what happened on 24 Sept.
   const { startDailyBookingReportScheduler } = require('./jobs/dailyBookingReportJob');
-  startDailyBookingReportScheduler();
+  as('dailyBookingReport', () => startDailyBookingReportScheduler());
   
   // Start Slot Lock Cleanup Job (releases expired slots and cleans up abandoned payments, runs every 10 minutes)
   const { releaseExpiredSlots, cleanupAbandonedPendingPayments } = require('./services/slotLockService');
-  setInterval(async () => {
+  setInterval(() => as('slotLockCleanup', async () => {
     try {
       await releaseExpiredSlots();
       await cleanupAbandonedPendingPayments();
     } catch (error) {
       console.error('❌ Error in slot lock cleanup:', error);
     }
-  }, 10 * 60 * 1000); // Every 10 minutes
+  }), 10 * 60 * 1000); // Every 10 minutes
   // Run immediately on startup
   releaseExpiredSlots().catch(err => {
     console.error('❌ Error in initial slot lock cleanup:', err);
