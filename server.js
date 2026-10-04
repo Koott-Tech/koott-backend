@@ -159,11 +159,19 @@ app.use((req, res, next) => {
 
 // Health check endpoints (before other middleware for fast response)
 app.get('/health', (req, res) => {
+  // `commit` and `bandwidthAudit` are here so a deploy can be verified from outside.
+  // Saving an environment variable on Render restarts the service with the SAME code, which
+  // looks identical to a real deploy from the logs — that cost an afternoon of hunting for a
+  // log line that could not appear because the build predated it. Render injects
+  // RENDER_GIT_COMMIT automatically.
+  const commit = (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || 'unknown';
   res.status(200).json({ 
     status: 'ok', 
     timestamp: Date.now(),
     region: process.env.REGION || 'unknown',
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    commit,
+    bandwidthAudit: require('./instrumentation/bandwidthMeter').ENABLED,
   });
 });
 
