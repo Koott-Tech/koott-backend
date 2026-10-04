@@ -195,10 +195,38 @@ function createMockCalendarClient() {
   };
 }
 
+/**
+ * Scopes this backend cannot work without, regardless of what GOOGLE_SCOPES says.
+ *
+ * On 17 Sep 2026 the shared refresh token was re-issued through this flow while GOOGLE_SCOPES
+ * held only the two calendar scopes. Calendar kept working, so nothing looked broken — but the
+ * token silently lost Drive, and every completed session has failed to reach its therapist's
+ * Google Sheet since ("Request had insufficient authentication scopes"). 2,000+ sessions
+ * accumulated before anyone noticed.
+ *
+ * Re-authorizing must never be able to drop a capability again, so the required set is unioned
+ * in here rather than left to an env var. drive.file grants access only to files this app
+ * created — it cannot read anything else in the account's Drive.
+ */
+const REQUIRED_SCOPES = [
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/drive.file',
+];
+
 function authUrl() {
   const oauth2 = getOAuth2Client();
-  const scopes = (process.env.GOOGLE_SCOPES || '').split(' ').filter(Boolean);
-  
+  const configured = (process.env.GOOGLE_SCOPES || '').split(/[\s,]+/).filter(Boolean);
+  const scopes = [...new Set([...configured, ...REQUIRED_SCOPES])];
+
+  const added = REQUIRED_SCOPES.filter((sc) => !configured.includes(sc));
+  if (added.length) {
+    console.log(
+      '[google-oauth] adding required scope(s) missing from GOOGLE_SCOPES: ' +
+        added.map((sc) => sc.replace('https://www.googleapis.com/auth/', '')).join(', ')
+    );
+  }
+
   return oauth2.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
@@ -214,6 +242,7 @@ async function exchangeCode(code) {
 }
 
 module.exports = {
+  REQUIRED_SCOPES,
   getOAuth2Client,
   calendar,
   authUrl,
