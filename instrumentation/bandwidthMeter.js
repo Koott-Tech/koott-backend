@@ -174,14 +174,18 @@ function installOutboundFetchMeter() {
 
     const res = await origFetch(input, init);
 
-    // Measure without consuming the caller's body.
-    let down = 0;
-    try {
-      down = (await res.clone().arrayBuffer()).byteLength;
-    } catch {
-      const declared = res.headers.get('content-length');
-      down = declared ? Number(declared) : 0;
-    }
+    // Download size comes from the header ONLY — never from reading the body.
+    //
+    // This used to do `await res.clone().arrayBuffer()`. clone() tees the stream and undici
+    // buffers the branch nobody is reading; on a large response (getAllSessions pulls
+    // hundreds of session rows) the caller's branch stalls and the whole request dies with
+    // "TypeError: fetch failed". A measurement tool must never be able to break the request
+    // it is measuring, so this now reads a header and touches nothing else.
+    //
+    // Cost: responses sent with chunked encoding and no content-length report 0 bytes down.
+    // Request counts, hosts, callers and upload sizes are all still exact.
+    const declared = res.headers.get('content-length');
+    const down = declared ? Number(declared) || 0 : 0;
 
     addOutbound(host, up, down, { method: (init?.method || 'GET').toUpperCase(), path: coarsenPath(pathname) });
     return res;
