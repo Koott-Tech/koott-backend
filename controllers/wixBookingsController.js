@@ -2240,6 +2240,34 @@ async function editWixBooking(req, res) {
     safeUpdates.locally_modified = true;
     safeUpdates.synced_at = new Date().toISOString();
 
+    // Keep payload.bookingType in step with an edited session_type.
+    //
+    // Commission does not read session_type alone — computeSessionDoctorWallet and
+    // isCoupleSessionLike treat a booking as a couple session if EITHER the column or
+    // `wix_payload.bookingType` says so. Editing only the column therefore left a booking
+    // changed from couple to individual still being paid at the couple rate, invisibly.
+    // The original Wix value is kept under bookingType_original_wix.
+    //
+    // A `package` session whose payload says couple is a genuine COUPLE PACKAGE, so the
+    // couple marker is only rewritten when the new type is not a package.
+    let payloadPatch = null;
+    if (safeUpdates.session_type) {
+      const nextType = String(safeUpdates.session_type).toLowerCase();
+      const { data: cur } = await supabaseAdmin
+        .from('wix_bookings').select('payload').eq('id', id).maybeSingle();
+      const payload = cur?.payload;
+      if (payload && typeof payload === 'object' && nextType !== 'package') {
+        const payloadSaysCouple = String(payload.bookingType || '').toLowerCase().includes('couple');
+        if (payloadSaysCouple !== nextType.includes('couple')) {
+          payloadPatch = { ...payload, bookingType: safeUpdates.session_type };
+          if (payloadPatch.bookingType_original_wix === undefined) {
+            payloadPatch.bookingType_original_wix = payload.bookingType ?? null;
+          }
+          safeUpdates.payload = payloadPatch;
+        }
+      }
+    }
+
     const { data, error } = await supabaseAdmin
       .from('wix_bookings')
       .update(safeUpdates)
@@ -2255,6 +2283,8 @@ async function editWixBooking(req, res) {
     if (data.wix_booking_id) {
       const sessionUpdates = { locally_modified: true };
       if (safeUpdates.status) sessionUpdates.status = safeUpdates.status;
+      // Mirror the payload correction so finance reads the same thing from either table.
+      if (payloadPatch) sessionUpdates.wix_payload = payloadPatch;
       // Notes column lives on sessions (not wix_bookings). Prefer the form's Notes field;
       // fall back to the title if notes wasn't provided.
       if (updates.notes !== undefined && String(updates.notes).trim() !== '') {
