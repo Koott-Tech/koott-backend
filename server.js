@@ -887,6 +887,8 @@ app.use('/api/psychologists/google-calendar', googleCalendarRoutes);
 app.use('/api/event-pages', eventPagesRoutes);
 app.use('/api/events', eventsRoutes);
 app.use('/api/assessments', assessmentsRoutes);
+// Public assessment questionnaires -> scored PDF -> emailed. Nothing is stored.
+app.use('/api/assessment-reports', require('./routes/assessmentReports'));
 app.use('/api/better-parenting', betterParentingRoutes);
 app.use('/api/careers', careerRoutes);
 app.use('/api/finance', financeRoutes);
@@ -963,6 +965,15 @@ console.log(`🚀 Koott Backend running on port ${PORT}`);
   // Aggregated bandwidth report (no-op unless BANDWIDTH_AUDIT=true).
   // 15 minutes while hunting a specific culprit; the totals are cumulative either way.
   bandwidthMeter.startBandwidthRollup(15 * 60 * 1000);
+
+  // Local/dev safety switch. Starting this server on a developer machine loads the production
+  // .env, and the schedulers then act on live data: sessionReminderService sends WhatsApp
+  // reminders to real clients, the Wix sync writes bookings, the crawlers email operations.
+  // Set DISABLE_SCHEDULERS=true to run the HTTP API on its own.
+  if (String(process.env.DISABLE_SCHEDULERS || '').toLowerCase() === 'true') {
+    console.log('⏸️  DISABLE_SCHEDULERS=true - background jobs not started (HTTP API only)');
+    return;
+  }
 
   // Each scheduler is started inside a named context so that every outbound call its ticks
   // make is attributed to that job in the bandwidth report. AsyncLocalStorage propagates
