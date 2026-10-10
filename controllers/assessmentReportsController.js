@@ -10,31 +10,72 @@ const emailService = require('../utils/emailService');
 const { buildBigFiveReport, buildDass21Report, buildKalyanaResponsesReport } = require('../utils/assessments/reports');
 const { BFI_ITEMS, DASS_ITEMS, KR_DOMAINS } = require('../utils/assessments/instruments');
 
-/** Single recipient while testing. Set ASSESSMENT_REPORT_EMAIL to change it without a deploy. */
-const RECIPIENT = () => process.env.ASSESSMENT_REPORT_EMAIL || 'abhishekravi063@gmail.com';
+/**
+ * Who every assessment report goes to. Set ASSESSMENT_REPORT_EMAIL to a comma-separated list to
+ * change this without a deploy; it replaces the defaults rather than adding to them.
+ */
+const DEFAULT_RECIPIENTS = ['abhishekravi063@gmail.com', 'dr.aswathi.raman.koott@gmail.com'];
+const RECIPIENT = () => {
+  const override = (process.env.ASSESSMENT_REPORT_EMAIL || '').split(',').map((e) => e.trim()).filter(Boolean);
+  return (override.length ? override : DEFAULT_RECIPIENTS).join(', ');
+};
 
-const istDate = () => new Date(Date.now() + 5.5 * 3600 * 1000)
-  .toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+// Every date in a report is a date in India, never UTC. A bare 'YYYY-MM-DD' from a date input
+// parses as UTC midnight, and IST is UTC+5:30 - ahead of UTC - so rendering it in Asia/Kolkata
+// gives back the same calendar day the client picked. Formatting it in UTC instead would be a
+// day behind for anything submitted after 05:30 IST.
+const IST = 'Asia/Kolkata';
+const fmtIst = (d) => d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: IST });
+const istDate = () => fmtIst(new Date());
+/** Consent is recorded to the minute, in IST, for the delivery email's audit line. */
+const fmtIstStamp = (v) => {
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? 'time not recorded'
+    : d.toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: IST });
+};
 
-function participantFrom(body) {
-  const clean = (v, max = 120) => (typeof v === 'string' ? v.trim().slice(0, max) : '') || null;
+/**
+ * The consent is not printed in the report - that is its own form - but it is recorded in the
+ * delivery email so the agreement is not lost, since nothing here is persisted.
+ */
+function consentFrom(body, choiceSection) {
+  const c = body?.consent;
+  if (!c || c.agreed !== true) return null;
   return {
-    name: clean(body.name) || 'Not provided',
-    date: istDate(),
-    address: clean(body.address, 200),
-    email: clean(body.email),
-    phone: clean(body.phone, 40),
-    dob: clean(body.dob, 40),
+    agreed: true,
+    choiceSection,
+    agreedAt: c.agreedAt || new Date().toISOString(),
+    anonymisedUse: c.anonymisedUse === 'agree' ? 'agree' : 'decline',
   };
 }
 
-async function deliver({ res, subject, intro, filename, buffer, participant }) {
+function participantFrom(body) {
+  const clean = (v, max = 120) => (typeof v === 'string' ? v.trim().slice(0, max) : '') || null;
+  const asDate = (v) => {
+    if (!v || typeof v !== 'string' || !v.trim()) return null;
+    const d = new Date(v.trim());
+    return Number.isNaN(d.getTime()) ? null : fmtIst(d);
+  };
+  return {
+    name: clean(body.name) || 'Not provided',
+    date: asDate(body.date) || istDate(),
+    address: clean(body.address, 200),
+    email: clean(body.email),
+    phone: clean(body.phone, 40),
+    dob: asDate(body.dob) || clean(body.dob, 40),
+  };
+}
+
+async function deliver({ res, subject, intro, filename, buffer, participant, consent }) {
   await emailService.sendCustomEmail({
     to: RECIPIENT(),
     subject,
     html: `<div style="font-family:Arial,sans-serif;max-width:600px;color:#333;line-height:1.6">
              <h2 style="color:#025545;margin:0 0 10px">${intro}</h2>
              <p><b>Name:</b> ${participant.name}<br/><b>Submitted:</b> ${participant.date}</p>
+             ${consent ? `<p style="font-size:13px;color:#666"><b>Consent:</b> given online before the
+               questionnaire was shown, ${fmtIstStamp(consent.agreedAt)} IST. Use of anonymised
+               information (section ${consent.choiceSection}): <b>${consent.anonymisedUse === 'agree' ? 'agreed' : 'not agreed'}</b>.</p>` : ''}
              <p>The report is attached as a PDF.</p>
            </div>`,
     attachments: [{ filename, content: buffer, contentType: 'application/pdf' }],
@@ -56,7 +97,7 @@ async function submitBigFive(req, res) {
 
     const participant = participantFrom(req.body);
     const buffer = await buildBigFiveReport({ participant, answers });
-    return deliver({ res, participant, buffer,
+    return deliver({ res, participant, buffer, consent: consentFrom(req.body, 6),
       subject: `Big Five (BFI-44) report - ${participant.name}`,
       intro: 'Big Five Personality Inventory - new submission',
       filename: `Big-Five-Report-${participant.name.replace(/[^\w]+/g, '-')}.pdf` });
@@ -77,8 +118,9 @@ async function submitDass21(req, res) {
     if (missing.length) return fail(res, 400, `Please answer every question. Missing or invalid: ${missing.join(', ')}`);
 
     const participant = participantFrom(req.body);
+    const consent = consentFrom(req.body, 7);
     const buffer = await buildDass21Report({ participant, answers });
-    return deliver({ res, participant, buffer,
+    return deliver({ res, participant, buffer, consent,
       subject: `DASS-21 report - ${participant.name}`,
       intro: 'DASS-21 - new submission',
       filename: `DASS-21-Report-${participant.name.replace(/[^\w]+/g, '-')}.pdf` });

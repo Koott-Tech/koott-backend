@@ -1,26 +1,67 @@
 /**
- * Shared page furniture for assessment reports, matching the practice's report templates:
- * pale green page, dark green header band with an angled cut and the koott wordmark,
- * a participant detail block, green section headings, and a footer carrying the
- * assessment's own note above the contact band.
+ * Page furniture for assessment reports.
  *
- * Built with pdfkit rather than drawn onto the letterhead PDFs in the frontend's /public:
- * those carry a pre-printed disclaimer whose wording differs per assessment, there is no
- * letterhead for DASS-21 at all, and the reports need to flow over a variable number of
- * pages in both orientations. Reproducing the furniture keeps all three consistent.
+ * The report is drawn in two passes: pdfkit lays out the text and the score bars on a
+ * transparent A4 page, then pdf-lib stamps each of those pages over assets/koott-letterhead.pdf.
+ * The letterhead is the practice's own artwork - header shapes, wordmark, watermark, footer band,
+ * contact icons and the footer text in Poppins/Gordita - lifted verbatim from the approved sample
+ * report, so the furniture is identical rather than a redrawn approximation.
+ * See scripts/build-letterhead.js for how that asset is produced.
+ *
+ * Every measurement below (positions, sizes, colours, leading) was read off the approved sample
+ * report, so the generated report matches it.
  */
 const PDFDocument = require('pdfkit');
+const { PDFDocument: LibPDF } = require('pdf-lib');
+const fs = require('fs');
+const path = require('path');
+
+/**
+ * Each assessment has its own letterhead: the footer wording differs, and the Big Five sheet
+ * carries its note pre-printed while the DASS one does not, so that report draws its own.
+ */
+const LETTERHEADS = {
+  dass21:  { file: 'koott-letterhead.pdf',         note: true,  bottomLimit: 733 },
+  bigFive: { file: 'koott-letterhead-bigfive.pdf', note: false, bottomLimit: 718 },
+  kalyana: { file: 'koott-letterhead.pdf',         note: true,  bottomLimit: 733 },
+};
+const assetPath = (f) => path.join(__dirname, '..', '..', 'assets', f);
+const PAGE = { w: 595.5, h: 842.25 };
+const BOX_Y = 7.83;   // the letterhead MediaBox's y origin
 
 const C = {
-  green:     '#0B5345',   // header band, table heads
-  heading:   '#0E6B57',   // section headings
-  body:      '#2B2B2B',
-  muted:     '#6B6B6B',
-  page:      '#EFF6F0',   // pale green page
-  rule:      '#C9DDD2',
-  barTrack:  '#DCE8E0',
+  green:     '#01584A',   // title, section headings, score figures, facets
+  heading:   '#01584A',
+  body:      '#212121',   // description paragraphs
+  ink:       '#000000',   // detail labels and values, table head, severity, percentage
+  muted:     '#333333',   // the footer note
+  subtle:    '#666666',   // the Big Five report's trait contrast, e.g. "(Extraversion vs. ...)"
+  rule:      '#C9C9C9',
+  barTrack:  '#E8EEEA',
 };
-const M = { left: 50, right: 50, headerH: 70, footerH: 62, noteGap: 10 };
+
+/** Type sizes, in points, as used in the sample report. */
+const F = {
+  title: 17.33,
+  detail: 10,
+  scoresHeading: 12,
+  tableHead: 10,
+  row: 10,
+  scaleHeading: 10.67,
+  body: 9.33,
+  note: 6.67,
+};
+
+const M = {
+  left: 56.7,            // title, headings, descriptions and facets
+  right: 539.1,
+  detailLabel: 85.4,
+  detailValue: 198.7,
+  top: 87.4,             // first baseline block on every page
+  noteY: 744.9,          // the note sits above the letterhead's footer band
+  bottomLimit: 733,
+};
+M.contentW = M.right - M.left;
 
 /** StandardFonts are WinAnsi-only; participants type free text, so fold to a safe subset. */
 function safe(t) {
@@ -29,128 +70,126 @@ function safe(t) {
     .replace(/[‘’‛]/g, "'")
     .replace(/[“”]/g, '"')
     .replace(/…/g, '...')
-    .replace(/ /g, ' ')
-    .replace(/[^\x20-\xFF]/g, '');
+    .replace(/ /g, ' ')
+    // U+2022 sits above \xFF, but WinAnsi does carry a bullet (0x95) and pdfkit maps it, so it
+    // must survive the strip - it is the separator between facet names.
+    .replace(/[^\x20-\xFF•]/g, '');
 }
 
+/** Blank detail fields are ruled with underscores in the sample, not with a drawn line. */
+const BLANK = '_______________________________';
+
 class Report {
-  /** @param {{orientation?:'portrait'|'landscape', note:string}} opts */
-  constructor(opts) {
-    this.note = opts.note;
-    this.doc = new PDFDocument({
-      size: 'A4',
-      layout: opts.orientation || 'portrait',
-      margins: { top: 0, bottom: 0, left: 0, right: 0 },
-      autoFirstPage: false,
-      bufferPages: true,
-    });
+  constructor({ note, letterhead = 'dass21', leading = 12.7, paraGap = 1.9, facetGap = 8.3 } = {}) {
+    this.sheet = LETTERHEADS[letterhead] || LETTERHEADS.dass21;
+    this.note = this.sheet.note ? note : null;   // pre-printed sheets already carry it
+    this.leading = leading;
+    this.paraGap = paraGap;
+    this.facetGap = facetGap;
+    this.doc = new PDFDocument({ size: [PAGE.w, PAGE.h], margin: 0, bufferPages: true });
     this.chunks = [];
     this.doc.on('data', (c) => this.chunks.push(c));
-    this.W = (opts.orientation === 'landscape' ? 841.89 : 595.28);
-    this.H = (opts.orientation === 'landscape' ? 595.28 : 841.89);
-    this.contentW = this.W - M.left - M.right;
-    this.addPage();
+    this.y = M.top;
+    this.contentW = M.contentW;
+    this.bottomLimit = this.sheet.bottomLimit;
   }
 
-  get bottomLimit() { return this.H - M.footerH - 34; }
-
-  addPage() {
-    this.doc.addPage();
-    const d = this.doc;
-    d.rect(0, 0, this.W, this.H).fill(C.page);                       // page tint
-    // Header: a dark green trapezoid occupying the right of the band, its left edge sloping
-    // down-right, exactly as on the practice's letterhead and report templates.
-    d.moveTo(this.W * 0.625, 0)
-      .lineTo(this.W, 0)
-      .lineTo(this.W, M.headerH)
-      .lineTo(this.W * 0.735, M.headerH)
-      .closePath().fill(C.green);
-    d.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(23)
-      .text('koott', this.W - M.right - 150, M.headerH / 2 - 13, { width: 150, align: 'right' });
-    this.footer();
-    this.y = M.headerH + 32;
-    return this;
-  }
-
-  footer() {
-    const d = this.doc;
-    d.fillColor(C.muted).font('Helvetica').fontSize(6.4);
-    const noteH = d.heightOfString(safe(this.note), { width: this.contentW });
-    d.text(safe(this.note), M.left, this.H - M.footerH - noteH - M.noteGap, { width: this.contentW });
-    d.rect(0, this.H - M.footerH, this.W, M.footerH).fill(C.green);
-    d.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(12.5)
-      .text('Koott Care Private limited', M.left + 28, this.H - M.footerH + 17);
-    d.font('Helvetica').fontSize(8.5)
-      .text('Mini Bypass Rd, Puthiyara, Calicut, Kerala', M.left + 28, this.H - M.footerH + 35);
-    const rx = this.W * 0.56;
-    d.fontSize(9).text('+91 86060 40400', rx, this.H - M.footerH + 18);
-    d.text('care@koott.in', rx, this.H - M.footerH + 34);
-  }
+  addPage() { this.doc.addPage({ size: [PAGE.w, PAGE.h], margin: 0 }); this.y = M.top; return this; }
 
   /** Reserve vertical space, starting a new page if it will not fit. */
   need(h) { if (this.y + h > this.bottomLimit) this.addPage(); return this; }
 
-  title(main, sub) {
+  title(main) {
     this.need(46);
-    this.doc.fillColor(C.heading).font('Helvetica').fontSize(17).text(safe(main), M.left, this.y);
-    this.y += 23;
-    if (sub) {
-      this.doc.fillColor(C.muted).font('Helvetica').fontSize(10).text(safe(sub), M.left, this.y);
-      this.y += 16;
-    }
+    this.doc.fillColor(C.green).font('Helvetica-Bold').fontSize(F.title)
+      .text(safe(main), M.left, this.y, { lineBreak: false });
+    this.y += 25.3;
     return this;
   }
 
-  /** Name / date filled in; address, email, phone, DOB as ruled blanks for the clinician. */
-  details(fields, x = M.left + 60, width = 430) {
-    const d = this.doc, labelW = 120;
+  /** Name and date are filled in; the rest are ruled blanks for the clinician. */
+  details(fields) {
+    const d = this.doc;
     for (const [label, value] of fields) {
-      d.fillColor(C.body).font('Helvetica').fontSize(9.5).text(safe(label + ':'), x, this.y, { width: labelW });
-      if (value) d.text(safe(value), x + labelW + 18, this.y, { width: width - labelW - 18 });
-      else {
-        const ly = this.y + 10;
-        d.moveTo(x + labelW + 18, ly).lineTo(x + labelW + 18 + 215, ly).lineWidth(0.6).stroke(C.muted);
-      }
-      this.y += 18;
+      d.fillColor(C.ink).font('Helvetica-Bold').fontSize(F.detail)
+        .text(safe(label + ':'), M.detailLabel, this.y, { lineBreak: false });
+      d.font('Helvetica').text(safe(value || BLANK), M.detailValue, this.y, { lineBreak: false });
+      this.y += 15.75;
     }
     return this;
   }
 
-  rule(pad = 12) {
-    this.y += pad;
-    this.doc.moveTo(M.left, this.y).lineTo(this.W - M.right, this.y).lineWidth(0.7).stroke(C.rule);
-    this.y += pad;
+  rule(before = 4.8, after = 8.15, x0 = 65.8, x1 = 529.4) {
+    this.y += before;
+    this.doc.moveTo(x0, this.y).lineTo(x1, this.y).lineWidth(0.72).stroke(C.rule);
+    this.y += after;
     return this;
   }
 
-  heading(text, size = 12.5) {
-    this.need(size + 16);
-    this.doc.fillColor(C.heading).font('Helvetica').fontSize(size).text(safe(text), M.left, this.y);
-    this.y += size + 7;
+  heading(text, size = F.scaleHeading, gap = 16, subtitle) {
+    this.need(size + 20);
+    const d = this.doc;
+    d.fillColor(C.green).font('Helvetica-Bold').fontSize(size).text(safe(text), M.left, this.y, { lineBreak: false });
+    if (subtitle) {
+      const x = M.left + d.widthOfString(safe(text)) + 8.8;
+      d.fillColor(C.subtle).font('Helvetica').fontSize(F.body)
+        .text('(' + safe(subtitle) + ')', x, this.y + 1.3, { lineBreak: false });
+    }
+    this.y += gap;
     return this;
   }
 
-  para(text, { size = 9, color = C.body, indent = 0, gap = 5, font = 'Helvetica' } = {}) {
-    const w = this.contentW - indent;
-    const h = this.doc.font(font).fontSize(size).heightOfString(safe(text), { width: w });
+  para(text, { size = F.body, color = C.body, gap = this.paraGap, font = 'Helvetica', lineGap = this.leading - 10.6 } = {}) {
+    const w = this.contentW;
+    const opts = { width: w, lineGap };
+    const h = this.doc.font(font).fontSize(size).heightOfString(safe(text), opts);
     this.need(h);
-    this.doc.fillColor(color).text(safe(text), M.left + indent, this.y, { width: w });
+    this.doc.fillColor(color).text(safe(text), M.left, this.y, opts);
     this.y += h + gap;
     return this;
   }
 
-  /** Facet chips rendered as a single bullet-separated line, as in the templates. */
-  facets(list, color = C.heading) {
-    return this.para(list.join('  •  '), { size: 8.8, color, gap: 12 });
+  facets(list, color = C.green) {
+    return this.para(list.join(' • '), { size: F.body, color, gap: this.facetGap, font: 'Helvetica-BoldOblique' });
   }
 
-  end() {
-    return new Promise((resolve, reject) => {
-      this.doc.on('end', () => resolve(Buffer.concat(this.chunks)));
-      this.doc.on('error', reject);
-      this.doc.end();
-    });
+  /** The note is repeated on every page, just above the letterhead's footer band. */
+  drawNote() {
+    if (!this.note) return;
+    const d = this.doc, x = 42.7, w = PAGE.w - 2 * x;
+    const body = safe(this.note.replace(/^Note:\s*/, ''));
+    d.font('Helvetica').fontSize(F.note).fillColor(C.muted)
+      .text('Note: ' + body, x, M.noteY, { width: w, lineGap: 1.2 });
+    d.font('Helvetica-Bold').text('Note:', x, M.noteY, { lineBreak: false });
+  }
+
+  async end() {
+    const range = this.doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      this.doc.switchToPage(i);
+      this.drawNote();
+    }
+    this.doc.end();
+    const content = await new Promise((res) => this.doc.on('end', () => res(Buffer.concat(this.chunks))));
+    return stampOnLetterhead(content, this.sheet.file);
   }
 }
 
-module.exports = { Report, C, M, safe };
+/** Put each drawn page on top of the letterhead. */
+async function stampOnLetterhead(contentPdf, file) {
+  const letterhead = await LibPDF.load(fs.readFileSync(assetPath(file)));
+  const content = await LibPDF.load(contentPdf);
+  const out = await LibPDF.create();
+  const [bg] = await out.embedPdf(letterhead, [0]);
+  const pages = await out.embedPdf(content, content.getPageIndices());
+  for (const p of pages) {
+    const page = out.addPage([PAGE.w, PAGE.h]);
+    // The letterhead's own MediaBox starts at y=7.83, not 0. Stamping it onto a page that
+    // starts at 0 would lift the artwork by that much, so shift it back down.
+    page.drawPage(bg, { x: 0, y: -BOX_Y, width: PAGE.w, height: PAGE.h });
+    page.drawPage(p, { x: 0, y: 0, width: PAGE.w, height: PAGE.h });
+  }
+  return Buffer.from(await out.save());
+}
+
+module.exports = { Report, C, F, M, safe, PAGE };
