@@ -10,15 +10,20 @@ const NOTES = {
     'Note: The Big Five Personality Assessment provides insights into an individual’s personality traits and tendencies. However, the tool alone cannot provide a complete understanding of an individual’s personality or predict behaviour across all situations. You are advised to schedule a session with your therapist to review and interpret the results in the context of your personal experiences, behavioural patterns, and individual circumstances.',
   dass21:
     'Note: The DASS-21 is a screening and self-report measure of current emotional distress; it is not a diagnostic tool and cannot alone provide a complete understanding of an individual’s emotional state. You are advised to schedule a session with your therapist to review and interpret the results in the context of your personal experiences, behavioural patterns, and individual circumstances.',
+  // Verbatim from the text pre-printed on koott-letterhead-kalyana.pdf, so the sheet and
+  // any on-screen copy cannot drift apart. NOT drawn into the PDF (note: false).
   kalyana:
-    'Note: Kalyana Raman is a qualitative premarital readiness interview scale and guided-discussion framework. It is not a diagnostic instrument or a pass/fail test, and it does not produce a total score. The results are intended to guide conversation and should be interpreted by a qualified professional in the context of individual interviews and personal circumstances.',
+    'Note: The Kalyana Raman Premarital Readiness Assessment explores relationship expectations, personal values, and areas that may require further discussion before marriage. However, the assessment results alone cannot determine compatibility or reliably predict marital success. You are advised to schedule a session with your therapist for the triangulation process, during which your assessment results will be reviewed alongside your therapist\u2019s observations and relevant information gathered through professional discussion. This process aims to develop a more comprehensive understanding of your responses, identify areas of alignment or discrepancy, and highlight topics that may benefit from further exploration.',
 };
 
 /** Name and date are filled; the rest are ruled blanks unless supplied. */
+// The intake form now asks Name, Mobile, DOB and Sex and no longer asks for an address, so
+// the block mirrors what is actually collected. This is a deliberate departure from the
+// approved sample reports, which carry an Address row and no Sex row.
 const detailRows = (p) => ([
   ['Name', p.name || null],
   ['Date of assessment', p.date || null],
-  ['Address', p.address || null],
+  ['Sex', p.sex || null],
   ['Email ID', p.email || null],
   ['Phone number', p.phone || null],
   ['Date of birth', p.dob || null],
@@ -120,7 +125,7 @@ async function buildDass21Report({ participant, answers }) {
 
 /* ─────────────────── Kalyana Raman: Report 1 ─────────────────── */
 async function buildKalyanaResponsesReport({ participant, answers }) {
-  const r = new Report({ note: NOTES.kalyana });
+  const r = new Report({ letterhead: 'kalyana' });
   r.title('Kalyana Raman: Pre-Marital Readiness Assessment', 'Client Responses');
   r.details(detailRows(participant));
   r.rule();
@@ -141,4 +146,60 @@ async function buildKalyanaResponsesReport({ participant, answers }) {
   return r.end();
 }
 
-module.exports = { buildBigFiveReport, buildDass21Report, buildKalyanaResponsesReport, NOTES };
+/**
+ * Report 2 - Thematic Coding Summary (Reflexive Thematic Analysis).
+ *
+ * The domain column is filled in; Initial code / Emergent code / Underlying theme are left
+ * EMPTY on purpose. The manual is explicit that coding is the psychologist's judgement
+ * ("Make sure that any raw statements are not included in the interpretation of the
+ * assessor"), and that the tool must never produce a verdict or a score. Software cannot
+ * derive a theme from free text without inventing clinical opinion, so this prints the
+ * approved layout as a worksheet for the clinician to complete.
+ */
+async function buildKalyanaThemesReport({ participant }) {
+  const r = new Report({ letterhead: 'kalyana' });
+  r.title('Kalyana Raman: Pre-Marital Readiness Assessment',
+          'Thematic Coding Summary (Reflexive Thematic Analysis)');
+  r.details(detailRows(participant));
+
+  r.y += 12;
+  r.heading('Domain-wise Themes', F.scoresHeading, 14);
+
+  // Columns measured off Report2_Partner_A_Themes and shifted onto the house left margin,
+  // so this report lines up with Report 1 rather than with the mock-up's own margin.
+  const COLS = [
+    { x: 62.7,  w: 130 },   // Domain
+    { x: 198.8, w: 113 },   // Initial code
+    { x: 317.6, w: 108 },   // Emergent code
+    { x: 431.1, w: 108 },   // Underlying theme
+  ];
+  const SIZE = 8.6;
+  const HEADS = ['Domain', 'Initial code', 'Emergent code', 'Underlying theme'];
+
+  const headerRow = () => {
+    r.doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(SIZE);
+    HEADS.forEach((h, i) => r.doc.text(safe(h), COLS[i].x, r.y, { width: COLS[i].w }));
+    r.y += 14;
+    r.rule(0, 6, COLS[0].x, M.right);
+  };
+  headerRow();
+
+  KR_DOMAINS.forEach((domain, di) => {
+    const label = `${di + 1}. ${domain.title}`;
+    r.doc.font('Helvetica').fontSize(SIZE);
+    const h = Math.max(r.doc.heightOfString(safe(label), { width: COLS[0].w }), 22);
+    if (r.y + h + 8 > r.bottomLimit) { r.addPage(); headerRow(); }
+    r.doc.fillColor(C.ink).font('Helvetica').fontSize(SIZE)
+      .text(safe(label), COLS[0].x, r.y, { width: COLS[0].w });
+    // Columns 2-4 stay blank for the clinician.
+    r.y += h + 8;
+    r.rule(0, 6, COLS[0].x, M.right);
+  });
+  return r.end();
+}
+
+module.exports = {
+  buildBigFiveReport, buildDass21Report,
+  buildKalyanaResponsesReport, buildKalyanaThemesReport,
+  NOTES,
+};

@@ -6,18 +6,28 @@
  * ever need to be retained, that is a deliberate decision to take separately, with consent
  * and a retention period.
  */
+const fs = require('fs');
+const path = require('path');
 const emailService = require('../utils/emailService');
-const { buildBigFiveReport, buildDass21Report, buildKalyanaResponsesReport } = require('../utils/assessments/reports');
+const { buildBigFiveReport, buildDass21Report, buildKalyanaResponsesReport, buildKalyanaThemesReport } = require('../utils/assessments/reports');
 const { BFI_ITEMS, DASS_ITEMS, KR_DOMAINS } = require('../utils/assessments/instruments');
 
 /**
  * Who every assessment report goes to. Set ASSESSMENT_REPORT_EMAIL to a comma-separated list to
  * change this without a deploy; it replaces the defaults rather than adding to them.
  */
-const DEFAULT_RECIPIENTS = ['abhishekravi063@gmail.com', 'dr.aswathi.raman.koott@gmail.com'];
-const RECIPIENT = () => {
+const DEFAULT_RECIPIENTS = ['care@koott.in', 'dr.aswathi.raman.koott@gmail.com'];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/**
+ * The practice always gets a copy; the client gets one too when they gave a usable address.
+ * The client is listed first so the mail reads as theirs. A malformed address is dropped
+ * rather than failing the send - the practice copy still has to go out.
+ */
+const RECIPIENT = (clientEmail) => {
   const override = (process.env.ASSESSMENT_REPORT_EMAIL || '').split(',').map((e) => e.trim()).filter(Boolean);
-  return (override.length ? override : DEFAULT_RECIPIENTS).join(', ');
+  const practice = override.length ? override : DEFAULT_RECIPIENTS;
+  const client = typeof clientEmail === 'string' && EMAIL_RE.test(clientEmail.trim()) ? [clientEmail.trim()] : [];
+  return [...new Set([...client, ...practice])].join(', ');
 };
 
 // Every date in a report is a date in India, never UTC. A bare 'YYYY-MM-DD' from a date input
@@ -62,13 +72,14 @@ function participantFrom(body) {
     address: clean(body.address, 200),
     email: clean(body.email),
     phone: clean(body.phone, 40),
+    sex: clean(body.sex, 40),
     dob: asDate(body.dob) || clean(body.dob, 40),
   };
 }
 
-async function deliver({ res, subject, intro, filename, buffer, participant, consent }) {
+async function deliver({ res, subject, intro, filename, buffer, participant, consent, extras = [] }) {
   await emailService.sendCustomEmail({
-    to: RECIPIENT(),
+    to: RECIPIENT(participant.email),
     subject,
     html: `<div style="font-family:Arial,sans-serif;max-width:600px;color:#333;line-height:1.6">
              <h2 style="color:#025545;margin:0 0 10px">${intro}</h2>
@@ -76,9 +87,14 @@ async function deliver({ res, subject, intro, filename, buffer, participant, con
              ${consent ? `<p style="font-size:13px;color:#666"><b>Consent:</b> given online before the
                questionnaire was shown, ${fmtIstStamp(consent.agreedAt)} IST. Use of anonymised
                information (section ${consent.choiceSection}): <b>${consent.anonymisedUse === 'agree' ? 'agreed' : 'not agreed'}</b>.</p>` : ''}
-             <p>The report is attached as a PDF.</p>
+             <p>${extras.length
+               ? `Attached: the client's responses, plus ${extras.length} blank worksheet${extras.length > 1 ? 's' : ''} for the coding and couple comparison.`
+               : 'The report is attached as a PDF.'}</p>
            </div>`,
-    attachments: [{ filename, content: buffer, contentType: 'application/pdf' }],
+    attachments: [
+      { filename, content: buffer, contentType: 'application/pdf' },
+      ...extras.map((e) => ({ filename: e.filename, content: e.content, contentType: 'application/pdf' })),
+    ],
   });
   return res.json({ success: true, message: 'Your responses have been submitted. The report has been sent.' });
 }
@@ -153,7 +169,28 @@ async function submitKalyanaRaman(req, res) {
     const partner = req.body?.partner === 'B' ? 'B' : 'A';
     const participant = participantFrom(req.body);
     const buffer = await buildKalyanaResponsesReport({ participant, answers });
-    return deliver({ res, participant, buffer,
+
+    // Reports 2 and 3 go out as BLANK worksheets, not as generated analysis. The manual puts
+    // the coding (initial -> emergent -> underlying theme) and the couple comparison squarely
+    // with the psychologist, and forbids the tool producing a verdict or score, so software
+    // must not fill these in. Report 3 is a static landscape sheet stripped from the approved
+    // sample; it also sidesteps the fact that nothing is stored, so one partner's submission
+    // can never see the other's.
+    const extras = [];
+    try {
+      const themes = await buildKalyanaThemesReport({ participant });
+      extras.push({ filename: `Kalyana-Raman-Partner-${partner}-themes-worksheet.pdf`, content: themes });
+      const tpl = path.join(__dirname, '..', 'assets', 'kalyana-couple-comparison-template.pdf');
+      if (fs.existsSync(tpl)) {
+        extras.push({ filename: 'Kalyana-Raman-couple-comparison-template.pdf', content: fs.readFileSync(tpl) });
+      }
+    } catch (e) {
+      // A worksheet failing must never cost the client their submission.
+      console.error('[assessment/kalyana-raman] worksheet attach failed:', e.message);
+    }
+
+    // Section 8 carries the either/or choice on the Kalyana form (DASS uses 7, Big Five 6).
+    return deliver({ res, participant, buffer, extras, consent: consentFrom(req.body, 8),
       subject: `Kalyana Raman - Partner ${partner} responses - ${participant.name}`,
       intro: `Kalyana Raman - Partner ${partner} submission`,
       filename: `Kalyana-Raman-Partner-${partner}-${participant.name.replace(/[^\w]+/g, '-')}.pdf` });

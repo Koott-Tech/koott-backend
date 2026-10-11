@@ -23,7 +23,10 @@ const path = require('path');
 const LETTERHEADS = {
   dass21:  { file: 'koott-letterhead.pdf',         note: true,  bottomLimit: 733 },
   bigFive: { file: 'koott-letterhead-bigfive.pdf', note: false, bottomLimit: 718 },
-  kalyana: { file: 'koott-letterhead.pdf',         note: true,  bottomLimit: 733 },
+  // The Kalyana sheet carries its own note, and it is five lines rather than three, so
+  // the body has to stop higher than on the other two. Note top measured at y=705.5;
+  // 693 keeps the same ~12pt clearance Big Five uses.
+  kalyana: { file: 'koott-letterhead-kalyana.pdf', note: false, bottomLimit: 693 },
 };
 const assetPath = (f) => path.join(__dirname, '..', '..', 'assets', f);
 const PAGE = { w: 595.5, h: 842.25 };
@@ -48,6 +51,7 @@ const F = {
   tableHead: 10,
   row: 10,
   scaleHeading: 10.67,
+  subtitle: 10.67,      // "Client Responses" under the Kalyana title
   body: 9.33,
   note: 6.67,
 };
@@ -99,11 +103,23 @@ class Report {
   /** Reserve vertical space, starting a new page if it will not fit. */
   need(h) { if (this.y + h > this.bottomLimit) this.addPage(); return this; }
 
-  title(main) {
-    this.need(46);
+  /**
+   * Report title, with an optional second line.
+   *
+   * The Kalyana builders pass a subtitle ("Client Responses", "Thematic Coding Summary") and
+   * it was being silently dropped, because this only ever accepted one argument — which also
+   * left the details block ~15pt high against the sample. DASS and Big Five pass no subtitle
+   * and keep the original single-line spacing exactly.
+   */
+  title(main, subtitle) {
+    this.need(subtitle ? 64 : 46);
     this.doc.fillColor(C.green).font('Helvetica-Bold').fontSize(F.title)
       .text(safe(main), M.left, this.y, { lineBreak: false });
-    this.y += 25.3;
+    if (!subtitle) { this.y += 25.3; return this; }
+    this.y += 18.7;
+    this.doc.fillColor(C.green).font('Helvetica').fontSize(F.subtitle)
+      .text(safe(subtitle), M.left, this.y, { lineBreak: false });
+    this.y += 20.0;
     return this;
   }
 
