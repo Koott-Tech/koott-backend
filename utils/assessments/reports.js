@@ -2,6 +2,8 @@
  * Report builders. Each returns a PDF Buffer and writes nothing to disk or storage —
  * the buffer is attached to an email and then discarded.
  */
+const fs = require('fs');
+const path = require('path');
 const { Report, C, F, M, safe } = require('./reportTheme');
 const { scoreBigFive, scoreDass21, KR_DOMAINS } = require('./instruments');
 
@@ -156,7 +158,49 @@ async function buildKalyanaResponsesReport({ participant, answers }) {
  * derive a theme from free text without inventing clinical opinion, so this prints the
  * approved layout as a worksheet for the clinician to complete.
  */
-async function buildKalyanaThemesReport({ participant }) {
+/**
+ * The initial (descriptive) code is "the person's actual words" per the manual, condensed.
+ * The sample carries a few short phrases per domain, not whole sentences, and the whole table
+ * has to fit one page - so each answer is reduced to its opening clause and clipped.
+ * Nothing is reworded: every fragment is text the client wrote.
+ */
+const CLAUSE_MAX = 44;
+const CELL_MAX = 108;
+function clampLines(doc, text, width, maxLines, size) {
+  if (!text) return text;
+  doc.font('Helvetica').fontSize(size);
+  const limit = doc.currentLineHeight() * maxLines + 0.5;
+  if (doc.heightOfString(safe(text), { width }) <= limit) return text;
+  let out = text;
+  while (out.length > 1) {
+    const cut = out.lastIndexOf(' ');
+    out = (cut > 0 ? out.slice(0, cut) : out.slice(0, -1)).replace(/[\s;,.]+$/, '');
+    if (doc.heightOfString(safe(out + '\u2026'), { width }) <= limit) return out + '\u2026';
+  }
+  return out;
+}
+
+function initialCode(domainAnswers) {
+  const parts = [];
+  for (const raw of domainAnswers || []) {
+    let t = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!t) continue;
+    t = t.split(/[,.;:!?]/)[0].trim();                        // opening clause only
+    if (t.length > CLAUSE_MAX) {
+      const cut = t.slice(0, CLAUSE_MAX);
+      t = cut.slice(0, cut.lastIndexOf(' ') > 12 ? cut.lastIndexOf(' ') : CLAUSE_MAX) + '\u2026';
+    }
+    if (t) parts.push(t);
+  }
+  let out = parts.join('; ');
+  if (out.length > CELL_MAX) {
+    const cut = out.slice(0, CELL_MAX);
+    out = cut.slice(0, cut.lastIndexOf(' ')) + '\u2026';
+  }
+  return out;
+}
+
+async function buildKalyanaThemesReport({ participant, answers = [] }) {
   const r = new Report({ letterhead: 'kalyana' });
   r.title('Kalyana Raman: Pre-Marital Readiness Assessment',
           'Thematic Coding Summary (Reflexive Thematic Analysis)');
@@ -165,41 +209,125 @@ async function buildKalyanaThemesReport({ participant }) {
   r.y += 12;
   r.heading('Domain-wise Themes', F.scoresHeading, 14);
 
-  // Columns measured off Report2_Partner_A_Themes and shifted onto the house left margin,
-  // so this report lines up with Report 1 rather than with the mock-up's own margin.
-  const COLS = [
-    { x: 62.7,  w: 130 },   // Domain
-    { x: 198.8, w: 113 },   // Initial code
-    { x: 317.6, w: 108 },   // Emergent code
-    { x: 431.1, w: 108 },   // Underlying theme
-  ];
-  const SIZE = 8.6;
+  // Laid out to the approved sample: a green header band, ruled cells and alternating
+  // row fill. Columns measured off Report2_Partner_A_Themes at 892/595.276 scale.
+  const X = [57.4, 193.5, 312.3, 425.8, 540.0];
   const HEADS = ['Domain', 'Initial code', 'Emergent code', 'Underlying theme'];
+  const SIZE = 7.8;
+  const PAD = 4;
+  const HEAD_H = 17;
 
-  const headerRow = () => {
-    r.doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(SIZE);
-    HEADS.forEach((h, i) => r.doc.text(safe(h), COLS[i].x, r.y, { width: COLS[i].w }));
-    r.y += 14;
-    r.rule(0, 6, COLS[0].x, M.right);
+  const headerBand = () => {
+    r.doc.rect(X[0], r.y, X[4] - X[0], HEAD_H).fill(C.green);
+    r.doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(SIZE);
+    HEADS.forEach((h, i) => r.doc.text(safe(h), X[i] + PAD, r.y + 5, { width: X[i + 1] - X[i] - PAD * 2 }));
+    r.y += HEAD_H;
   };
-  headerRow();
+  headerBand();
 
   KR_DOMAINS.forEach((domain, di) => {
     const label = `${di + 1}. ${domain.title}`;
+    // The initial/descriptive code is "the person's actual words" (manual), condensed to the
+    // opening clause of each answer so the row stays the size the sample shows. The emergent
+    // code and the underlying theme are the psychologist's reading and are left empty.
     r.doc.font('Helvetica').fontSize(SIZE);
-    const h = Math.max(r.doc.heightOfString(safe(label), { width: COLS[0].w }), 22);
-    if (r.y + h + 8 > r.bottomLimit) { r.addPage(); headerRow(); }
+    const cellW = (i) => X[i + 1] - X[i] - PAD * 2;
+    // Clamp by measured height, not character count: the sample puts all ten domains on one
+    // page, so no cell may run past three lines however much the client wrote.
+    const code = clampLines(r.doc, initialCode(answers[di]), cellW(1), 3, SIZE);
+    const h = Math.max(
+      r.doc.heightOfString(safe(label), { width: cellW(0) }),
+      code ? r.doc.heightOfString(safe(code), { width: cellW(1) }) : 0,
+      22) + PAD * 2;
+
+    if (r.y + h > r.bottomLimit) { r.addPage(); headerBand(); }
+
+    if (di % 2 === 1) r.doc.rect(X[0], r.y, X[4] - X[0], h).fill('#F2F7F4');
+    r.doc.lineWidth(0.5).strokeColor(C.rule);
+    r.doc.rect(X[0], r.y, X[4] - X[0], h).stroke();
+    for (let i = 1; i < 4; i++) r.doc.moveTo(X[i], r.y).lineTo(X[i], r.y + h).stroke();
+
     r.doc.fillColor(C.ink).font('Helvetica').fontSize(SIZE)
-      .text(safe(label), COLS[0].x, r.y, { width: COLS[0].w });
-    // Columns 2-4 stay blank for the clinician.
-    r.y += h + 8;
-    r.rule(0, 6, COLS[0].x, M.right);
+      .text(safe(label), X[0] + PAD, r.y + PAD, { width: cellW(0) });
+    if (code) {
+      r.doc.text(safe(code), X[1] + PAD, r.y + PAD, { width: cellW(1) });
+    }
+    // The emergent code and the underlying theme are the psychologist's reading, so they are
+    // left for them to complete. Saying so stops an intentionally blank cell looking broken.
+    if (di === 0) {
+      r.doc.fillColor('#9AA5A0').font('Helvetica-Oblique').fontSize(SIZE - 0.6);
+      [2, 3].forEach((i) => r.doc.text('to be completed by the psychologist',
+        X[i] + PAD, r.y + PAD, { width: cellW(i) }));
+      r.doc.fillColor(C.ink).font('Helvetica').fontSize(SIZE);
+    }
+    r.y += h;
   });
   return r.end();
 }
 
+/**
+ * Report 3 is the approved landscape comparison sheet. It compares two people, and nothing is
+ * stored, so one submission can only ever fill its own side: this stamps the submitting
+ * partner's details onto their column and leaves the other partner's column, the key-theme
+ * columns and the comparison for the psychologist to complete with both sets of answers.
+ *
+ * Measured off assets/kalyana-couple-comparison-template.pdf.
+ */
+const CMP = {
+  page: { w: 841.89, h: 595.276 },
+  valueX: { A: 158.8, B: 529.0 },
+  rowsY: [152.1, 167.4, 182.8, 198.1, 214.1, 229.5],   // Name .. Date of birth
+  size: 6.67,
+  width: 164.1,
+  bg: { r: 243 / 255, g: 251 / 255, b: 239 / 255 },     // the sheet's own page colour
+};
+
+async function buildKalyanaComparisonSheet({ participant, partner = 'A', other = null }) {
+  const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+  const file = path.join(__dirname, '..', '..', 'assets', 'kalyana-couple-comparison-template.pdf');
+  const doc = await PDFDocument.load(fs.readFileSync(file));
+  const page = doc.getPage(0);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+
+  const mine = partner === 'B' ? 'B' : 'A';
+  const sides = [[mine, participant]];
+  // Once the other partner has submitted, their column is filled too and the sheet becomes a
+  // real couple comparison rather than one half of one.
+  if (other) {
+    sides.push([mine === 'A' ? 'B' : 'A', {
+      name: other.name, date: other.assessment_date, address: other.address,
+      email: other.email, phone: other.phone, dob: other.dob,
+    }]);
+  }
+
+  for (const [side, person] of sides) fillSide(page, font, rgb, side, person);
+  return Buffer.from(await doc.save());
+}
+
+function fillSide(page, font, rgb, side, person) {
+  const values = [person.name, person.date, person.address, person.email, person.phone, person.dob];
+  const x = CMP.valueX[side];
+
+  values.forEach((v, i) => {
+    const text = safe(v || '').trim();
+    if (!text) return;                                   // leave the ruled blank as it is
+    const top = CMP.rowsY[i];
+    // Cover the printed underscores before writing, or the value sits on top of them.
+    page.drawRectangle({
+      x: x - 1, y: CMP.page.h - top - CMP.size - 2.2, width: CMP.width + 2, height: CMP.size + 4,
+      color: rgb(CMP.bg.r, CMP.bg.g, CMP.bg.b),
+    });
+    let out = text;
+    while (out.length > 1 && font.widthOfTextAtSize(out, CMP.size) > CMP.width) out = out.slice(0, -1);
+    page.drawText(out, {
+      x, y: CMP.page.h - top - CMP.size * 0.718 - 1.2,
+      size: CMP.size, font, color: rgb(0.2, 0.2, 0.2),
+    });
+  });
+}
+
 module.exports = {
   buildBigFiveReport, buildDass21Report,
-  buildKalyanaResponsesReport, buildKalyanaThemesReport,
+  buildKalyanaResponsesReport, buildKalyanaThemesReport, buildKalyanaComparisonSheet,
   NOTES,
 };

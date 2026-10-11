@@ -30,7 +30,6 @@ const LETTERHEADS = {
 };
 const assetPath = (f) => path.join(__dirname, '..', '..', 'assets', f);
 const PAGE = { w: 595.5, h: 842.25 };
-const BOX_Y = 7.83;   // the letterhead MediaBox's y origin
 
 const C = {
   green:     '#01584A',   // title, section headings, score figures, facets
@@ -75,9 +74,12 @@ function safe(t) {
     .replace(/[“”]/g, '"')
     .replace(/…/g, '...')
     .replace(/ /g, ' ')
+    // Participants type multi-line answers and the worksheets stack Q1/Q2/Q3 in one cell,
+    // so newlines have to survive the strip; pdfkit breaks lines on them.
+    .replace(/\r\n?/g, '\n')
     // U+2022 sits above \xFF, but WinAnsi does carry a bullet (0x95) and pdfkit maps it, so it
     // must survive the strip - it is the separator between facet names.
-    .replace(/[^\x20-\xFF•]/g, '');
+    .replace(/[^\x20-\xFF•\n]/g, '');
 }
 
 /** Blank detail fields are ruled with underscores in the sample, not with a drawn line. */
@@ -196,14 +198,21 @@ async function stampOnLetterhead(contentPdf, file) {
   const letterhead = await LibPDF.load(fs.readFileSync(assetPath(file)));
   const content = await LibPDF.load(contentPdf);
   const out = await LibPDF.create();
-  const [bg] = await out.embedPdf(letterhead, [0]);
   const pages = await out.embedPdf(content, content.getPageIndices());
-  for (const p of pages) {
-    const page = out.addPage([PAGE.w, PAGE.h]);
-    // The letterhead's own MediaBox starts at y=7.83, not 0. Stamping it onto a page that
-    // starts at 0 would lift the artwork by that much, so shift it back down.
-    page.drawPage(bg, { x: 0, y: -BOX_Y, width: PAGE.w, height: PAGE.h });
-    page.drawPage(p, { x: 0, y: 0, width: PAGE.w, height: PAGE.h });
+
+  // Build on a real copy of the letterhead page rather than stamping it onto a blank one.
+  // Its MediaBox starts at y=7.83 and its artwork is 7.83pt shorter than that box, so drawing
+  // it as a form always leaves an uncovered strip at one edge - a white band above the header
+  // at one offset, below the footer at another. Copying the page keeps the sheet exactly as
+  // designed, edges included.
+  const sheets = await out.copyPages(letterhead, pages.map(() => 0));
+
+  for (let i = 0; i < pages.length; i++) {
+    const page = out.addPage(sheets[i]);
+    const { y: boxY, height } = page.getMediaBox();
+    // The drawn content is laid out on a page running 0..842.25; line its top edge up with
+    // the top of the sheet so "distance from the top" is unchanged.
+    page.drawPage(pages[i], { x: 0, y: boxY + height - PAGE.h, width: PAGE.w, height: PAGE.h });
   }
   return Buffer.from(await out.save());
 }
