@@ -50,6 +50,16 @@ function normalizedFullName(firstName, lastName) {
 function nameWords(value) {
   return stripTitles(value).toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
 }
+// A trailing single letter is an initial, not a surname: Wix sent "Jerin Abraham K" for the
+// profile "Jerin Abraham", and requiring the LAST words to agree rejected it ("abraham" vs
+// "k") - so a second, email-less profile was created. Drop trailing initials before the
+// first/last comparison. Never drop below two words, so "Rajina R" keeps its initial and
+// cannot collapse into every other "Rajina".
+function dropTrailingInitials(words) {
+  const out = words.slice();
+  while (out.length > 2 && out[out.length - 1].length === 1) out.pop();
+  return out;
+}
 function sameTherapistName(aFull, bFull) {
   const a = nameWords(aFull), b = nameWords(bFull);
   if (!a.length || !b.length) return false;
@@ -57,9 +67,11 @@ function sameTherapistName(aFull, bFull) {
   const [shortName, longName] = a.length <= b.length ? [a, b] : [b, a];
   if (shortName.length < 2) return false; // a lone first name is not enough to merge on
   const inLong = new Set(longName);
-  return shortName.every((w) => inLong.has(w))
-    && shortName[0] === longName[0]
-    && shortName[shortName.length - 1] === longName[longName.length - 1];
+  if (!shortName.every((w) => inLong.has(w))) return false;
+  const sEnds = dropTrailingInitials(shortName);
+  const lEnds = dropTrailingInitials(longName);
+  return sEnds[0] === lEnds[0]
+    && sEnds[sEnds.length - 1] === lEnds[lEnds.length - 1];
 }
 
 function psychologistNameMatches(row, targetFullName) {
