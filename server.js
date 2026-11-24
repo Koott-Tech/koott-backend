@@ -10,6 +10,7 @@ const {
 const securityMonitor = require('./utils/securityMonitor');
 // Load .env from backend directory so it works regardless of where you run the server from
 const path = require('path');
+const crypto = require('crypto');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 // Bandwidth audit — entirely inert unless BANDWIDTH_AUDIT=true. Required immediately after
@@ -466,9 +467,24 @@ app.get('/api/public/psychologists', async (req, res) => {
       .filter(Boolean);
 
     // Set cache headers for egress reduction (5 minutes browser cache, 1 hour CDN)
+    //
+    // BANDWIDTH: the ETag identifies the DATA, not the moment. It used to be
+    // `psychologists-${Date.now()}`, which differed on every response and so could never match
+    // an If-None-Match — the full list was re-sent even when nothing about it had changed.
+    //
+    // Hashed over the therapist payload ALONE. `cache_version` below is a bare Date.now() that
+    // moves every response; folding it in would reintroduce exactly the bug being fixed. That
+    // is safe because the client only ever stores that value — the staleness check reads the
+    // separate /public/psychologists/cache-version endpoint and compares against THAT, so a 304
+    // leaving the client holding a slightly older cache_version changes nothing it does.
+    const etag = crypto
+      .createHash('sha1')
+      .update(JSON.stringify(formattedPsychologists))
+      .digest('hex');
+
     res.set({
       'Cache-Control': 'public, max-age=300, s-maxage=3600',
-      'ETag': `"psychologists-${Date.now()}"`
+      'ETag': `"psychologists-${etag}"`
     });
 
     res.json({

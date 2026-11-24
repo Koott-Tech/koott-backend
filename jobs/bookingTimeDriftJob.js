@@ -52,36 +52,57 @@ async function fetchAllPages(build) {
 /**
  * Find live bookings whose mirror time disagrees with their session time.
  * @returns {Promise<{ drift: Array, scanned: number, error: Error|null }>}
+ *   `scanned` counts the live mirror rows behind UPCOMING sessions — the rows actually capable
+ *   of drifting. It used to count every live mirror row in the table, so the number in the log
+ *   is smaller than it was; the alerts it reports are unchanged.
  */
 async function findBookingTimeDrift() {
-  const { data: mirrors, error: mErr } = await fetchAllPages(() =>
+  const todayIst = new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+
+  // BANDWIDTH: this starts from the sessions, not from the mirror.
+  //
+  // It used to page through EVERY row of wix_bookings — the entire booking history — and then
+  // discard everything before today at the `scheduled_date` guard below. Forty-eight times a
+  // day. The guard decides the result on the SESSION's date, so the sessions dated today or
+  // later are already the whole search space: anything the old order read beyond that could
+  // never have produced an alert.
+  //
+  // Note the date filter belongs HERE and not on the mirror. Filtering wix_bookings by
+  // start_time would drop precisely the case this job exists to catch — a session moved to next
+  // week while its mirror row still carries last month's time.
+  //
+  // Status is deliberately NOT filtered in SQL. The checks below lowercase it first, so a row
+  // stored as 'Booked' would be silently skipped by an `.in()` on lowercase values.
+  const { data: upcoming, error: sErr } = await fetchAllPages(() =>
     supabaseAdmin
-      .from('wix_bookings')
-      .select('wix_booking_id, start_time, status, client_email, therapist_name')
+      .from('sessions')
+      .select('id, wix_booking_id, scheduled_date, scheduled_time, status, psychologist_id')
+      .gte('scheduled_date', todayIst)
+      .not('wix_booking_id', 'is', null)
       .order('id', { ascending: true })
   );
-  if (mErr) return { drift: [], scanned: 0, error: mErr };
+  if (sErr) return { drift: [], scanned: 0, error: sErr };
+
+  const byBooking = {};
+  (upcoming || []).forEach((s) => { if (s.wix_booking_id) byBooking[s.wix_booking_id] = s; });
+
+  // Chunked: a single .in() with thousands of ids overflows the PostgREST GET URL and comes
+  // back as "Bad Request" — which, if the error were ignored, would read as "no drift found".
+  const ids = Object.keys(byBooking);
+  const mirrors = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await supabaseAdmin
+      .from('wix_bookings')
+      .select('wix_booking_id, start_time, status, client_email, therapist_name')
+      .in('wix_booking_id', ids.slice(i, i + 100));
+    if (error) return { drift: [], scanned: 0, error };
+    mirrors.push(...(data || []));
+  }
 
   const live = (mirrors || []).filter(
     (m) => m.wix_booking_id && m.start_time && !DEAD_MIRROR_STATUS.has(String(m.status || '').toLowerCase())
   );
 
-  // Chunked: a single .in() with thousands of ids overflows the PostgREST GET URL and comes
-  // back as "Bad Request" — which, if the error were ignored, would read as "no drift found".
-  const ids = live.map((m) => m.wix_booking_id);
-  const sessions = [];
-  for (let i = 0; i < ids.length; i += 100) {
-    const { data, error } = await supabaseAdmin
-      .from('sessions')
-      .select('id, wix_booking_id, scheduled_date, scheduled_time, status, psychologist_id')
-      .in('wix_booking_id', ids.slice(i, i + 100));
-    if (error) return { drift: [], scanned: 0, error };
-    sessions.push(...(data || []));
-  }
-  const byBooking = {};
-  sessions.forEach((s) => { if (s.wix_booking_id) byBooking[s.wix_booking_id] = s; });
-
-  const todayIst = new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
   const drift = [];
   for (const m of live) {
     const s = byBooking[m.wix_booking_id];
@@ -155,7 +176,7 @@ async function runBookingTimeDriftCheck({ alert = true } = {}) {
     return { drift: [], scanned: 0, error };
   }
   if (!drift.length) {
-    console.log(`${LOG_PREFIX} ✅ ${scanned} live booking(s) checked, no time drift (${Date.now() - started}ms)`);
+    console.log(`${LOG_PREFIX} ✅ ${scanned} upcoming booking(s) checked, no time drift (${Date.now() - started}ms)`);
     return { drift, scanned, error: null };
   }
   console.error(`${LOG_PREFIX} 🚨 ${drift.length} booking(s) disagree with their own calendar:`);
